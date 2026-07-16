@@ -67,6 +67,11 @@ class SettingsUpdate(BaseModel):
     settings: dict[str, Any]
 
 
+class QueueAdd(BaseModel):
+    project_id: int
+    config: Optional[RunConfig] = None
+
+
 class Status(BaseModel):
     project: Project
     active_run: Optional[Run] = None

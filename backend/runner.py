@@ -123,3 +123,69 @@ class RunManager:
             return False
         h.orch.cancel()
         return True
+
+
+class QueueRunner:
+    """单任务队列：顺序运行多个项目；当前项目完成/阻塞/取消后继续下一个。"""
+
+    def __init__(self, db: Database, manager: "RunManager"):
+        self.db = db
+        self.manager = manager
+        self._queue: list[tuple[int, RunConfig]] = []
+        self._lock = threading.RLock()  # 可重入：start() 持锁时调用 is_running()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def add(self, project_id: int, config: RunConfig) -> int:
+        with self._lock:
+            self._queue.append((project_id, config))
+            return len(self._queue)
+
+    def list(self) -> list:
+        with self._lock:
+            return [{"position": i + 1, "project_id": pid} for i, (pid, _) in enumerate(self._queue)]
+
+    def remove(self, position: int) -> bool:
+        with self._lock:
+            if 1 <= position <= len(self._queue):
+                self._queue.pop(position - 1)
+                return True
+            return False
+
+    def clear(self) -> None:
+        with self._lock:
+            self._queue.clear()
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> bool:
+        with self._lock:
+            if self.is_running():
+                return False
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True, name="queue")
+            self._thread.start()
+            return True
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                if not self._queue:
+                    break
+                project_id, config = self._queue.pop(0)
+            if self.manager.is_running(project_id):
+                continue
+            try:
+                run_id = self.manager.start(project_id, config)
+            except (KeyError, RuntimeError):
+                continue
+            while not self._stop.is_set():
+                run = self.db.get_run(run_id)
+                if not run or run["status"] != "running":
+                    break
+                time.sleep(1.0)

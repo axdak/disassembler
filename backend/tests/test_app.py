@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 
@@ -138,3 +139,80 @@ def test_ws_accepts_valid_token(client):
     # 进入 with 即完成握手并被 accept；错误 token 会在进入时抛异常
     with client.websocket_connect("/ws/events?token=sekret"):
         pass
+
+
+# ---- 章节状态 / 产物预览 / 日志 ----
+
+def _make_project_with_chapters(root):
+    (root / "原文拆解").mkdir(parents=True)
+    (root / "章节处理").mkdir(parents=True)
+    (root / "原文拆解" / "_索引.json").write_text(
+        json.dumps({"chapters": [{"seq": 1, "filename": "第001章_测试.md", "title": "测试"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (root / "章节处理" / "第001章_测试.md").write_text("# analysis", encoding="utf-8")
+
+
+def test_chapters_status(client, auth, tmp_path):
+    proj = tmp_path / "proj"
+    _make_project_with_chapters(proj)
+    pid = client.post("/projects", json={"path": str(proj)}, headers=auth).json()["id"]
+    ch = client.get(f"/projects/{pid}/chapters", headers=auth).json()[0]
+    assert ch["seq"] == 1
+    assert ch["has_analysis"] is True
+    assert ch["has_delta"] is False
+
+
+def test_artifact_preview_and_traversal(client, auth, tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "全书分析").mkdir(parents=True)
+    (proj / "全书分析" / "note.md").write_text("# hi", encoding="utf-8")
+    pid = client.post("/projects", json={"path": str(proj)}, headers=auth).json()["id"]
+    r = client.get(f"/projects/{pid}/artifact", params={"path": "全书分析/note.md"}, headers=auth)
+    assert r.status_code == 200
+    assert "# hi" in r.json()["content"]
+    # 目录穿越被拒绝
+    r = client.get(f"/projects/{pid}/artifact", params={"path": "../../etc/passwd"}, headers=auth)
+    assert r.status_code == 404
+
+
+def test_logs(client, auth, tmp_path):
+    proj = tmp_path / "proj"
+    ldir = proj / "质量治理" / "worker日志"
+    ldir.mkdir(parents=True)
+    (ldir / "analysis_20260101_000000.txt").write_text("worker log content", encoding="utf-8")
+    pid = client.post("/projects", json={"path": str(proj)}, headers=auth).json()["id"]
+    lst = client.get(f"/projects/{pid}/logs", headers=auth).json()
+    assert lst and lst[0]["name"].endswith(".txt")
+    r = client.get(f"/projects/{pid}/logs/analysis_20260101_000000.txt", headers=auth)
+    assert "worker log content" in r.json()["content"]
+
+
+# ---- 单任务队列 ----
+
+def test_queue_runs_projects_sequentially(client, auth, tmp_path):
+    p1 = client.post("/projects", json={"path": str(tmp_path / "p1")}, headers=auth).json()["id"]
+    p2 = client.post("/projects", json={"path": str(tmp_path / "p2")}, headers=auth).json()["id"]
+    assert client.post("/queue", json={"project_id": p1}, headers=auth).json()["position"] == 1
+    assert client.post("/queue", json={"project_id": p2}, headers=auth).json()["position"] == 2
+    assert len(client.get("/queue", headers=auth).json()) == 2
+    assert client.post("/queue/start", headers=auth).json()["started"] is True
+
+    def run_done(pid):
+        ev = client.get(f"/projects/{pid}/events", headers=auth).json()
+        return any(e["type"] == "run_status" and e["detail"] == "done" for e in ev)
+
+    deadline = time.time() + 10
+    while time.time() < deadline and not (run_done(p1) and run_done(p2)):
+        time.sleep(0.1)
+    assert run_done(p1) and run_done(p2)
+    assert client.get("/queue", headers=auth).json() == []  # 队列耗尽
+
+
+def test_queue_remove(client, auth, tmp_path):
+    p1 = client.post("/projects", json={"path": str(tmp_path / "p1")}, headers=auth).json()["id"]
+    p2 = client.post("/projects", json={"path": str(tmp_path / "p2")}, headers=auth).json()["id"]
+    client.post("/queue", json={"project_id": p1}, headers=auth)
+    client.post("/queue", json={"project_id": p2}, headers=auth)
+    assert client.delete("/queue/1", headers=auth).json()["removed"] is True
+    assert client.get("/queue", headers=auth).json()[0]["project_id"] == p2

@@ -25,3 +25,29 @@ export interface Status {
   last_error: string | null
   recent_events: StageEvent[]
 }
+
+export interface Chapter {
+  seq: number | null
+  filename: string
+  title: string
+  has_analysis: boolean
+  has_delta: boolean
+}
+
+export interface Artifact {
+  path: string
+  size: number
+  truncated: boolean
+  content: string
+}
+
+export interface LogEntry {
+  name: string
+  size: number
+  mtime: number
+}
+
+export interface QueueItem {
+  position: number
+  project_id: number
+}

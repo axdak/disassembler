@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } from 'electron'
 import { join, resolve } from 'path'
 import { spawn, type ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'node:stream'
@@ -12,6 +12,8 @@ const BACKEND_MAIN = join(REPO_ROOT, 'backend/main.py')
 let backendProc: ChildProcessByStdio<null, Readable, Readable> | null = null
 let backendBase = ''
 let backendToken = ''
+let isQuitting = false
+let tray: Tray | null = null
 
 function startBackend(): Promise<void> {
   return new Promise((resolveP, rejectP) => {
@@ -87,6 +89,12 @@ function registerIpc(): void {
   ipcMain.handle('nd:projects:run', (_e, id: number, config?: Record<string, unknown>) =>
     bpost(`/projects/${id}/run`, { config: config || {} }))
   ipcMain.handle('nd:projects:cancel', (_e, id: number) => bpost(`/projects/${id}/cancel`, {}))
+  ipcMain.handle('nd:projects:chapters', (_e, id: number) => bget(`/projects/${id}/chapters`))
+  ipcMain.handle('nd:projects:artifact', (_e, id: number, path: string) =>
+    bget(`/projects/${id}/artifact?path=${encodeURIComponent(path)}`))
+  ipcMain.handle('nd:projects:logs', (_e, id: number) => bget(`/projects/${id}/logs`))
+  ipcMain.handle('nd:projects:log', (_e, id: number, name: string) =>
+    bget(`/projects/${id}/logs/${encodeURIComponent(name)}`))
   ipcMain.handle('nd:settings:get', () => bget('/settings'))
   ipcMain.handle('nd:settings:update', (_e, settings: Record<string, unknown>) =>
     fetch(`${backendBase}/settings`, {
@@ -94,6 +102,11 @@ function registerIpc(): void {
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings }),
     }).then((r) => r.json()))
+  ipcMain.handle('nd:queue:add', (_e, id: number) => bpost('/queue', { project_id: id }))
+  ipcMain.handle('nd:queue:list', () => bget('/queue'))
+  ipcMain.handle('nd:queue:remove', (_e, position: number) => bdel(`/queue/${position}`))
+  ipcMain.handle('nd:queue:start', () => bpost('/queue/start'))
+  ipcMain.handle('nd:queue:stop', () => bpost('/queue/stop'))
 }
 
 function startEventBridge(win: BrowserWindow): void {
@@ -110,10 +123,29 @@ function startEventBridge(win: BrowserWindow): void {
   ws.on('error', (e) => process.stderr.write(`[ws] error: ${e}\n`))
 }
 
+function loadTrayIcon(): Electron.NativeImage {
+  const p = join(__dirname, '../../assets/icon.png')
+  const img = nativeImage.createFromPath(p)
+  return img.isEmpty() ? nativeImage.createEmpty() : img
+}
+
+function createTray(win: BrowserWindow): void {
+  tray = new Tray(loadTrayIcon())
+  tray.setToolTip('Novel Disassembler')
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示窗口', click: () => { win.show(); win.focus() } },
+      { type: 'separator' },
+      { label: '退出', click: () => { isQuitting = true; app.quit() } },
+    ])
+  )
+  tray.on('click', () => { win.show(); win.focus() })
+}
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1100,
-    height: 760,
+    width: 1200,
+    height: 820,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
@@ -126,6 +158,14 @@ function createWindow(): BrowserWindow {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  // 关闭缩到托盘（非退出时）
+  win.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault()
+      win.hide()
+    }
+  })
+  createTray(win)
   return win
 }
 
@@ -135,7 +175,7 @@ if (!gotLock) {
 } else {
   app.on('second-instance', () => {
     const wins = BrowserWindow.getAllWindows()
-    if (wins[0]) { wins[0].isMinimized() && wins[0].restore(); wins[0].focus() }
+    if (wins[0]) { wins[0].isMinimized() && wins[0].restore(); wins[0].show(); wins[0].focus() }
   })
 
   app.whenReady().then(async () => {
@@ -152,9 +192,9 @@ if (!gotLock) {
 }
 
 app.on('window-all-closed', () => {
-  if (backendProc) { backendProc.kill(); backendProc = null }
-  app.quit()
+  // 托盘模式下不退出；无托盘时退出
 })
 app.on('before-quit', () => {
+  isQuitting = true
   if (backendProc) { backendProc.kill(); backendProc = null }
 })

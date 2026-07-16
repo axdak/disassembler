@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
-"""FastAPI 后端：项目 CRUD、启动运行、状态、事件、设置 + WebSocket 事件流。
+"""FastAPI 后端：项目 CRUD、启动运行、状态、章节、产物预览、日志、设置、队列 + WebSocket 事件流。
 
-鉴权：所有受保护接口需 Authorization: Bearer <token> 或 X-Session-Token；
-WebSocket 用 ?token=<token>。token 由 main.py 启动时随机生成。
+鉴权：受保护接口需 Authorization: Bearer <token> 或 X-Session-Token；WebSocket 用 ?token=<token>。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 # runner 导入时会把 engine/scripts 加入 sys.path
-from runner import RunManager
+from runner import QueueRunner, RunManager
 from db import Database
 from hub import BroadcastHub
-from models import Project, ProjectCreate, Run, RunStart, SettingsUpdate, StageEvent, Status
+from models import Project, ProjectCreate, QueueAdd, Run, RunStart, SettingsUpdate, StageEvent, Status
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
+
+ARTIFACT_MAX_CHARS = 200_000
+
+
+def _safe_project_path(project_dir: Path, rel: str) -> Optional[Path]:
+    """把 rel 解析到 project_dir 下，拒绝目录穿越。"""
+    base = project_dir.resolve()
+    try:
+        target = (base / rel).resolve()
+    except Exception:
+        return None
+    if target != base and base not in target.parents:
+        return None
+    return target
 
 
 def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> FastAPI:
@@ -29,6 +44,7 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
     app.state.db = Database(db_path)
     app.state.hub = BroadcastHub()
     app.state.manager = RunManager(app.state.db, app.state.hub, orchestrator_factory)
+    app.state.queue = QueueRunner(app.state.db, app.state.manager)
     app.state.token = token
 
     def require_token(request: Request) -> None:
@@ -39,6 +55,12 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
             provided = request.headers.get("x-session-token", "")
         if provided != app.state.token:
             raise HTTPException(status_code=401, detail="invalid session token")
+
+    def _project_or_404(pid: int) -> dict:
+        project = app.state.db.get_project(pid)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        return project
 
     @app.get("/health")
     def health():
@@ -58,13 +80,10 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
 
     @app.get("/projects/{pid}", dependencies=[Depends(require_token)])
     def project_status(pid: int):
-        db = app.state.db
-        project = db.get_project(pid)
-        if not project:
-            raise HTTPException(status_code=404, detail="project not found")
-        active = db.get_active_run(pid)
+        project = _project_or_404(pid)
+        active = app.state.db.get_active_run(pid)
         state = PipelineState.load(Path(project["path"]))
-        events = db.list_events(pid, limit=50)
+        events = app.state.db.list_events(pid, limit=50)
         return Status(
             project=Project(**project),
             active_run=Run(**active) if active else None,
@@ -76,8 +95,7 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
 
     @app.delete("/projects/{pid}", dependencies=[Depends(require_token)])
     def delete_project(pid: int):
-        if not app.state.db.get_project(pid):
-            raise HTTPException(status_code=404, detail="project not found")
+        _project_or_404(pid)
         app.state.db.delete_project(pid)
         return {"ok": True}
 
@@ -97,7 +115,64 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
 
     @app.get("/projects/{pid}/events", dependencies=[Depends(require_token)])
     def project_events(pid: int, limit: int = Query(200, ge=1, le=2000)):
+        _project_or_404(pid)
         return app.state.db.list_events(pid, limit=limit)
+
+    @app.get("/projects/{pid}/chapters", dependencies=[Depends(require_token)])
+    def project_chapters(pid: int):
+        project = _project_or_404(pid)
+        pdir = Path(project["path"])
+        index = pdir / "原文拆解" / "_索引.json"
+        if not index.is_file():
+            return []
+        try:
+            chapters = json.loads(index.read_text(encoding="utf-8")).get("chapters", [])
+        except (json.JSONDecodeError, OSError):
+            return []
+        chdir = pdir / "章节处理"
+        out = []
+        for ch in chapters:
+            fn = ch.get("filename", "")
+            stem = Path(fn).stem if fn else ""
+            out.append({
+                "seq": ch.get("seq"),
+                "filename": fn,
+                "title": ch.get("title", ""),
+                "has_analysis": bool(fn) and (chdir / fn).is_file(),
+                "has_delta": bool(stem) and (chdir / f"{stem}.json").is_file(),
+            })
+        return out
+
+    @app.get("/projects/{pid}/artifact", dependencies=[Depends(require_token)])
+    def project_artifact(pid: int, path: str = Query(...)):
+        project = _project_or_404(pid)
+        target = _safe_project_path(Path(project["path"]), path)
+        if target is None or not target.is_file():
+            raise HTTPException(status_code=404, detail="artifact not found")
+        size = target.stat().st_size
+        content = target.read_text(encoding="utf-8", errors="replace")[:ARTIFACT_MAX_CHARS]
+        return {"path": path, "size": size, "truncated": size > ARTIFACT_MAX_CHARS, "content": content}
+
+    @app.get("/projects/{pid}/logs", dependencies=[Depends(require_token)])
+    def project_logs_list(pid: int):
+        project = _project_or_404(pid)
+        ldir = Path(project["path"]) / "质量治理" / "worker日志"
+        if not ldir.is_dir():
+            return []
+        out = []
+        for f in sorted(ldir.glob("*.txt"), reverse=True):
+            st = f.stat()
+            out.append({"name": f.name, "size": st.st_size, "mtime": int(st.st_mtime)})
+        return out
+
+    @app.get("/projects/{pid}/logs/{name}", dependencies=[Depends(require_token)])
+    def project_log(pid: int, name: str):
+        project = _project_or_404(pid)
+        target = _safe_project_path(Path(project["path"]), f"质量治理/worker日志/{name}")
+        if target is None or not target.is_file():
+            raise HTTPException(status_code=404, detail="log not found")
+        content = target.read_text(encoding="utf-8", errors="replace")[:ARTIFACT_MAX_CHARS]
+        return {"name": name, "content": content}
 
     @app.get("/settings", dependencies=[Depends(require_token)])
     def get_settings():
@@ -108,6 +183,32 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
         for k, v in body.settings.items():
             app.state.db.set_setting(k, v)
         return app.state.db.all_settings()
+
+    # ---- 单任务队列 ----
+
+    @app.post("/queue", dependencies=[Depends(require_token)])
+    def queue_add(body: QueueAdd):
+        pos = app.state.queue.add(body.project_id, body.config or RunStart().config)
+        return {"position": pos}
+
+    @app.get("/queue", dependencies=[Depends(require_token)])
+    def queue_list():
+        return app.state.queue.list()
+
+    @app.delete("/queue/{position}", dependencies=[Depends(require_token)])
+    def queue_remove(position: int):
+        return {"removed": app.state.queue.remove(position)}
+
+    @app.post("/queue/start", dependencies=[Depends(require_token)])
+    def queue_start():
+        return {"started": app.state.queue.start()}
+
+    @app.post("/queue/stop", dependencies=[Depends(require_token)])
+    def queue_stop():
+        app.state.queue.stop()
+        return {"stopped": True}
+
+    # ---- WebSocket 事件流 ----
 
     @app.websocket("/ws/events")
     async def ws_events(ws: WebSocket, token: str = Query("")):
@@ -124,7 +225,6 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
         app.state.hub.subscribe(on_event)
 
         async def wait_disconnect():
-            # 阻塞直到客户端断开；与 queue.get() 并发，先到先处理
             try:
                 while True:
                     await ws.receive()

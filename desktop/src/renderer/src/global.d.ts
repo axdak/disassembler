@@ -7,8 +7,17 @@ interface Window {
     deleteProject(id: number): Promise<{ ok: boolean }>
     startRun(id: number, config?: Record<string, unknown>): Promise<{ run_id: number }>
     cancelRun(id: number): Promise<{ cancelled: boolean }>
+    chapters(id: number): Promise<unknown>
+    artifact(id: number, path: string): Promise<unknown>
+    logs(id: number): Promise<unknown>
+    log(id: number, name: string): Promise<unknown>
     getSettings(): Promise<Record<string, unknown>>
     updateSettings(s: Record<string, unknown>): Promise<Record<string, unknown>>
+    queueAdd(id: number): Promise<{ position: number }>
+    queueList(): Promise<unknown>
+    queueRemove(position: number): Promise<{ removed: boolean }>
+    queueStart(): Promise<{ started: boolean }>
+    queueStop(): Promise<{ stopped: boolean }>
     onEvent(cb: (ev: unknown) => void): () => void
   }
 }
