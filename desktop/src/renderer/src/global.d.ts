@@ -18,6 +18,9 @@ interface Window {
     queueRemove(position: number): Promise<{ removed: boolean }>
     queueStart(): Promise<{ started: boolean }>
     queueStop(): Promise<{ stopped: boolean }>
+    pickBook(): Promise<string | null>
+    pickFolder(): Promise<string | null>
+    createFromBook(source_file: string): Promise<unknown>
     onEvent(cb: (ev: unknown) => void): () => void
   }
 }

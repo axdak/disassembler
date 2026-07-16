@@ -21,6 +21,9 @@ const api = {
   queueRemove: (position: number) => ipcRenderer.invoke('nd:queue:remove', position),
   queueStart: () => ipcRenderer.invoke('nd:queue:start'),
   queueStop: () => ipcRenderer.invoke('nd:queue:stop'),
+  pickBook: () => ipcRenderer.invoke('nd:dialog:pickBook'),
+  pickFolder: () => ipcRenderer.invoke('nd:dialog:pickFolder'),
+  createFromBook: (source_file: string) => ipcRenderer.invoke('nd:projects:fromBook', source_file),
   onEvent: (cb: (ev: unknown) => void) => {
     const handler = (_: unknown, ev: unknown) => cb(ev)
     ipcRenderer.on('nd:event', handler)

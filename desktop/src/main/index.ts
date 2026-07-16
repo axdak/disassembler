@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } from 'electron'
 import { join, resolve } from 'path'
 import { spawn, type ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'node:stream'
@@ -107,6 +107,19 @@ function registerIpc(): void {
   ipcMain.handle('nd:queue:remove', (_e, position: number) => bdel(`/queue/${position}`))
   ipcMain.handle('nd:queue:start', () => bpost('/queue/start'))
   ipcMain.handle('nd:queue:stop', () => bpost('/queue/stop'))
+  ipcMain.handle('nd:dialog:pickBook', async () => {
+    const r = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: '书 (txt/docx)', extensions: ['txt', 'docx', 'doc'] }],
+    })
+    return r.canceled ? null : r.filePaths[0]
+  })
+  ipcMain.handle('nd:dialog:pickFolder', async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+    return r.canceled ? null : r.filePaths[0]
+  })
+  ipcMain.handle('nd:projects:fromBook', (_e, source_file: string) =>
+    bpost('/projects/from-book', { source_file }))
 }
 
 function startEventBridge(win: BrowserWindow): void {

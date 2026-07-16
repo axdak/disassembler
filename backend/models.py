@@ -72,6 +72,11 @@ class QueueAdd(BaseModel):
     config: Optional[RunConfig] = None
 
 
+class FromBook(BaseModel):
+    source_file: str
+    project_dir: str = ""
+
+
 class Status(BaseModel):
     project: Project
     active_run: Optional[Run] = None

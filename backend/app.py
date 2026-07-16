@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -17,9 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from runner import QueueRunner, RunManager
 from db import Database
 from hub import BroadcastHub
-from models import Project, ProjectCreate, QueueAdd, Run, RunStart, SettingsUpdate, StageEvent, Status
+from models import FromBook, Project, ProjectCreate, QueueAdd, Run, RunStart, SettingsUpdate, StageEvent, Status
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
+from run_pipeline import run_cmd, script_path
 
 ARTIFACT_MAX_CHARS = 200_000
 
@@ -77,6 +79,23 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
         if existing:
             return existing
         return app.state.db.create_project(path, body.name or "")
+
+    @app.post("/projects/from-book", dependencies=[Depends(require_token)])
+    def create_from_book(body: FromBook):
+        src = Path(body.source_file).resolve()
+        if not src.is_file():
+            raise HTTPException(status_code=400, detail="source file not found")
+        stem = src.stem
+        project_dir = Path(body.project_dir).resolve() if body.project_dir else src.parent / f"拆书_{stem}"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        rc = run_cmd(
+            [sys.executable, str(script_path("run_pipeline.py")), "split", str(project_dir), str(src)],
+            timeout=600,
+        )
+        if rc != 0:
+            raise HTTPException(status_code=500, detail=f"split failed rc={rc}")
+        existing = app.state.db.get_project_by_path(str(project_dir))
+        return existing or app.state.db.create_project(str(project_dir), stem)
 
     @app.get("/projects/{pid}", dependencies=[Depends(require_token)])
     def project_status(pid: int):

@@ -23,7 +23,6 @@ export function App() {
   const [logContent, setLogContent] = useState('')
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [settings, setSettings] = useState<Record<string, unknown>>({})
-  const [newPath, setNewPath] = useState('')
   const [err, setErr] = useState('')
 
   async function refreshProjects() {
@@ -70,9 +69,21 @@ export function App() {
     }
   }, [selected, tab])
 
-  async function create() {
-    if (!newPath) return
-    try { await window.api.createProject(newPath); setNewPath(''); refreshProjects() } catch (e: any) { setErr(String(e)) }
+  async function createFromBook() {
+    try {
+      const f = await window.api.pickBook()
+      if (!f) return
+      await window.api.createFromBook(f)
+      refreshProjects()
+    } catch (e: any) { setErr(String(e)) }
+  }
+  async function takeOver() {
+    try {
+      const d = await window.api.pickFolder()
+      if (!d) return
+      await window.api.createProject(d)
+      refreshProjects()
+    } catch (e: any) { setErr(String(e)) }
   }
   async function run() {
     if (selected == null) return
@@ -121,8 +132,8 @@ export function App() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <aside style={{ width: 260, borderRight: '1px solid #ddd', padding: 8, overflowY: 'auto' }}>
           <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
-            <input placeholder="项目目录..." value={newPath} onChange={(e) => setNewPath(e.target.value)} style={{ flex: 1, padding: 4 }} />
-            <button onClick={create}>+</button>
+            <button onClick={createFromBook}>新建项目（选书）</button>
+            <button onClick={takeOver}>接管目录</button>
           </div>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
             {projects.map((p) => (

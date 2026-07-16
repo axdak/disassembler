@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -216,3 +217,15 @@ def test_queue_remove(client, auth, tmp_path):
     client.post("/queue", json={"project_id": p2}, headers=auth)
     assert client.delete("/queue/1", headers=auth).json()["removed"] is True
     assert client.get("/queue", headers=auth).json()[0]["project_id"] == p2
+
+
+def test_from_book_creates_project(client, auth, tmp_path):
+    book = tmp_path / "book.txt"
+    book.write_text("第一章 测试\n正文一\n\n第二章 测试二\n正文二\n", encoding="utf-8")
+    r = client.post("/projects/from-book", json={"source_file": str(book)}, headers=auth)
+    assert r.status_code == 200, r.text
+    pdir = Path(r.json()["path"])
+    idx = pdir / "原文拆解" / "_索引.json"
+    assert idx.is_file()
+    chapters = json.loads(idx.read_text(encoding="utf-8")).get("chapters", [])
+    assert len(chapters) >= 2
