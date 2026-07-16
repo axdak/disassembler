@@ -40,6 +40,6 @@ novel-disassembler-desktop
 ## 里程碑
 
 - [x] 1. 项目骨架、私有 Runtime、复制引擎、校验可导入
-- [ ] 2. 全功能编排、状态机、崩溃恢复、结构化事件
+- [x] 2. 全功能编排、状态机、崩溃恢复、结构化事件
 - [ ] 3. Electron 工作台、托盘、日志、预览、设置
 - [ ] 4. Windows 安装包、假 worker e2e、真实 Agy 冒烟
