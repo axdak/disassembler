@@ -54,8 +54,8 @@ novel-disassembler-desktop
 
 - [x] 1. 项目骨架、私有 Runtime、复制引擎、校验可导入
 - [x] 2. 全功能编排、状态机、崩溃恢复、结构化事件
-- [ ] 3. Electron 工作台、托盘、日志、预览、设置
+- [x] 3. Electron 工作台、托盘、日志、预览、设置
   - [x] 3a. Python 后端（封装 orchestrator + SQLite + REST/WebSocket）
   - [x] 3b. Electron 外壳 + 最小 UI（项目列表 + 一键运行 + 实时事件流）
-  - [ ] 3c. 完整工作台（托盘/时间线/章节状态/预览/日志/导出/设置/队列）
+  - [x] 3c. 完整工作台（托盘/时间线/章节状态/预览/日志/导出/设置/队列）
 - [ ] 4. Windows 安装包、假 worker e2e、真实 Agy 冒烟
