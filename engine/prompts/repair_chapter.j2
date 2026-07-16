@@ -1,0 +1,13 @@
+# 第{{ "%03d" | format(chapter_seq) }}章修复任务
+
+失败原因：{{ reason }}
+
+{% for rp in reports %}
+## 报告：{{ rp.name }}
+
+```text
+{{ rp.excerpt }}
+```
+
+{% endfor %}
+请只修复本章 Delta JSON，不要重写完整故事结构JSON。

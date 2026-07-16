@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Private runtime (开发期 venv；里程碑4 将随包分发 embeddable Python)
+runtime/venv/
+
+# Dev data (生产环境使用 %APPDATA% / %LOCALAPPDATA%)
+data/
+
+# Electron / Node (里程碑3+)
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store

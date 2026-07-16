@@ -1,0 +1,25 @@
+upstream: C:\Users\53519\Downloads\novel-disassembler-v12\novel-disassembler
+baseline_commit: dba0213
+baseline_date: 2026-07-04
+copied: source-only
+  - scripts/
+  - tools/
+  - schemas/
+  - prompts/
+  - references/
+  - docs/
+  - tests/
+  - SKILL.md
+  - requirements.txt
+excluded:
+  - .git/
+  - .pytest_cache/
+  - __pycache__/
+  - novel_disassembler_release.zip
+  - 故事结构_增量-*.json
+  - archive/
+  - .agents/ .codex/ .claude/ .superpowers/
+  - pack_release.bat
+note: |
+  基线记录仅用于人工对照上游；不再自动同步。
+  engine\ 为新项目自有代码，可自由修改扩展。

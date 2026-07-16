@@ -1,0 +1,74 @@
+# 最终结构整理任务包
+
+## 目标
+
+将过程型 `故事结构_草稿.json` 整理为最终交付型 `故事结构.json`。
+修正所有校验错误和警告，完成全局去重、别名合并、路人降级、事件粒度统一等整理工作。
+
+## 产出要求
+
+- 直接修改 `故事结构_草稿.json`
+- 修改完成后运行：
+
+```bash
+python {{ run_pipeline_path }} commit-final-draft {{ project_dir }}
+```
+
+- 如果校验失败，根据修复任务包继续修正，再次提交
+- 最终通过后运行：
+
+```bash
+python {{ run_pipeline_path }} finalize {{ project_dir }}
+```
+
+## 当前校验报告
+
+{% if report_excerpt -%}
+```text
+{{ report_excerpt }}
+```
+{%- else -%}
+（校验报告未生成）
+{%- endif %}
+
+## 当前故事结构索引
+
+```text
+{{ story_index }}
+```
+{% if analysis_refs %}
+## 全书分析参考
+{% for ref in analysis_refs %}
+### {{ ref.title }}
+
+文件：`{{ ref.path }}`
+
+```markdown
+{{ ref.excerpt }}
+```
+{% endfor %}{% endif %}
+{%- if audit_refs %}
+## 周期审计参考
+{% for ref in audit_refs %}
+### {{ ref.name }}
+
+```{{ ref.lang }}
+{{ ref.excerpt }}
+```
+{% endfor %}{% endif %}
+
+## 整理清单
+
+请重点处理以下方面：
+
+1. 交叉引用缺失或指向别名而非正式名称
+2. 重复元素合并
+3. 别名合并到主元素
+4. 路人角色降级或清理
+5. 事件粒度不统一
+6. 伏笔/线索泛化
+7. 详情字段不规范（key 不能有标点/空格/下划线；value 应尽量完整承载档案信息，仍只能是字符串或字符串数组）
+8. 非标准字段迁入详情
+9. 地点/阵营层级整理、分组统筹；事件分组采用 8位段号-40字以内复合剧情段短名，短名需压缩包含剧情、剧情线主题、叙事功能、爽点/情绪点、冲突悬念类型
+10. 数量仅作为丰富度参考，不作为拆书提取硬门槛。
+11. 如果原文不足，不得为达标新增元素。

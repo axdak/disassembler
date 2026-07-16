@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "治理补丁顶层结构提示。用于任务包内引导 Agent 输出 governance-mode Delta。集合内元素字段、引用、章节/时间、受控标签等强校验以 scripts/validate_delta.py（规则源 scripts/story_schema_rules.py）为准。治理操作的确定性执行由 scripts/apply_governance_ops.py 负责。",
+  "type": "object",
+  "properties": {
+    "章节范围": {
+      "type": "string",
+      "description": "本次治理覆盖的章节范围，如 第001-005章"
+    },
+    "治理类型": {
+      "type": "string",
+      "enum": ["governance", "no_change"],
+      "description": "治理类型；无需修改时必须显式声明 no_change"
+    },
+    "质量说明": {
+      "type": "string",
+      "description": "已检查范围与结论（no_change 时必填）"
+    },
+    "证据范围": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "已审计章节列表，如 [\"第001章\", \"第002章\"]（no_change 时必填）"
+    },
+    "新增元素": {
+      "type": "object",
+      "description": "按集合分类的新增元素，如 {\"角色集\": [...], \"事件集\": [...]}",
+      "properties": {
+        "角色集": { "type": "array" },
+        "事件集": { "type": "array" },
+        "地点集": { "type": "array" },
+        "线索集": { "type": "array" },
+        "阵营集": { "type": "array" },
+        "物品集": { "type": "array" },
+        "其他事项集": { "type": "array" }
+      },
+      "additionalProperties": false
+    },
+    "修改元素": {
+      "type": "object",
+      "description": "按集合分类的修改元素（按名称匹配后合并）",
+      "properties": {
+        "角色集": { "type": "array" },
+        "事件集": { "type": "array" },
+        "地点集": { "type": "array" },
+        "线索集": { "type": "array" },
+        "阵营集": { "type": "array" },
+        "物品集": { "type": "array" },
+        "其他事项集": { "type": "array" }
+      },
+      "additionalProperties": false
+    },
+    "治理操作": {
+      "type": "object",
+      "description": "确定性治理操作，由 apply_governance_ops.py 执行",
+      "properties": {
+        "合并元素": {
+          "type": "array",
+          "description": "合并重复元素；每项含 类型、主/保留、并入",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "主": { "type": "string" },
+              "保留": { "type": "string" },
+              "并入": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "array", "items": { "type": "string" } }
+                ]
+              }
+            },
+            "required": ["类型"]
+          }
+        },
+        "重命名元素": {
+          "type": "array",
+          "description": "重命名元素并替换全局引用",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "原名称": { "type": "string" },
+              "新名称": { "type": "string" }
+            },
+            "required": ["类型", "原名称", "新名称"]
+          }
+        },
+        "替换引用": {
+          "type": "array",
+          "description": "全局引用替换",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "原名称": { "type": "string" },
+              "新名称": { "type": "string" }
+            },
+            "required": ["原名称", "新名称"]
+          }
+        },
+        "治理标签": {
+          "type": "array",
+          "description": "标签保留/降级治理；保留+降级必须完整覆盖治理前标签集",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string", "description": "元素类型，如 角色、事件" },
+              "名称": { "type": "string" },
+              "保留标签": { "type": "array", "items": { "type": "string" } },
+              "降级标签": { "type": "array", "items": { "type": "string" } },
+              "理由": { "type": "string" }
+            },
+            "required": ["类型", "名称", "保留标签", "降级标签", "理由"]
+          }
+        },
+        "设置字段": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "名称": { "type": "string" },
+              "字段": { "type": "string" },
+              "值": {}
+            },
+            "required": ["类型", "名称", "字段"]
+          }
+        },
+        "追加详情": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "名称": { "type": "string" },
+              "字段": { "type": "string" },
+              "详情键": { "type": "string" },
+              "值": { "type": "string" }
+            },
+            "required": ["类型", "名称"]
+          }
+        },
+        "降级元素": {
+          "type": "array",
+          "description": "将元素降级（移除并可挂载到其他元素详情）",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "名称": { "type": "string" },
+              "原因": { "type": "string" },
+              "挂载到": {
+                "type": "object",
+                "properties": {
+                  "类型": { "type": "string" },
+                  "名称": { "type": "string" },
+                  "详情键": { "type": "string" }
+                }
+              }
+            },
+            "required": ["类型", "名称"]
+          }
+        },
+        "删除元素": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "类型": { "type": "string" },
+              "名称": { "type": "string" }
+            },
+            "required": ["类型", "名称"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "待人工确认": {
+      "type": "array",
+      "description": "可选；列出无法自动确认的问题供人工复核"
+    },
+    "治理目标": {
+      "type": "string",
+      "description": "可选；本次治理的目标描述"
+    }
+  },
+  "required": ["章节范围", "新增元素", "修改元素"],
+  "additionalProperties": false
+}

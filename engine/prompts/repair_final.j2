@@ -1,0 +1,22 @@
+# 最终结构修复任务
+
+## 校验失败
+
+`故事结构_草稿.json` 未通过 `--strict` 校验。请根据以下报告修正后再次提交。
+
+## 校验报告
+
+```text
+{{ report_excerpt }}
+```
+
+## 修正要求
+
+- 直接修改 `故事结构_草稿.json`
+- 只修正校验报告中指出的问题
+- 不要为了满足数量要求编造原文没有的元素
+- 修正后再次运行：
+
+```bash
+python {{ run_pipeline_path }} commit-final-draft {{ project_dir }}
+```
