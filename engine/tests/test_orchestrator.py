@@ -305,3 +305,16 @@ def test_signature_stage_aware_final_pack(tmp_path):
     s2 = orch._signature("final_pack")
     assert s2 != s1
     assert "files=1" in s2
+
+
+def test_cancel_before_run(tmp_path):
+    bus = EventBus()
+    events = []
+    bus.subscribe(lambda e: events.append(e.type))
+    with patch.object(orchestrator, "cmd_run") as m:
+        orch = Orchestrator(tmp_path, config=Config(max_attempts=1), bus=bus)
+        orch.cancel()
+        rc = orch.run()
+    assert rc == 2  # cancelled
+    assert m.call_count == 0  # 未进入任何阶段
+    assert "pipeline_cancelled" in events

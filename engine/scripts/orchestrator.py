@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -72,6 +73,11 @@ class Orchestrator:
         self.config = config or Config()
         self.bus = bus or EventBus()
         self.state = PipelineState.load(self.project_dir)
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        """请求取消：在当前阶段结束后停止（不中断进行中的 worker 子进程）。"""
+        self._cancel.set()
 
     def emit(self, type: str, stage: str = "", detail: str = "", data: Optional[dict] = None) -> None:
         self.bus.emit(Event(type, stage=stage, detail=detail, data=data or {}))
@@ -80,6 +86,9 @@ class Orchestrator:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命（项目暂停）。"""
         self.emit("pipeline_start", stage=self.state.current_stage)
         while not self.state.is_done():
+            if self._cancel.is_set():
+                self.emit("pipeline_cancelled")
+                return 2
             stage = self.state.current_stage
             rc = self._run_stage_with_retries(stage)
             if rc != 0:
