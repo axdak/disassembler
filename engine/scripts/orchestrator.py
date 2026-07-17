@@ -32,6 +32,7 @@ from run_pipeline import (
     cmd_final_pack,
     cmd_finalize,
     cmd_run,
+    cmd_run_interleaved,
     cmd_visual_assets_auto,
     latest_analysis_manifest,
     run_cmd,
@@ -59,6 +60,7 @@ class Config:
     stagnant_limit: int = 3
     max_repair_rounds: int = 3
     analysis_concurrency: int = 1  # 分析阶段并行度（delta 仍串行）
+    chapter_mode: str = "two_phase"  # two_phase | interleaved
     fullbook_tasks: tuple = FULLBOOK_TASKS
     export_source: str = "final"
 
@@ -206,6 +208,11 @@ class Orchestrator:
     # ---- 阶段实现 ----
 
     def _stage_chapter_analysis(self) -> int:
+        if self.config.chapter_mode == "interleaved":
+            return cmd_run_interleaved(
+                self.project_dir, concurrency=self.config.analysis_concurrency,
+                **self._run_worker_kwargs(),
+            )
         return cmd_run(self.project_dir, phase="analysis",
                         concurrency=self.config.analysis_concurrency, **self._run_worker_kwargs())
 

@@ -271,6 +271,13 @@ function SettingsView({ settings, setSettings, onSave }: {
         <option value="codebuddy">codebuddy</option>
       </select>
       <div style={{ marginTop: 8 }}>
+        <label>章节模式: </label>
+        <select value={(settings.chapter_mode as string) || 'two_phase'} onChange={(e) => setSettings({ ...settings, chapter_mode: e.target.value })}>
+          <option value="two_phase">两阶段（先全部分析再 delta）</option>
+          <option value="interleaved">交错流水线（分析并行+delta 串行重叠）</option>
+        </select>
+      </div>
+      <div style={{ marginTop: 8 }}>
         <label>分析并发量: </label>
         <input
           type="number" min={1} style={{ width: 60 }}

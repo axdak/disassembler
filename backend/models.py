@@ -35,6 +35,7 @@ class RunConfig(BaseModel):
     stagnant_limit: int = 3
     max_repair_rounds: int = 3
     analysis_concurrency: int = 1
+    chapter_mode: str = "two_phase"
     fullbook_tasks: list[str] = DEFAULT_FULLBOOK_TASKS
     export_source: str = "final"
 

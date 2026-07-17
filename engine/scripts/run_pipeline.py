@@ -1972,6 +1972,163 @@ def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeo
     return 1
 
 
+def cmd_run_interleaved(
+    project_dir: Path,
+    run_mode: str = "auto",
+    worker_provider: str = "manual",
+    chapter_command: str = "",
+    audit_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
+    concurrency: int = 2,
+    audit_interval: int = 5,
+    audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+) -> int:
+    """交错流水线：N 个并行分析 worker 产出分析MD；1 个串行 delta worker 按章序消费。
+
+    每章 delta 依赖前序章节已合并进 故事结构_增量.json 的结构，故 delta 必须按序串行；
+    分析MD 互相独立可并行。分析时间被藏到 delta 串行时间之后。
+    完成后所有章节分析+delta 均已提交；后续 chapter_delta 阶段为空跑。
+    """
+    init_dirs(project_dir)
+    if not guard_single_unit_artifacts(project_dir):
+        return 1
+    ensure_story(project_dir)
+    files = chapter_files(project_dir)
+    if not files:
+        print("原文拆解目录中没有章节。先执行 split。")
+        return 1
+    mode = effective_run_mode(run_mode, chapter_command, audit_command, worker_provider)
+    chapter_command, audit_command = resolve_worker_commands(
+        chapter_command, audit_command, worker_provider, mode,
+    )
+    if not chapter_command:
+        print("已交接：交错流水线需要 worker。")
+        return 2
+
+    seq_to_file = {seq_from_file(f): f for f in files}
+    seqs = sorted(seq_to_file)
+    total = len(seqs)
+    ready: dict = {}
+    cond = threading.Condition()
+    err = {"rc": 0}
+    next_pos = [0]
+
+    def fail(rc: int) -> None:
+        with cond:
+            if not err["rc"]:
+                err["rc"] = rc
+            cond.notify_all()
+
+    def producer() -> None:
+        while True:
+            with cond:
+                if err["rc"]:
+                    return
+                if next_pos[0] >= total:
+                    return
+                pos = next_pos[0]
+                next_pos[0] += 1
+            seq = seqs[pos]
+            chapter = seq_to_file[seq]
+            p = artifact_paths(project_dir, chapter)
+            try:
+                if not p["analysis"].is_file():
+                    prepare_chapter_analysis(project_dir, chapter)
+                    rc = run_worker(chapter_command, project_dir, "analysis", p["analysis_task"],
+                                    p["analysis"], seq, timeout=worker_timeout_seconds,
+                                    retries=worker_retries, worker_window=worker_window)
+                    if rc != 0:
+                        fail(rc); return
+                ok, errs = validate_chapter_analysis_file(p["analysis"])
+                if not ok:
+                    write_analysis_regenerate_task(project_dir, chapter, errs)
+                    rc = run_worker(chapter_command, project_dir, "analysis_regenerate",
+                                    p["analysis_regenerate_task"], p["analysis"], seq,
+                                    timeout=worker_timeout_seconds, retries=worker_retries,
+                                    worker_window=worker_window)
+                    if rc != 0:
+                        fail(rc); return
+                else:
+                    p["analysis_regenerate_task"].unlink(missing_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"analysis producer error ch{seq:03d}: {exc}")
+                fail(1); return
+            with cond:
+                ready[seq] = True
+                cond.notify_all()
+
+    def consumer() -> None:
+        for seq in seqs:
+            with cond:
+                while not ready.get(seq) and not err["rc"]:
+                    cond.wait()
+                if err["rc"]:
+                    return
+            chapter = seq_to_file[seq]
+            p = artifact_paths(project_dir, chapter)
+            try:
+                if is_chapter_complete(project_dir, chapter):
+                    continue
+                if not p["delta"].is_file():
+                    prepare_chapter(project_dir, seq)
+                    rc = run_worker(chapter_command, project_dir, "delta", p["delta_task"],
+                                    p["delta"], seq, timeout=worker_timeout_seconds,
+                                    retries=worker_retries, worker_window=worker_window)
+                    if rc != 0:
+                        if p["repair"].is_file():
+                            rc2 = run_worker(chapter_command, project_dir, "repair_chapter",
+                                             p["repair"], p["delta"], seq, timeout=worker_timeout_seconds,
+                                             retries=worker_retries, worker_window=worker_window)
+                            if rc2 != 0:
+                                fail(rc2); return
+                        else:
+                            fail(rc); return
+                rc = commit_chapter(project_dir, seq)
+                if rc != 0:
+                    if p["repair"].is_file():
+                        rc2 = run_worker(chapter_command, project_dir, "repair_chapter",
+                                         p["repair"], p["delta"], seq, timeout=worker_timeout_seconds,
+                                         retries=worker_retries, worker_window=worker_window)
+                        if rc2 != 0:
+                            fail(rc2); return
+                        rc = commit_chapter(project_dir, seq)
+                        if rc != 0:
+                            fail(rc); return
+                    else:
+                        fail(rc); return
+                if audit_interval and seq % audit_interval == 0:
+                    start = seq - audit_interval + 1
+                    rc = run_periodic_governance(
+                        project_dir, start, seq, audit_max_context_chars,
+                        audit_command=audit_command, worker_timeout_seconds=worker_timeout_seconds,
+                        worker_retries=worker_retries, worker_window=worker_window,
+                        worker_loop="continuous", rerun_command="",
+                    )
+                    if rc != 0:
+                        fail(rc); return
+            except Exception as exc:  # noqa: BLE001
+                print(f"delta consumer error ch{seq:03d}: {exc}")
+                fail(1); return
+
+    n_workers = min(max(1, concurrency), total)
+    producers = [threading.Thread(target=producer, name=f"analysis-{i}") for i in range(n_workers)]
+    cons = threading.Thread(target=consumer, name="delta")
+    for t in producers:
+        t.start()
+    cons.start()
+    for t in producers:
+        t.join()
+    cons.join()
+    if err["rc"]:
+        print(f"交错流水线失败 rc={err['rc']}")
+        return err["rc"]
+    print("交错流水线完成：所有章节分析+delta 提交完成。")
+    return 0
+
+
 def cmd_run_delta(
     project_dir: Path,
     max_chapters: int = 0,

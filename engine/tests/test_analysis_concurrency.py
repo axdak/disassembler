@@ -49,5 +49,23 @@ def test_cmd_run_analysis_serial_unchanged(tmp_path, monkeypatch):
     rc = cmd_run_analysis(project, chapter_command=cmd, worker_retries=0,
                           worker_timeout_seconds=30, worker_loop="continuous", concurrency=1)
     assert rc == 0
+
+
+def test_cmd_run_interleaved(tmp_path, monkeypatch):
+    from run_pipeline import cmd_run_interleaved
+    project = tmp_path / "proj"
+    _write_project(project, 3)
+    worker = tmp_path / "wk.py"
+    _write_worker(worker)
+    cmd = f'"{sys.executable}" "{worker}"'
+    monkeypatch.setattr(run_pipeline, "validate_chapter_analysis_file", lambda p: (True, []))
+    monkeypatch.setattr(run_pipeline, "commit_chapter", lambda project_dir, seq: 0)
+    rc = cmd_run_interleaved(project, run_mode="worker", worker_provider="manual",
+                             chapter_command=cmd, audit_command=cmd, worker_retries=0,
+                             worker_timeout_seconds=30, concurrency=2, audit_interval=0)
+    assert rc == 0
+    for i in range(3):
+        assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.md").is_file()
+        assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.json").is_file()
     for i in range(2):
         assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.md").is_file()
