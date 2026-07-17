@@ -124,16 +124,21 @@ function registerIpc(): void {
 
 function startEventBridge(win: BrowserWindow): void {
   const url = `${backendBase.replace(/^http/, 'ws')}/ws/events?token=${encodeURIComponent(backendToken)}`
-  const ws = new WebSocket(url)
-  ws.on('message', (data: any) => {
-    try {
-      win.webContents.send('nd:event', JSON.parse(data.toString()))
-    } catch (e) {
-      process.stderr.write(`[ws] parse error: ${e}\n`)
-    }
-  })
-  ws.on('close', () => process.stderr.write('[ws] closed\n'))
-  ws.on('error', (e) => process.stderr.write(`[ws] error: ${e}\n`))
+  // uvicorn 起服有窗口期，连接被拒则 1s 后重连，直到连上
+  const connect = () => {
+    const ws = new WebSocket(url)
+    ws.on('message', (data: any) => {
+      if (win.isDestroyed()) return
+      try {
+        win.webContents.send('nd:event', JSON.parse(data.toString()))
+      } catch (e) {
+        process.stderr.write(`[ws] parse error: ${e}\n`)
+      }
+    })
+    ws.on('close', () => setTimeout(connect, 1000))
+    ws.on('error', (e) => process.stderr.write(`[ws] error: ${e}\n`))
+  }
+  connect()
 }
 
 function loadTrayIcon(): Electron.NativeImage {
