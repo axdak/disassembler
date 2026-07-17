@@ -219,6 +219,23 @@ def test_queue_remove(client, auth, tmp_path):
     assert client.get("/queue", headers=auth).json()[0]["project_id"] == p2
 
 
+def test_stale_run_marked_interrupted_on_restart(tmp_path):
+    db_path = str(tmp_path / "app.db")
+    auth = {"Authorization": "Bearer sekret"}
+    app1 = create_app(db_path, "sekret", FakeOrchestrator)
+    c1 = TestClient(app1)
+    pid = c1.post("/projects", json={"path": str(tmp_path / "p")}, headers=auth).json()["id"]
+    # 模拟一条残留的 running 运行（无活动线程，像崩溃/关闭后遗留）
+    app1.state.db.create_run(pid, {})
+    # 重启：同一 db 新建 app
+    app2 = create_app(db_path, "sekret", FakeOrchestrator)
+    c2 = TestClient(app2)
+    st = c2.get(f"/projects/{pid}", headers=auth).json()
+    assert st["active_run"] is None  # 僵尸 running 已清理，UI 不再被锁
+    ev = c2.get(f"/projects/{pid}/events", headers=auth).json()
+    assert any(e["type"] == "run_status" and e["detail"] == "interrupted" for e in ev)
+
+
 def test_from_book_creates_project(client, auth, tmp_path):
     book = tmp_path / "book.txt"
     book.write_text("第一章 测试\n正文一\n\n第二章 测试二\n正文二\n", encoding="utf-8")

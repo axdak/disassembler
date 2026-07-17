@@ -153,6 +153,24 @@ class Database:
             d["config"] = json.loads(d.pop("config_json") or "{}")
             return d
 
+    def mark_running_runs_interrupted(self) -> list:
+        """上一会话残留的 running 运行（崩溃/关闭未正常结束）标记为 interrupted。
+
+        返回 [(run_id, project_id), ...]，供调用方追加 interrupted 事件。
+        """
+        ts = _now()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, project_id FROM runs WHERE status='running'"
+            ).fetchall()
+            if rows:
+                self._conn.execute(
+                    "UPDATE runs SET status='interrupted', ended_at=? WHERE status='running'",
+                    (ts,),
+                )
+                self._conn.commit()
+        return [(r["id"], r["project_id"]) for r in rows]
+
     # ---- events ----
 
     def add_event(self, run_id: Optional[int], project_id: Optional[int], type: str,

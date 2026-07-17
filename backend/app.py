@@ -48,6 +48,9 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
     app.state.manager = RunManager(app.state.db, app.state.hub, orchestrator_factory)
     app.state.queue = QueueRunner(app.state.db, app.state.manager)
     app.state.token = token
+    # 清理上一会话残留的 running 运行（崩溃/关闭未正常结束），解锁 UI 以便续跑
+    for run_id, project_id in app.state.db.mark_running_runs_interrupted():
+        app.state.db.add_event(run_id, project_id, "run_status", detail="interrupted")
 
     def require_token(request: Request) -> None:
         auth = request.headers.get("authorization", "")
