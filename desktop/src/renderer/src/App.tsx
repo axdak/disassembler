@@ -93,6 +93,11 @@ export function App() {
     if (selected == null) return
     try { await window.api.cancelRun(selected) } catch (e: any) { setErr(String(e)) }
   }
+  async function del() {
+    if (selected == null) return
+    if (!window.confirm('从项目库移除该项目？（磁盘文件保留，可用「接管目录」加回）')) return
+    try { await window.api.deleteProject(selected); setSelected(null); refreshProjects() } catch (e: any) { setErr(String(e)) }
+  }
   async function queueAdd() {
     if (selected == null) return
     try { await window.api.queueAdd(selected); refreshQueue() } catch (e: any) { setErr(String(e)) }
@@ -161,6 +166,7 @@ export function App() {
                 <h2 style={{ margin: 0 }}>{status.project.name}</h2>
                 <button onClick={run} disabled={!!status.active_run}>运行全流程</button>
                 <button onClick={cancel} disabled={!status.active_run}>取消</button>
+                <button onClick={del} style={{ color: 'crimson' }}>删除</button>
                 <span style={{ flex: 1 }} />
                 <button onClick={() => setTab('overview')}>概览</button>
                 <button onClick={() => setTab('chapters')}>章节</button>
@@ -264,6 +270,15 @@ function SettingsView({ settings, setSettings, onSave }: {
         <option value="agy">agy</option>
         <option value="codebuddy">codebuddy</option>
       </select>
+      <div style={{ marginTop: 8 }}>
+        <label>分析并发量: </label>
+        <input
+          type="number" min={1} style={{ width: 60 }}
+          value={String((settings.analysis_concurrency as number) ?? 1)}
+          onChange={(e) => setSettings({ ...settings, analysis_concurrency: Math.max(1, Number(e.target.value) || 1) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> &gt;1 时章节分析并行（delta 仍串行）</span>
+      </div>
       <p style={{ fontSize: 12, color: '#888' }}>
         其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。
       </p>

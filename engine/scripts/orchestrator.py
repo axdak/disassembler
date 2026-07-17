@@ -58,6 +58,7 @@ class Config:
     max_attempts: int = 10  # 安全上限；真正硬阻塞由 stagnant_limit 触发
     stagnant_limit: int = 3
     max_repair_rounds: int = 3
+    analysis_concurrency: int = 1  # 分析阶段并行度（delta 仍串行）
     fullbook_tasks: tuple = FULLBOOK_TASKS
     export_source: str = "final"
 
@@ -205,7 +206,8 @@ class Orchestrator:
     # ---- 阶段实现 ----
 
     def _stage_chapter_analysis(self) -> int:
-        return cmd_run(self.project_dir, phase="analysis", **self._run_worker_kwargs())
+        return cmd_run(self.project_dir, phase="analysis",
+                        concurrency=self.config.analysis_concurrency, **self._run_worker_kwargs())
 
     def _stage_chapter_delta(self) -> int:
         return cmd_run(self.project_dir, phase="delta", **self._run_worker_kwargs())

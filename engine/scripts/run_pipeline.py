@@ -1853,8 +1853,13 @@ def cmd_run_analysis(
     worker_window: str = DEFAULT_WORKER_WINDOW,
     worker_loop: str = DEFAULT_WORKER_LOOP,
     rerun_command: str = "",
+    concurrency: int = 1,
 ) -> int:
-    """Create and validate every chapter-analysis MD without touching Delta flow."""
+    """Create and validate every chapter-analysis MD without touching Delta flow.
+
+    concurrency>1 时并行生成各章分析MD（分析MD互相独立、不碰 故事结构_增量.json，可并行）；
+    delta 阶段需合并同一 故事结构_增量.json 仍保持串行。
+    """
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
@@ -1863,6 +1868,19 @@ def cmd_run_analysis(
     if not files:
         print("原文拆解目录中没有章节。先执行 split。")
         return 1
+    if concurrency <= 1:
+        return _cmd_run_analysis_serial(
+            project_dir, files, chapter_command, worker_timeout_seconds,
+            worker_retries, worker_window, worker_loop, rerun_command,
+        )
+    return _cmd_run_analysis_parallel(
+        project_dir, files, chapter_command, worker_timeout_seconds,
+        worker_retries, worker_window, concurrency,
+    )
+
+
+def _cmd_run_analysis_serial(project_dir, files, chapter_command, worker_timeout_seconds,
+                              worker_retries, worker_window, worker_loop, rerun_command) -> int:
     for chapter in files:
         p = artifact_paths(project_dir, chapter)
         if not p["analysis"].is_file():
@@ -1911,6 +1929,47 @@ def cmd_run_analysis(
         p["analysis_regenerate_task"].unlink(missing_ok=True)
     print("所有章节分析MD均已通过校验。")
     return 0
+
+
+def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeout_seconds,
+                               worker_retries, worker_window, concurrency) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _do_one(item):
+        _chapter, ttype, task_pack, expected, seq = item
+        return run_worker(
+            chapter_command, project_dir, ttype, task_pack, expected, seq,
+            timeout=worker_timeout_seconds, retries=worker_retries, worker_window=worker_window,
+        )
+
+    for _ in range(5):  # 最多 5 轮（含失败重生成）
+        pending = []  # (chapter, task_type, task_pack, expected_output, seq)
+        for chapter in files:
+            p = artifact_paths(project_dir, chapter)
+            if not p["analysis"].is_file():
+                prepare_chapter_analysis(project_dir, chapter)
+                pending.append((chapter, "analysis", p["analysis_task"], p["analysis"], seq_from_file(chapter)))
+            else:
+                ok, errs = validate_chapter_analysis_file(p["analysis"])
+                if not ok:
+                    write_analysis_regenerate_task(project_dir, chapter, errs)
+                    pending.append((chapter, "analysis_regenerate", p["analysis_regenerate_task"], p["analysis"], seq_from_file(chapter)))
+                else:
+                    p["analysis_regenerate_task"].unlink(missing_ok=True)
+        if not pending:
+            print("所有章节分析MD均已通过校验。")
+            return 0
+        if not chapter_command:
+            print("已交接：等待章节分析MD。")
+            return 2
+        print(f"analysis 并行: {len(pending)} 章, concurrency={concurrency}")
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            rcs = list(ex.map(_do_one, pending))
+        failed = [r for r in rcs if r != 0]
+        if failed:
+            return failed[0]
+    print("analysis: 达到最大重试轮次仍有未通过章节。")
+    return 1
 
 
 def cmd_run_delta(
@@ -2013,6 +2072,7 @@ def cmd_run(
     worker_retries: int = DEFAULT_WORKER_RETRIES,
     worker_window: str = DEFAULT_WORKER_WINDOW,
     worker_loop: str = DEFAULT_WORKER_LOOP,
+    concurrency: int = 1,
 ) -> int:
     requested_chapter_command = chapter_command
     requested_audit_command = audit_command
@@ -2043,6 +2103,7 @@ def cmd_run(
             worker_window=worker_window,
             worker_loop=worker_loop,
             rerun_command=rerun_command,
+            concurrency=concurrency,
         )
     if phase == "delta":
         return cmd_run_delta(

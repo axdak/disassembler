@@ -37,6 +37,7 @@ def runconfig_to_config(rc: RunConfig) -> Config:
         max_attempts=rc.max_attempts,
         stagnant_limit=rc.stagnant_limit,
         max_repair_rounds=rc.max_repair_rounds,
+        analysis_concurrency=rc.analysis_concurrency,
         fullbook_tasks=tuple(rc.fullbook_tasks),
         export_source=rc.export_source,
     )

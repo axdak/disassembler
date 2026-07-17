@@ -34,6 +34,7 @@ class RunConfig(BaseModel):
     max_attempts: int = 10
     stagnant_limit: int = 3
     max_repair_rounds: int = 3
+    analysis_concurrency: int = 1
     fullbook_tasks: list[str] = DEFAULT_FULLBOOK_TASKS
     export_source: str = "final"
 

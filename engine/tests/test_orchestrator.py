@@ -307,6 +307,15 @@ def test_signature_stage_aware_final_pack(tmp_path):
     assert "files=1" in s2
 
 
+def test_chapter_analysis_passes_concurrency(tmp_path):
+    with patch.object(orchestrator, "cmd_run", return_value=0) as m:
+        orch = Orchestrator(tmp_path, config=Config(analysis_concurrency=4))
+        orch._stage_chapter_analysis()
+    m.assert_called_once()
+    assert m.call_args.kwargs["phase"] == "analysis"
+    assert m.call_args.kwargs["concurrency"] == 4
+
+
 def test_cancel_before_run(tmp_path):
     bus = EventBus()
     events = []
