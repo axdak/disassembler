@@ -20,6 +20,9 @@ out/
 # Logs
 *.log
 
+# Superpowers task briefs, review packages, and durable progress ledger
+.superpowers/sdd/
+
 # OS
 Thumbs.db
 .DS_Store
