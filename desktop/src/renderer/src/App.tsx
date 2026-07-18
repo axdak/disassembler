@@ -1,13 +1,25 @@
 import { useEffect, useState } from 'react'
-import type { Project, StageEvent, Status, Chapter, Artifact, LogEntry, QueueItem } from './types'
+import type { Project, StageEvent, Status, Chapter, LogEntry, QueueItem, TaskType } from './types'
+import { useProjectTasks } from './hooks/useProjectTasks'
+import { OverviewTab } from './components/OverviewTab'
+import { ChaptersTab } from './components/ChaptersTab'
+import { AnalysisWorkbenchTab } from './components/AnalysisWorkbenchTab'
+import { GovernanceTab } from './components/GovernanceTab'
+import { ExportTab } from './components/ExportTab'
+import { LogsTab } from './components/LogsTab'
+import { ArtifactDrawer, type ArtifactDrawerState } from './components/ArtifactDrawer'
 
-const STAGES = [
-  'chapter_analysis', 'chapter_delta', 'chapter_structure', 'visual_assets',
-  'fullbook_analysis', 'final_pack', 'commit_final_draft', 'finalize', 'export',
-]
-
-type Tab = 'overview' | 'chapters' | 'preview' | 'logs'
+type Tab = 'overview' | 'chapters' | 'analysis' | 'governance' | 'export' | 'logs'
 type View = 'project' | 'settings'
+
+const TABS: { key: Tab; label: string }[] = [
+  { key: 'overview', label: '概览' },
+  { key: 'chapters', label: '章节' },
+  { key: 'analysis', label: '分析工作台' },
+  { key: 'governance', label: '质量治理' },
+  { key: 'export', label: '导出' },
+  { key: 'logs', label: '日志' },
+]
 
 export function App() {
   const [projects, setProjects] = useState<Project[]>([])
@@ -17,13 +29,13 @@ export function App() {
   const [view, setView] = useState<View>('project')
   const [tab, setTab] = useState<Tab>('overview')
   const [chapters, setChapters] = useState<Chapter[]>([])
-  const [artPath, setArtPath] = useState('')
-  const [artContent, setArtContent] = useState('')
   const [logsList, setLogsList] = useState<LogEntry[]>([])
-  const [logContent, setLogContent] = useState('')
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [settings, setSettings] = useState<Record<string, unknown>>({})
   const [err, setErr] = useState('')
+  const [drawer, setDrawer] = useState<ArtifactDrawerState>({ open: false, kind: 'artifact', path: '', content: '' })
+
+  const workbench = useProjectTasks(selected)
 
   async function refreshProjects() {
     try { setProjects((await window.api.listProjects()) as Project[]) } catch (e: any) { setErr(String(e)) }
@@ -108,19 +120,27 @@ export function App() {
   async function loadArtifact(path: string) {
     if (selected == null) return
     try {
-      const a = (await window.api.artifact(selected, path)) as Artifact
-      setArtPath(path); setArtContent(a.content)
+      const a = await window.api.artifact(selected, path)
+      setDrawer({ open: true, kind: 'artifact', path, content: a.content })
     } catch (e: any) { setErr(String(e)) }
   }
   async function loadLog(name: string) {
     if (selected == null) return
-    try { const r = (await window.api.log(selected, name)) as { content: string }; setLogContent(r.content) } catch (e: any) { setErr(String(e)) }
+    try {
+      const r = await window.api.log(selected, name)
+      setDrawer({ open: true, kind: 'log', path: name, content: r.content })
+    } catch (e: any) { setErr(String(e)) }
   }
   async function saveSettings() {
     try { await window.api.updateSettings(settings); setErr('设置已保存') } catch (e: any) { setErr(String(e)) }
   }
 
+  async function createTask(type: TaskType, params: Record<string, unknown>) {
+    await workbench.create(type, params)
+  }
+
   const visibleEvents = events.filter((e) => e.project_id === selected).slice(-120)
+  const wbErr = workbench.error
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', margin: 0, fontFamily: 'system-ui, sans-serif' }}>
@@ -157,101 +177,81 @@ export function App() {
           )}
         </aside>
 
-        <main style={{ flex: 1, padding: 12, overflowY: 'auto' }}>
+        <main style={{ flex: 1, padding: 12, overflowY: 'auto', position: 'relative' }}>
           {view === 'settings' ? (
             <SettingsView settings={settings} setSettings={setSettings} onSave={saveSettings} />
-          ) : status ? (
+          ) : status && selected != null ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
                 <h2 style={{ margin: 0 }}>{status.project.name}</h2>
-                <button onClick={run} disabled={!!status.active_run}>运行全流程</button>
-                <button onClick={cancel} disabled={!status.active_run}>取消</button>
-                <button onClick={del} style={{ color: 'crimson' }}>删除</button>
                 <span style={{ flex: 1 }} />
-                <button onClick={() => setTab('overview')}>概览</button>
-                <button onClick={() => setTab('chapters')}>章节</button>
-                <button onClick={() => setTab('preview')}>预览</button>
-                <button onClick={() => setTab('logs')}>日志</button>
+                {TABS.map((t) => (
+                  <button key={t.key} onClick={() => setTab(t.key)} style={{ fontWeight: tab === t.key ? 700 : 400 }}>{t.label}</button>
+                ))}
               </div>
               <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>{status.project.path}</div>
               {tab === 'overview' && (
-                <>
-                  <Timeline current={status.current_stage} completed={status.completed} />
-                  <div style={{ margin: '8px 0' }}>
-                    活动运行: {status.active_run ? status.active_run.status : '无'}
-                    {status.last_error && <span style={{ color: 'crimson', marginLeft: 8 }}>{status.last_error}</span>}
-                  </div>
-                  <h4>事件流</h4>
-                  <pre style={{ background: '#f5f5f5', padding: 8, maxHeight: 320, overflow: 'auto', fontSize: 12, margin: 0 }}>
-                    {visibleEvents.map((e) => `[${e.type}] ${e.stage || ''} ${e.detail || ''}`).join('\n')}
-                  </pre>
-                </>
+                <OverviewTab
+                  projectId={selected}
+                  status={status}
+                  events={visibleEvents}
+                  tasks={workbench.tasks}
+                  artifactStatus={workbench.artifactStatus}
+                  onRun={run}
+                  onCancel={cancel}
+                  onDelete={del}
+                  onOpenLogs={() => setTab('logs')}
+                />
               )}
               {tab === 'chapters' && (
-                <>
-                  <h4>章节状态</h4>
-                  <table style={{ fontSize: 13, width: '100%', borderCollapse: 'collapse' }}>
-                    <tbody>
-                      <tr><th style={{ textAlign: 'left' }}>seq</th><th style={{ textAlign: 'left' }}>标题</th><th>分析</th><th>delta</th><th></th></tr>
-                      {chapters.map((c) => (
-                        <tr key={String(c.seq)}>
-                          <td>{c.seq}</td><td>{c.title}</td>
-                          <td style={{ textAlign: 'center' }}>{c.has_analysis ? '✓' : '·'}</td>
-                          <td style={{ textAlign: 'center' }}>{c.has_delta ? '✓' : '·'}</td>
-                          <td>
-                            {c.has_analysis && <button onClick={() => loadArtifact(`章节处理/${c.filename}`)}>分析</button>}
-                            {c.has_delta && <button onClick={() => loadArtifact(`章节处理/${c.filename.replace(/\.md$/, '.json')}`)} style={{ marginLeft: 4 }}>delta</button>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </>
+                <ChaptersTab
+                  chapters={chapters}
+                  artifactStatus={workbench.artifactStatus}
+                  onCreateTask={createTask}
+                  onOpenArtifact={loadArtifact}
+                />
               )}
-              {tab === 'preview' && (
-                <>
-                  <h4>产物预览（只读）</h4>
-                  <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
-                    <input value={artPath} onChange={(e) => setArtPath(e.target.value)} placeholder="相对路径，如 全书分析/..." style={{ flex: 1, padding: 4 }} />
-                    <button onClick={() => loadArtifact(artPath)}>加载</button>
-                  </div>
-                  <pre style={{ background: '#f5f5f5', padding: 8, maxHeight: 420, overflow: 'auto', fontSize: 12 }}>
-                    {artContent || '(输入路径加载，或从章节页跳转)'}
-                  </pre>
-                </>
+              {tab === 'analysis' && (
+                <AnalysisWorkbenchTab
+                  artifactStatus={workbench.artifactStatus}
+                  tasks={workbench.tasks}
+                  onCreateTask={createTask}
+                  onOpenArtifact={loadArtifact}
+                />
+              )}
+              {tab === 'governance' && (
+                <GovernanceTab
+                  tasks={workbench.tasks}
+                  onCreateTask={createTask}
+                  onOpenArtifact={loadArtifact}
+                />
+              )}
+              {tab === 'export' && (
+                <ExportTab
+                  artifactStatus={workbench.artifactStatus}
+                  onCreateTask={createTask}
+                  onOpenArtifact={loadArtifact}
+                />
               )}
               {tab === 'logs' && (
-                <>
-                  <h4>worker 日志</h4>
-                  <div style={{ marginBottom: 8 }}>
-                    {logsList.map((l) => (
-                      <button key={l.name} onClick={() => loadLog(l.name)} style={{ marginRight: 8, fontSize: 12 }}>{l.name}</button>
-                    ))}
-                    {logsList.length === 0 && <span style={{ color: '#888' }}>暂无日志</span>}
-                  </div>
-                  <pre style={{ background: '#f5f5f5', padding: 8, maxHeight: 420, overflow: 'auto', fontSize: 12 }}>{logContent || '(选择日志文件)'}</pre>
-                </>
+                <LogsTab
+                  logsList={logsList}
+                  onOpenLog={loadLog}
+                />
               )}
             </>
           ) : (
             <p>从左侧选择或接管一个拆书项目。</p>
           )}
-          {err && <div style={{ color: 'crimson', marginTop: 12 }}>{err}</div>}
+          {(err || wbErr) && (
+            <div style={{ color: 'crimson', marginTop: 12, fontSize: 13 }}>
+              {err || wbErr}
+              {wbErr && <button onClick={() => setTab('logs')} style={{ marginLeft: 8 }}>查看日志</button>}
+            </div>
+          )}
         </main>
       </div>
-    </div>
-  )
-}
-
-function Timeline({ current, completed }: { current: string | null; completed: string[] }) {
-  return (
-    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', fontSize: 11 }}>
-      {STAGES.map((s) => {
-        const done = completed.includes(s)
-        const cur = current === s
-        const bg = done ? '#4caf50' : cur ? '#2196f3' : '#ccc'
-        return <span key={s} style={{ background: bg, color: '#fff', padding: '3px 6px', borderRadius: 3 }}>{s}</span>
-      })}
+      <ArtifactDrawer state={drawer} onClose={() => setDrawer((d) => ({ ...d, open: false }))} />
     </div>
   )
 }

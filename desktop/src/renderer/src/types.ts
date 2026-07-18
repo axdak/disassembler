@@ -24,6 +24,10 @@ export interface Status {
   completed: string[]
   last_error: string | null
   recent_events: StageEvent[]
+  // Independent-workbench additions (mirror backend/models.py Status).
+  revisions: Record<string, string>
+  task_summary: Record<string, number>
+  stale_task_count: number
 }
 
 export interface Chapter {
