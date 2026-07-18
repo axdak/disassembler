@@ -85,12 +85,6 @@ export function App() {
       refreshProjects()
     } catch (e: any) { setErr(String(e)) }
   }
-  async function loginAgy() {
-    try {
-      const r = await window.api.loginAgy()
-      if (!r.opened) { setErr(r.error || 'agy 未找到') }
-    } catch (e: any) { setErr(String(e)) }
-  }
   async function run() {
     if (selected == null) return
     try { await window.api.startRun(selected) } catch (e: any) { setErr(String(e)) }
@@ -134,7 +128,6 @@ export function App() {
         <b>Novel Disassembler</b>
         <button onClick={() => setView('project')}>项目</button>
         <button onClick={() => { setView('settings'); refreshSettings() }}>设置</button>
-        <button onClick={loginAgy}>Agy 登录</button>
         <span style={{ flex: 1 }} />
         <span>队列 {queue.length}</span>
         <button onClick={queueAdd} disabled={selected == null}>加入队列</button>

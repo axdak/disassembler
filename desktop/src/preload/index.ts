@@ -24,7 +24,6 @@ const api = {
   pickBook: () => ipcRenderer.invoke('nd:dialog:pickBook'),
   pickFolder: () => ipcRenderer.invoke('nd:dialog:pickFolder'),
   createFromBook: (source_file: string) => ipcRenderer.invoke('nd:projects:fromBook', source_file),
-  loginAgy: () => ipcRenderer.invoke('nd:login:agy'),
   onEvent: (cb: (ev: unknown) => void) => {
     const handler = (_: unknown, ev: unknown) => cb(ev)
     ipcRenderer.on('nd:event', handler)

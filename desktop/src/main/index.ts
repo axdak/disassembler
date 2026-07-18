@@ -1,7 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } from 'electron'
 import { join, resolve } from 'path'
 import { spawn, type ChildProcessByStdio } from 'child_process'
-import { existsSync } from 'node:fs'
 import type { Readable } from 'node:stream'
 import WebSocket from 'ws'
 
