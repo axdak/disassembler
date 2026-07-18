@@ -3041,6 +3041,341 @@ def cmd_migrate_chronology(args: argparse.Namespace) -> int:
     return run_cmd(cmd)
 
 
+# === Scoped engine entry points for workbench task adapters ====================
+#
+# 这些函数把 analysis_context_pack / prepare_chapter_* / commit_chapter 等可重用
+# 入口包装成"按章节范围过滤、产出 manifest 信息"的窄接口，供 backend.task_adapters
+# 调用。它们不复制 prompt / schema / merge / validation 逻辑，只调用既有函数并加上
+# sequence 过滤。CLI 行为不变。
+
+def _copy_stable_inputs(src_project: Path, dst_project: Path) -> None:
+    """把项目稳定输入（章节原文/分析/故事结构/已有全书分析产物）复制到 dst_project。
+
+    读类型 workbench 任务（analysis / chapter_visual / chapter_structure / export）
+    需要在 prepare 阶段（持有 reader admission，writers 被排斥）固化一份输入快照，
+    再在 run 阶段（锁外）让 engine 函数基于快照运行，从而避免与并发 writer 互相竞态。
+    """
+    src_project = Path(src_project)
+    dst_project = Path(dst_project)
+    dst_project.mkdir(parents=True, exist_ok=True)
+
+    src_split = src_project / "原文拆解"
+    if src_split.is_dir():
+        dst_split = dst_project / "原文拆解"
+        dst_split.mkdir(parents=True, exist_ok=True)
+        index_src = src_split / "_索引.json"
+        if index_src.is_file():
+            shutil.copy2(index_src, dst_split / "_索引.json")
+        for p in src_split.glob("第*章_*.md"):
+            if p.is_file():
+                shutil.copy2(p, dst_split / p.name)
+
+    src_chap = src_project / "章节处理"
+    if src_chap.is_dir():
+        dst_chap = dst_project / "章节处理"
+        dst_chap.mkdir(parents=True, exist_ok=True)
+        for p in src_chap.iterdir():
+            if p.is_file() and p.suffix in (".md", ".json"):
+                shutil.copy2(p, dst_chap / p.name)
+
+    for name in ("故事结构_增量.json", "故事结构.json"):
+        src = src_project / name
+        if src.is_file():
+            shutil.copy2(src, dst_project / name)
+
+    # 全书分析下既有 .md 产物（narrative_structure 背景、visual aggregate 源），
+    # 但排除 _任务包/ —— 那是输出，由 scoped 函数本次生成，不是输入。
+    src_analysis = src_project / "全书分析"
+    if src_analysis.is_dir():
+        for p in src_analysis.rglob("*.md"):
+            if "_任务包" in p.parts:
+                continue
+            rel = p.relative_to(src_analysis)
+            target = dst_project / "全书分析" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, target)
+
+
+def snapshot_project_inputs(project_dir: Path) -> Path:
+    """生成项目稳定输入的临时快照目录，供读类型 adapter 在 prepare 阶段固化输入。"""
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="nd_snapshot_"))
+    _copy_stable_inputs(Path(project_dir), tmp)
+    return tmp
+
+
+def copy_analysis_task_packages(src_project: Path, dst_project: Path) -> None:
+    """把 src_project 的 全书分析/_任务包/ 子树合并回 dst_project。
+
+    adapter 在快照上跑完 analysis_context_pack 后，task pack（manifest + pack_*.md）
+    只产生在快照目录里；此函数把该子树复制回真实项目目录，使 canonical 产物落到
+    正确位置。reader 任务只写 Markdown 任务包，不写 project-fact JSON，与并发 writer
+    不冲突。
+    """
+    src = Path(src_project) / "全书分析" / "_任务包"
+    if not src.is_dir():
+        return
+    dst = Path(dst_project) / "全书分析" / "_任务包"
+    for root, _dirs, files in os.walk(src):
+        rel_root = Path(root).relative_to(src)
+        for name in files:
+            src_file = Path(root) / name
+            target = dst / rel_root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, target)
+
+
+def _analysis_pack_argv(project_dir, *, task, chapters, targets, question,
+                        include_original, max_pack_chars, max_original_chars,
+                        max_analysis_chars, out_dir) -> List[str]:
+    argv = [
+        str(project_dir),
+        "--task", task,
+        "--chapters", str(chapters),
+        "--include-original", include_original,
+        "--max-pack-chars", str(max_pack_chars),
+        "--max-original-chars", str(max_original_chars),
+        "--max-analysis-chars", str(max_analysis_chars),
+    ]
+    if targets:
+        argv.extend(["--targets", *targets])
+    if question:
+        argv.extend(["--question", question])
+    if out_dir:
+        argv.extend(["--out-dir", out_dir])
+    return argv
+
+
+def scoped_analysis_pack(
+    project_dir,
+    *,
+    task,
+    chapters="all",
+    targets=None,
+    question="",
+    include_original="sample",
+    max_pack_chars: int = 70000,
+    max_original_chars: int = 6000,
+    max_analysis_chars: int = 12000,
+    out_dir: str = "",
+    force: bool = False,
+) -> Dict[str, Any]:
+    """生成一次 analysis_context_pack 任务包并返回 manifest 信息。
+
+    chapters 接受 "all" / "1-5" / "1,3,5-7" 任何 analysis_context_pack 已支持的 spec；
+    targets / question / include_original 透传给现有打包器，不复制 prompt 或 schema。
+
+    force 当前对 analysis 是显式参数：analysis_context_pack 每次都生成新的时间戳目录，
+    pack 永远不覆盖既有 canonical 产物；adapter 把 force 透传并记录到 result_json，
+    既满足"force rerun 不得删除既有 task 历史"的全局约束，也让调度层显式表达意图。
+    """
+    from analysis_context_pack import main as acp_main
+    project_dir = Path(project_dir)
+    argv = _analysis_pack_argv(
+        project_dir,
+        task=task, chapters=chapters, targets=targets, question=question,
+        include_original=include_original, max_pack_chars=max_pack_chars,
+        max_original_chars=max_original_chars, max_analysis_chars=max_analysis_chars,
+        out_dir=out_dir,
+    )
+    rc = acp_main(argv)
+    if rc != 0:
+        raise RuntimeError(f"analysis_context_pack failed (task={task}): rc={rc}")
+    manifest_path = latest_analysis_manifest(project_dir, task)
+    if manifest_path is None:
+        raise RuntimeError(f"analysis manifest not found for task={task}")
+    manifest = load_json(manifest_path, {}) or {}
+    return {
+        "manifest_path": str(manifest_path),
+        "manifest": manifest,
+        "target_outputs": manifest.get("target_outputs") or [],
+        "packs": manifest.get("packs") or [],
+        "task": task,
+        "chapters": chapters,
+        "force": force,
+    }
+
+
+def _per_chapter_argv(project_dir, *, task, chapters_spec, include_original,
+                      max_pack_chars, max_original_chars, max_analysis_chars,
+                      out_dir) -> List[str]:
+    argv = [
+        str(project_dir),
+        "--task", task,
+        "--per-chapter",
+        "--chapters", chapters_spec,
+        "--include-original", include_original,
+        "--max-pack-chars", str(max_pack_chars),
+        "--max-original-chars", str(max_original_chars),
+        "--max-analysis-chars", str(max_analysis_chars),
+    ]
+    if out_dir:
+        argv.extend(["--out-dir", out_dir])
+    return argv
+
+
+def scoped_chapter_visual_pack(
+    project_dir,
+    *,
+    seqs,
+    include_original="sample",
+    max_pack_chars: int = 70000,
+    max_original_chars: int = 6000,
+    max_analysis_chars: int = 12000,
+    out_dir: str = "",
+) -> Dict[str, Any]:
+    """对请求的 seq 列表生成 visual_assets per-chapter 任务包。
+
+    sequence 过滤靠 --chapters spec 传给 analysis_context_pack，不复制打包逻辑。
+    已有完整分章产物的章节会被现有打包器自动跳过（断点续传）。
+    """
+    from analysis_context_pack import main as acp_main
+    project_dir = Path(project_dir)
+    seqs = sorted(set(int(s) for s in seqs))
+    if not seqs:
+        raise ValueError("seqs must be a non-empty list of chapter seqs")
+    chapters_spec = ",".join(str(s) for s in seqs)
+    argv = _per_chapter_argv(
+        project_dir, task="visual_assets", chapters_spec=chapters_spec,
+        include_original=include_original, max_pack_chars=max_pack_chars,
+        max_original_chars=max_original_chars, max_analysis_chars=max_analysis_chars,
+        out_dir=out_dir,
+    )
+    rc = acp_main(argv)
+    if rc != 0:
+        raise RuntimeError(f"analysis_context_pack (visual per-chapter) failed: rc={rc}")
+    manifest_path = latest_analysis_manifest(project_dir, "visual_assets_per_chapter")
+    manifest = load_json(manifest_path, {}) if manifest_path else {}
+    return {
+        "manifest_path": str(manifest_path) if manifest_path else "",
+        "manifest": manifest,
+        "packs": manifest.get("packs") or [],
+        "seqs": seqs,
+        "mode": "per_chapter",
+        "task": "visual_assets",
+    }
+
+
+def scoped_chapter_visual_aggregate(project_dir, *, out_dir: str = "") -> Dict[str, Any]:
+    """生成 visual_assets 顶层汇总任务包。
+
+    需要分章视觉资产文件已存在（由 worker 写入）；aggregate 任务包基于既有分章产物
+    合并顶层五件套。不复制 aggregate 逻辑，只调用既有 _build_visual_aggregate_pack。
+    """
+    from analysis_context_pack import main as acp_main
+    project_dir = Path(project_dir)
+    argv = [str(project_dir), "--task", "visual_assets", "--aggregate"]
+    if out_dir:
+        argv.extend(["--out-dir", out_dir])
+    rc = acp_main(argv)
+    if rc != 0:
+        raise RuntimeError(f"analysis_context_pack (visual aggregate) failed: rc={rc}")
+    manifest_path = latest_analysis_manifest(project_dir, "visual_assets_aggregate")
+    manifest = load_json(manifest_path, {}) if manifest_path else {}
+    return {
+        "manifest_path": str(manifest_path) if manifest_path else "",
+        "manifest": manifest,
+        "target_outputs": manifest.get("target_outputs") or [],
+        "mode": "aggregate",
+        "task": "visual_assets",
+    }
+
+
+def scoped_chapter_structure_pack(
+    project_dir,
+    *,
+    seqs,
+    include_original="sample",
+    max_pack_chars: int = 70000,
+    max_original_chars: int = 6000,
+    max_analysis_chars: int = 12000,
+    out_dir: str = "",
+) -> Dict[str, Any]:
+    """对请求的 seq 列表生成 chapter_structure per-chapter 任务包。"""
+    from analysis_context_pack import main as acp_main
+    project_dir = Path(project_dir)
+    seqs = sorted(set(int(s) for s in seqs))
+    if not seqs:
+        raise ValueError("seqs must be a non-empty list of chapter seqs")
+    chapters_spec = ",".join(str(s) for s in seqs)
+    argv = _per_chapter_argv(
+        project_dir, task="chapter_structure", chapters_spec=chapters_spec,
+        include_original=include_original, max_pack_chars=max_pack_chars,
+        max_original_chars=max_original_chars, max_analysis_chars=max_analysis_chars,
+        out_dir=out_dir,
+    )
+    rc = acp_main(argv)
+    if rc != 0:
+        raise RuntimeError(f"analysis_context_pack (chapter_structure per-chapter) failed: rc={rc}")
+    manifest_path = latest_analysis_manifest(project_dir, "chapter_structure_per_chapter")
+    manifest = load_json(manifest_path, {}) if manifest_path else {}
+    return {
+        "manifest_path": str(manifest_path) if manifest_path else "",
+        "manifest": manifest,
+        "packs": manifest.get("packs") or [],
+        "seqs": seqs,
+        "mode": "per_chapter",
+        "task": "chapter_structure",
+    }
+
+
+def _scoped_chapter_rerun(project_dir, *, seqs, force, prepare_fn, artifact_key, label):
+    """共享的 chapter rerun 调度：对每个 seq 调用 prepare_chapter_analysis/delta。"""
+    project_dir = Path(project_dir)
+    init_dirs(project_dir)
+    if not guard_single_unit_artifacts(project_dir):
+        raise RuntimeError("multi-unit artifacts present; cannot rerun chapter task")
+    ensure_story(project_dir)
+    seqs = sorted(set(int(s) for s in seqs))
+    if not seqs:
+        raise ValueError("seqs must be a non-empty list of chapter seqs")
+    per_seq: List[Dict[str, Any]] = []
+    for seq in seqs:
+        chapter = chapter_by_seq(project_dir, seq)
+        if not chapter:
+            raise FileNotFoundError(f"chapter seq {seq} not found in project")
+        rc = prepare_fn(project_dir, chapter, force=force)
+        paths = artifact_paths(project_dir, chapter)
+        per_seq.append({
+            "seq": seq,
+            "rc": rc,
+            "chapter": chapter.name,
+            artifact_key: str(paths[artifact_key]),
+        })
+        if rc != 0:
+            raise RuntimeError(
+                f"{label} failed for seq {seq}: rc={rc} (artifact={paths[artifact_key]})"
+            )
+    return {"seqs": seqs, "force": force, "per_seq": per_seq, "task": label}
+
+
+def scoped_chapter_analysis_rerun(project_dir, *, seqs, force: bool = False) -> Dict[str, Any]:
+    """对请求的 seq 列表重新生成章节分析任务包（章节处理/_任务包/task_chNNN_analysis.md）。
+
+    force=True 时覆盖既有任务包；force=False 时既有任务包被复用（rc=0）。
+    """
+    return _scoped_chapter_rerun(
+        project_dir, seqs=seqs, force=force,
+        prepare_fn=prepare_chapter_analysis,
+        artifact_key="analysis_task",
+        label="chapter_analysis_rerun",
+    )
+
+
+def scoped_chapter_delta_rerun(project_dir, *, seqs, force: bool = False) -> Dict[str, Any]:
+    """对请求的 seq 列表重新生成 Delta 提取任务包（章节处理/_任务包/task_chNNN_delta.md）。
+
+    需要本章章节分析 MD 已通过校验；否则 prepare_chapter_delta 会生成重新生成任务并
+    返回 rc=2，此函数将其作为失败抛出，adapter 据此返回 failed 任务。
+    """
+    return _scoped_chapter_rerun(
+        project_dir, seqs=seqs, force=force,
+        prepare_fn=prepare_chapter_delta,
+        artifact_key="delta_task",
+        label="chapter_delta_rerun",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="拆书主控器")
     sub = parser.add_subparsers(dest="cmd", required=True)
