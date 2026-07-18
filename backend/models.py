@@ -131,3 +131,37 @@ class Status(BaseModel):
     completed: list[str] = []
     last_error: Optional[str] = None
     recent_events: list[StageEvent] = []
+    revisions: dict[str, str] = {}
+    task_summary: dict[str, int] = {}
+    stale_task_count: int = 0
+
+
+CardState = Literal[
+    "missing", "latest", "stale", "queued", "running", "failed", "cancelled"
+]
+
+
+class CardStatus(BaseModel):
+    status: CardState
+    artifact_present: bool = False
+    latest_task_id: Optional[int] = None
+    latest_task_status: Optional[str] = None
+    error: Optional[str] = None
+    paths: list[str] = []
+
+
+class ChapterCardStatus(BaseModel):
+    seq: int
+    filename: str
+    title: str = ""
+    cards: dict[str, CardStatus] = {}
+    stale: bool = False
+    latest_task: Optional[dict] = None
+    error: Optional[str] = None
+
+
+class ArtifactStatusResponse(BaseModel):
+    dimensions: dict[str, CardStatus] = {}
+    chapters: list[ChapterCardStatus] = []
+    exports: dict[str, CardStatus] = {}
+    counts: dict[str, int] = {}

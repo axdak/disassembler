@@ -32,6 +32,14 @@ from task_adapters import (
     ExportAdapter, GovernanceTaskAdapter,
 )
 from workbench import WorkbenchTaskManager, WriterCoordinator
+from artifact_status import (
+    ArtifactStatusResponse,
+    chapter_cards,
+    collect_artifact_status,
+    stale_task_count,
+    task_summary,
+)
+from revisions import project_revisions
 
 ARTIFACT_MAX_CHARS = 200_000
 
@@ -172,6 +180,7 @@ def create_app(
         active = app.state.db.get_active_run(pid)
         state = PipelineState.load(Path(project["path"]))
         events = app.state.db.list_events(pid, limit=50)
+        tasks = app.state.workbench.list(pid)
         return Status(
             project=Project(**project),
             active_run=Run(**active) if active else None,
@@ -179,6 +188,9 @@ def create_app(
             completed=state.completed,
             last_error=state.last_error or None,
             recent_events=[StageEvent(**e) for e in events],
+            revisions=project_revisions(Path(project["path"])),
+            task_summary=task_summary(tasks),
+            stale_task_count=stale_task_count(Path(project["path"]), tasks),
         )
 
     @app.delete("/projects/{pid}", dependencies=[Depends(require_token)])
@@ -270,19 +282,41 @@ def create_app(
             chapters = json.loads(index.read_text(encoding="utf-8")).get("chapters", [])
         except (json.JSONDecodeError, OSError):
             return []
+        tasks = app.state.workbench.list(pid)
+        cards_by_seq = {c.seq: c for c in chapter_cards(pdir, tasks)}
         chdir = pdir / "章节处理"
         out = []
         for ch in chapters:
             fn = ch.get("filename", "")
             stem = Path(fn).stem if fn else ""
+            seq = ch.get("seq")
+            card_row = cards_by_seq.get(seq) if seq is not None else None
+            cards = card_row.cards if card_row is not None else {}
             out.append({
-                "seq": ch.get("seq"),
+                "seq": seq,
                 "filename": fn,
                 "title": ch.get("title", ""),
                 "has_analysis": bool(fn) and (chdir / fn).is_file(),
                 "has_delta": bool(stem) and (chdir / f"{stem}.json").is_file(),
+                "analysis": cards.get("analysis").model_dump() if cards.get("analysis") else None,
+                "delta": cards.get("delta").model_dump() if cards.get("delta") else None,
+                "visual": cards.get("visual").model_dump() if cards.get("visual") else None,
+                "structure": cards.get("structure").model_dump() if cards.get("structure") else None,
+                "stale": card_row.stale if card_row is not None else False,
+                "latest_task": card_row.latest_task if card_row is not None else None,
+                "error": card_row.error if card_row is not None else None,
             })
         return out
+
+    @app.get(
+        "/projects/{pid}/artifacts/status",
+        dependencies=[Depends(require_token)],
+        response_model=ArtifactStatusResponse,
+    )
+    def project_artifact_status(pid: int):
+        project = _project_or_404(pid)
+        tasks = app.state.workbench.list(pid)
+        return collect_artifact_status(Path(project["path"]), tasks)
 
     @app.post(
         "/projects/{pid}/chapters/append-preview",
