@@ -95,9 +95,12 @@ class RunManager:
         except Exception:
             try:
                 if run_id is not None:
-                    self.db.update_run(
-                        run_id, status="blocked", rc=-1, ended_at=_now_iso()
-                    )
+                    try:
+                        self.db.update_run(
+                            run_id, status="blocked", rc=-1, ended_at=_now_iso()
+                        )
+                    except Exception:
+                        pass
             finally:
                 self.writer_coordinator.release(project_id, writer_owner)
             raise
@@ -116,30 +119,59 @@ class RunManager:
 
         def worker() -> None:
             try:
+                execution_error = None
                 try:
                     rc = orch.run()
                 except Exception as exc:  # noqa: BLE001
                     rc = -1
+                    execution_error = str(exc)
+
+                intended_status = {0: "done", 2: "cancelled"}.get(rc, "blocked")
+                stored_status = None
+                persistence_error = None
+                ended_at = _now_iso()
+                try:
+                    self.db.update_run(
+                        run_id, status=intended_status, rc=rc, ended_at=ended_at
+                    )
+                    stored_status = intended_status
+                except Exception as exc:  # noqa: BLE001
+                    persistence_error = (
+                        f"terminal persistence failed for {intended_status}: {exc}"
+                    )
+                    try:
+                        self.db.update_run(
+                            run_id, status="blocked", rc=-1, ended_at=ended_at
+                        )
+                        stored_status = "blocked"
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        persistence_error += f"; blocked fallback failed: {fallback_exc}"
+
+                for detail in (execution_error, persistence_error):
+                    if not detail:
+                        continue
                     try:
                         self.db.add_event(
-                            run_id, project_id, "pipeline_error", detail=str(exc)
+                            run_id, project_id, "pipeline_error", detail=detail
                         )
                     except Exception:
                         pass
                     self.hub.broadcast({
                         "run_id": run_id, "project_id": project_id,
-                        "type": "pipeline_error", "detail": str(exc), "ts": time.time(),
+                        "type": "pipeline_error", "detail": detail, "ts": time.time(),
                     })
-                status = {0: "done", 2: "cancelled"}.get(rc, "blocked")
-                try:
-                    self.db.add_event(
-                        run_id, project_id, "run_status", detail=status
-                    )
-                except Exception:
-                    pass
-                self.hub.broadcast({"run_id": run_id, "project_id": project_id,
-                                    "type": "run_status", "detail": status, "ts": time.time()})
-                self.db.update_run(run_id, status=status, rc=rc, ended_at=_now_iso())
+
+                if stored_status is not None:
+                    try:
+                        self.db.add_event(
+                            run_id, project_id, "run_status", detail=stored_status
+                        )
+                    except Exception:
+                        pass
+                    self.hub.broadcast({
+                        "run_id": run_id, "project_id": project_id,
+                        "type": "run_status", "detail": stored_status, "ts": time.time(),
+                    })
             finally:
                 with self._lock:
                     self._active.pop(project_id, None)
@@ -156,9 +188,12 @@ class RunManager:
                     active = self._active.get(project_id)
                     if active is not None and active.thread is t:
                         self._active.pop(project_id, None)
-                self.db.update_run(
-                    run_id, status="blocked", rc=-1, ended_at=_now_iso()
-                )
+                try:
+                    self.db.update_run(
+                        run_id, status="blocked", rc=-1, ended_at=_now_iso()
+                    )
+                except Exception:
+                    pass
             finally:
                 self.writer_coordinator.release(project_id, writer_owner)
             raise

@@ -157,6 +157,46 @@ class FailWorkerProjectLookupDatabase(Database):
         return super().get_project(project_id)
 
 
+class FailDoneUpdateOnceDatabase(Database):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_done_once = True
+
+    def update_run(self, run_id, status=None, rc=None, ended_at=None):
+        if status == "done" and self.fail_done_once:
+            self.fail_done_once = False
+            raise RuntimeError("terminal done update failed")
+        return super().update_run(run_id, status=status, rc=rc, ended_at=ended_at)
+
+
+class FailAllRunUpdatesDatabase(Database):
+    def update_run(self, run_id, status=None, rc=None, ended_at=None):
+        raise RuntimeError("persistent terminal update failure")
+
+
+class FailFirstRunUpdateDatabase(Database):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_first_update = True
+
+    def update_run(self, run_id, status=None, rc=None, ended_at=None):
+        if self.fail_first_update:
+            self.fail_first_update = False
+            raise RuntimeError("cleanup update failed")
+        return super().update_run(run_id, status=status, rc=rc, ended_at=ended_at)
+
+
+class FailFirstOrchestratorFactory:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, project_path, config, bus):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("orchestrator setup failed")
+        return InstantOrchestrator(project_path, config, bus)
+
+
 @pytest.fixture
 def manager_env(tmp_path):
     db = Database(tmp_path / "tasks.db")
@@ -602,7 +642,86 @@ def test_legacy_worker_tail_failure_releases_lease_and_next_run_starts(tmp_path)
     wait_for(lambda: db.get_run(second)["status"] == "done")
 
     assert db.get_run(first)["status"] == "done"
-    assert manager.active_run_id(project["id"]) is None
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    db.close()
+
+
+def test_run_status_broadcast_observes_already_persisted_terminal_state(tmp_path):
+    db = Database(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    hub = BroadcastHub()
+    observed = []
+
+    def observe(event):
+        if event["type"] == "run_status":
+            observed.append((event["detail"], db.get_run(event["run_id"])["status"]))
+
+    hub.subscribe(observe)
+    manager = RunManager(db, hub, InstantOrchestrator, WriterCoordinator())
+    run_id = manager.start(project["id"], RunConfig())
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+
+    assert db.get_run(run_id)["status"] == "done"
+    assert observed == [("done", "done")]
+    db.close()
+
+
+def test_failed_done_update_falls_back_before_consistent_terminal_broadcast(tmp_path):
+    db = FailDoneUpdateOnceDatabase(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    hub = BroadcastHub()
+    events = []
+    hub.subscribe(events.append)
+    manager = RunManager(db, hub, InstantOrchestrator, WriterCoordinator())
+
+    first = manager.start(project["id"], RunConfig())
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    first_statuses = [
+        event["detail"] for event in events
+        if event["type"] == "run_status" and event["run_id"] == first
+    ]
+    assert db.get_run(first)["status"] == "blocked"
+    assert first_statuses == ["blocked"]
+    assert any(
+        event["type"] == "pipeline_error" and event["run_id"] == first
+        for event in events
+    )
+
+    second = manager.start(project["id"], RunConfig())
+    wait_for(lambda: db.get_run(second)["status"] == "done")
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    db.close()
+
+
+def test_persistent_terminal_update_failure_never_broadcasts_false_done(tmp_path):
+    db = FailAllRunUpdatesDatabase(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    hub = BroadcastHub()
+    events = []
+    hub.subscribe(events.append)
+    manager = RunManager(db, hub, InstantOrchestrator, WriterCoordinator())
+
+    first = manager.start(project["id"], RunConfig())
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    assert not any(
+        event["type"] == "run_status" and event["run_id"] == first
+        for event in events
+    )
+
+    second = manager.start(project["id"], RunConfig())
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    assert second != first
+    assert db.get_run(first)["status"] == "running"
+    assert db.get_run(second)["status"] == "running"
+    assert db.mark_running_runs_interrupted() == [
+        (first, project["id"]), (second, project["id"])
+    ]
     db.close()
 
 
@@ -629,6 +748,54 @@ def test_legacy_thread_start_failure_cleans_active_and_writer_lease(tmp_path, mo
     assert manager.active_run_id(project["id"]) is None
     second = manager.start(project["id"], RunConfig())
     wait_for(lambda: db.get_run(second)["status"] == "done")
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    db.close()
+
+
+def test_thread_start_cleanup_update_failure_preserves_cleanup_and_original_error(
+    tmp_path, monkeypatch
+):
+    db = FailFirstRunUpdateDatabase(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    manager = RunManager(db, BroadcastHub(), InstantOrchestrator, WriterCoordinator())
+    original_start = threading.Thread.start
+    failed_once = False
+
+    def fail_first_run_start(thread):
+        nonlocal failed_once
+        if thread.name.startswith("run-") and not failed_once:
+            failed_once = True
+            raise RuntimeError("thread start failed")
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_first_run_start)
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        manager.start(project["id"], RunConfig())
+    assert manager.active_run_id(project["id"]) is None
+
+    second = manager.start(project["id"], RunConfig())
+    wait_for(lambda: db.get_run(second)["status"] == "done")
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    db.close()
+
+
+def test_setup_cleanup_update_failure_releases_lease_and_preserves_setup_error(tmp_path):
+    db = FailFirstRunUpdateDatabase(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    factory = FailFirstOrchestratorFactory()
+    manager = RunManager(db, BroadcastHub(), factory, WriterCoordinator())
+
+    with pytest.raises(RuntimeError, match="orchestrator setup failed"):
+        manager.start(project["id"], RunConfig())
+    assert manager.active_run_id(project["id"]) is None
+
+    second = manager.start(project["id"], RunConfig())
+    wait_for(lambda: db.get_run(second)["status"] == "done")
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
     db.close()
 
 
