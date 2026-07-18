@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from revisions import project_revisions, task_is_stale
 
 
@@ -111,3 +113,28 @@ def test_append_only_growth_keeps_old_per_chapter_analysis_current(tmp_path):
 
     assert appended["chapter"] != original["chapter"]
     assert task_is_stale(per_chapter, appended) is False
+
+
+@pytest.mark.parametrize(
+    ("task_type", "params"),
+    [
+        ("chapter_visual", {"chapter_seq": 7}),
+        ("chapter_structure", {"seq": 7}),
+        ("chapter_analysis_rerun", {"chapter": 7}),
+        ("chapter_delta_rerun", {"chapter_id": 7}),
+    ],
+)
+def test_scoped_chapter_tasks_ignore_global_revision_changes_but_detect_selected_chapter_changes(
+    task_type, params
+):
+    task = {
+        "task_type": task_type,
+        "params": params,
+        "input_revision": {"chapter": "before", "chapter:7": "selected-before"},
+    }
+    current = {"chapter": "after", "chapter:7": "selected-before"}
+
+    assert task_is_stale(task, current) is False
+
+    current["chapter:7"] = "selected-after"
+    assert task_is_stale(task, current) is True

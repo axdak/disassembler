@@ -8,6 +8,12 @@ from typing import Any
 
 
 _CHAPTER_TASK_NAMES = frozenset({"chapter", "chapter_analysis", "chapter_structure", "visual_assets"})
+_SCOPED_CHAPTER_TASK_TYPES = frozenset({
+    "chapter_visual",
+    "chapter_structure",
+    "chapter_analysis_rerun",
+    "chapter_delta_rerun",
+})
 
 
 def _digest(parts: list[bytes]) -> str:
@@ -111,7 +117,7 @@ def _task_dependencies(task: dict[str, Any], current: dict[str, str]) -> list[st
     if task_type == "export":
         source = str(params.get("source", params.get("export_source", "final"))).lower()
         return ["process" if source == "process" else "final"]
-    if task_type in {"chapter", "chapter_analysis", "chapter_task"}:
+    if task_type in {"chapter", "chapter_analysis", "chapter_task"} | _SCOPED_CHAPTER_TASK_TYPES:
         return [_chapter_key(params, current)]
     if task_type == "analysis":
         name = _analysis_task_name(params)
