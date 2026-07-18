@@ -180,7 +180,8 @@ def create_app(
         active = app.state.db.get_active_run(pid)
         state = PipelineState.load(Path(project["path"]))
         events = app.state.db.list_events(pid, limit=50)
-        tasks = app.state.workbench.list(pid)
+        revisions = project_revisions(Path(project["path"]))
+        tasks = app.state.workbench.list(pid, revisions=revisions)
         return Status(
             project=Project(**project),
             active_run=Run(**active) if active else None,
@@ -188,9 +189,9 @@ def create_app(
             completed=state.completed,
             last_error=state.last_error or None,
             recent_events=[StageEvent(**e) for e in events],
-            revisions=project_revisions(Path(project["path"])),
+            revisions=revisions,
             task_summary=task_summary(tasks),
-            stale_task_count=stale_task_count(Path(project["path"]), tasks),
+            stale_task_count=stale_task_count(Path(project["path"]), tasks, revisions=revisions),
         )
 
     @app.delete("/projects/{pid}", dependencies=[Depends(require_token)])
@@ -282,8 +283,9 @@ def create_app(
             chapters = json.loads(index.read_text(encoding="utf-8")).get("chapters", [])
         except (json.JSONDecodeError, OSError):
             return []
-        tasks = app.state.workbench.list(pid)
-        cards_by_seq = {c.seq: c for c in chapter_cards(pdir, tasks)}
+        revisions = project_revisions(pdir)
+        tasks = app.state.workbench.list(pid, revisions=revisions)
+        cards_by_seq = {c.seq: c for c in chapter_cards(pdir, tasks, revisions=revisions)}
         chdir = pdir / "章节处理"
         out = []
         for ch in chapters:
@@ -315,8 +317,10 @@ def create_app(
     )
     def project_artifact_status(pid: int):
         project = _project_or_404(pid)
-        tasks = app.state.workbench.list(pid)
-        return collect_artifact_status(Path(project["path"]), tasks)
+        pdir = Path(project["path"])
+        revisions = project_revisions(pdir)
+        tasks = app.state.workbench.list(pid, revisions=revisions)
+        return collect_artifact_status(pdir, tasks, revisions=revisions)
 
     @app.post(
         "/projects/{pid}/chapters/append-preview",

@@ -43,10 +43,12 @@ from revisions import project_revisions  # noqa: E402
 
 # Whole-book analysis dimensions whose outputs depend on the process story
 # structure (design §6: governance invalidates "reports depending on story
-# structure").  narrative_structure analyzes 故事结构_增量.json directly; the
-# others only consume chapter text and stay current when governance edits the
-# process JSON.
-_STRUCTURE_DEPENDENT_DIMENSIONS = frozenset({"narrative_structure"})
+# structure").  engine/scripts/analysis_context_pack.py:build_pack loads
+# 故事结构_增量.json and appends summarize_story_structure(story) into EVERY
+# whole-book analysis pack, so every whole-book analysis dimension consumes
+# the process story JSON — not just narrative_structure.  Governance mutates
+# 故事结构_增量.json, so every whole-book analysis card goes stale.
+_STRUCTURE_DEPENDENT_DIMENSIONS = frozenset(ANALYSIS_OUTPUTS)
 
 # Revision keys each card kind depends on.  Keys map directly to the entries in
 # ``project_revisions``: ``chapter`` (global), ``chapter:<seq>`` (per-chapter),
@@ -269,14 +271,20 @@ def _paths_for_target(project_dir, target, chapter_lookup) -> list[Path]:
     return []
 
 
-def collect_artifact_status(project_dir, tasks) -> ArtifactStatusResponse:
+def collect_artifact_status(project_dir, tasks, *, revisions: dict | None = None) -> ArtifactStatusResponse:
     """Build the artifact status response for a project and its task list.
 
     ``tasks`` is the list of task dicts (as returned by ``Database.list_tasks``
     or ``WorkbenchTaskManager.list`` — both decoded shapes are accepted).
+
+    ``revisions`` is an optional precomputed ``project_revisions(project_dir)``
+    result; when supplied it is used instead of recomputing, so callers that
+    also call ``WorkbenchTaskManager.list(..., revisions=...)`` can compute it
+    once per request.  When None (default) it is computed here, preserving the
+    original behavior for callers that don't pass it.
     """
     project_dir = Path(project_dir)
-    current = project_revisions(project_dir)
+    current = revisions if revisions is not None else project_revisions(project_dir)
 
     normalized = [_normalize_task(t) for t in tasks]
 
@@ -371,8 +379,8 @@ def collect_artifact_status(project_dir, tasks) -> ArtifactStatusResponse:
 
 
 # Helper retained for /chapters endpoint: build the per-chapter card map only.
-def chapter_cards(project_dir, tasks) -> list[ChapterCardStatus]:
-    return collect_artifact_status(project_dir, tasks).chapters
+def chapter_cards(project_dir, tasks, *, revisions: dict | None = None) -> list[ChapterCardStatus]:
+    return collect_artifact_status(project_dir, tasks, revisions=revisions).chapters
 
 
 # Helper retained for the project status endpoint: summary counts.
@@ -386,9 +394,9 @@ def task_summary(tasks) -> dict[str, int]:
     return summary
 
 
-def stale_task_count(project_dir, tasks) -> int:
+def stale_task_count(project_dir, tasks, *, revisions: dict | None = None) -> int:
     project_dir = Path(project_dir)
-    current = project_revisions(project_dir)
+    current = revisions if revisions is not None else project_revisions(project_dir)
     from revisions import task_is_stale
     count = 0
     for raw in tasks:

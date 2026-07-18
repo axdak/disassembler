@@ -153,8 +153,8 @@ class WorkbenchTaskManager:
         self._wake.set()
         return self._serialize(task)
 
-    def list(self, project_id: int) -> list[dict]:
-        return [self._serialize(task) for task in self.db.list_tasks(project_id)]
+    def list(self, project_id: int, *, revisions: dict | None = None) -> list[dict]:
+        return [self._serialize(task, revisions=revisions) for task in self.db.list_tasks(project_id)]
 
     def get(self, task_id: int) -> dict | None:
         task = self.db.get_task(task_id)
@@ -225,9 +225,12 @@ class WorkbenchTaskManager:
         for thread in threads:
             thread.join(timeout=2.0)
 
-    def _serialize(self, task: dict) -> dict:
+    def _serialize(self, task: dict, *, revisions: dict | None = None) -> dict:
         project = self.db.get_project(task["project_id"])
-        current = project_revisions(Path(project["path"])) if project else {}
+        if revisions is not None:
+            current = revisions
+        else:
+            current = project_revisions(Path(project["path"])) if project else {}
         return {**task, "stale": task_is_stale(task, current)}
 
     def _queued_tasks(self) -> list[dict]:

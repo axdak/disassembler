@@ -213,37 +213,39 @@ def test_append_invalidates_whole_book_and_new_chapters_only(tmp_path):
 
 # ---- Step 1: governance invalidation mapping ---------------------------
 
-def test_governance_invalidates_story_structure_reports_and_exports_only(tmp_path):
+def test_governance_invalidates_all_whole_book_reports_and_exports_only(tmp_path):
     project = tmp_path / "项目"
     rev = _seed_project(project, [_chapter(1)])
     _seed_per_chapter_artifacts(project, _chapter(1))
-    _seed_whole_book_artifact(project, "summary")
-    _seed_whole_book_artifact(project, "narrative_structure")
-    _seed_whole_book_artifact(project, "visual_assets")
+    # Seed every whole-book analysis artifact so each has a card to mark stale.
+    for dim in ANALYSIS_OUTPUTS:
+        _seed_whole_book_artifact(project, dim)
     _touch_md(project / "obsidian-export" / "_meta" / "export_report.json")
 
-    tasks = [
-        _task(1, "analysis", "done", {"task": "summary"}, rev),
-        _task(2, "analysis", "done", {"task": "narrative_structure"}, rev),
-        _task(3, "chapter_visual", "done", {"seqs": [1], "aggregate": True}, rev),
-        _task(4, "export", "done", {"source": "final"}, rev),
-        _task(5, "export", "done", {"source": "process"}, rev),
-    ]
+    # Give every whole-book analysis dimension a task captured at the
+    # pre-governance revision; governance then mutates the process story JSON,
+    # and every whole-book analysis pack consumes that JSON (engine build_pack
+    # appends summarize_story_structure into every whole-book pack), so every
+    # whole-book analysis card must go stale.
+    tasks = [_task(i + 1, "analysis", "done", {"task": dim}, rev)
+             for i, dim in enumerate(ANALYSIS_OUTPUTS)]
+    tasks.append(_task(len(tasks) + 1, "chapter_visual", "done", {"seqs": [1], "aggregate": True}, rev))
+    tasks.append(_task(len(tasks) + 2, "export", "done", {"source": "final"}, rev))
+    tasks.append(_task(len(tasks) + 3, "export", "done", {"source": "process"}, rev))
 
     # governance changes the process story JSON only
     (project / "故事结构_增量.json").write_text('{"阶段":"过程已治理"}', encoding="utf-8")
 
     resp = collect_artifact_status(project, tasks)
-    # chapter analysis / per-chapter NOT invalidated
+    # chapter analysis / per-chapter NOT invalidated (governance edits process JSON only)
     assert resp.chapters[0].cards["analysis"].status == "latest"
     assert resp.chapters[0].cards["delta"].status == "latest"
     assert resp.chapters[0].cards["visual"].status == "latest"
     assert resp.chapters[0].cards["structure"].status == "latest"
-    # whole-book reports NOT depending on story structure stay latest
-    assert resp.dimensions["summary"].status == "latest"
-    assert resp.dimensions["visual_assets"].status == "latest"  # aggregate, no story-structure dep
-    # whole-book reports depending on story structure = stale
-    assert resp.dimensions["narrative_structure"].status == "stale"
+    # engine build_pack appends the process story summary into EVERY whole-book
+    # analysis pack, so governance marks ALL whole-book analysis cards stale.
+    for dim in ANALYSIS_OUTPUTS:
+        assert resp.dimensions[dim].status == "stale", dim
     # final JSON + all exports = stale
     assert resp.exports["final"].status == "stale"
     assert resp.exports["process"].status == "stale"
