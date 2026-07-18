@@ -21,6 +21,7 @@ interface Window {
     pickBook(): Promise<string | null>
     pickFolder(): Promise<string | null>
     createFromBook(source_file: string): Promise<unknown>
+    loginAgy(): Promise<{ opened: boolean; error?: string }>
     onEvent(cb: (ev: unknown) => void): () => void
   }
 }

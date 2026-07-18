@@ -67,5 +67,18 @@ def test_cmd_run_interleaved(tmp_path, monkeypatch):
     for i in range(3):
         assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.md").is_file()
         assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.json").is_file()
-    for i in range(2):
-        assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.md").is_file()
+
+
+def test_stream_shell_command_cancel(tmp_path):
+    import os
+    import threading
+    import run_pipeline
+    ev = threading.Event()
+    ev.set()  # 预先取消，避免定时器线程跨测试泄漏
+    run_pipeline.set_cancel_event(ev)
+    try:
+        cmd = f'"{sys.executable}" -c "import time; time.sleep(30)"'
+        rc, _ = run_pipeline.stream_shell_command(cmd, tmp_path, dict(os.environ), 30.0)
+        assert rc == 130
+    finally:
+        run_pipeline.set_cancel_event(threading.Event())

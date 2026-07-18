@@ -327,3 +327,28 @@ def test_cancel_before_run(tmp_path):
     assert rc == 2  # cancelled
     assert m.call_count == 0  # 未进入任何阶段
     assert "pipeline_cancelled" in events
+
+
+def test_cancel_mid_stage(tmp_path):
+    import threading
+    import time
+    bus = EventBus()
+    events = []
+    bus.subscribe(lambda e: events.append(e.type))
+    orch_ref: list = []
+
+    def fake_cmd_run(*a, **k):
+        o = orch_ref[0]
+        for _ in range(100):
+            if o._cancel.is_set():
+                return 130  # 模拟 worker 被取消
+            time.sleep(0.02)
+        return 1
+
+    with patch.object(orchestrator, "cmd_run", side_effect=fake_cmd_run):
+        orch = Orchestrator(tmp_path, config=Config(max_attempts=1), bus=bus)
+        orch_ref.append(orch)
+        threading.Timer(0.2, orch.cancel).start()
+        rc = orch.run()
+    assert rc == 2  # 阶段中途取消
+    assert "pipeline_cancelled" in events

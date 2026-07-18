@@ -150,6 +150,16 @@ def timeout_output(exc: subprocess.TimeoutExpired, timeout_seconds: float) -> st
     return f"{output}\n命令执行超时（{timeout_seconds:g} 秒），已终止。\n"
 
 
+# 可取消的 worker：编排器通过 set_cancel_event 注入 threading.Event，
+# stream_shell_command 轮询它，被取消时 kill 子进程并返回 130（用户取消）。
+_cancel_event = threading.Event()
+
+
+def set_cancel_event(event: "threading.Event") -> None:
+    global _cancel_event
+    _cancel_event = event
+
+
 def stream_shell_command(
     command: str,
     cwd: Path,
@@ -195,6 +205,16 @@ def stream_shell_command(
 
     while True:
         drain_output()
+        if _cancel_event.is_set():
+            proc.kill()
+            proc.wait()
+            reader.join(timeout=1)
+            drain_output()
+            message = "[cancelled by user]\n"
+            output_parts.append(message)
+            sys.stdout.write(message)
+            sys.stdout.flush()
+            return 130, "".join(output_parts)
         if proc.poll() is not None:
             break
         if deadline is not None and time.monotonic() >= deadline:
@@ -432,6 +452,8 @@ def run_worker(
             log_path.write_text(output, encoding="utf-8")
         if returncode != 0:
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
+            if returncode == 130:
+                return 130  # 用户取消，不重试
             if attempt < attempts:
                 continue
             return returncode
@@ -587,6 +609,8 @@ def run_multi_output_worker(
             log_path.write_text(output, encoding="utf-8")
         if returncode != 0:
             print(f"worker failed: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
+            if returncode == 130:
+                return 130  # 用户取消，不重试
             if attempt < attempts:
                 continue
             return returncode

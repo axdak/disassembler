@@ -39,6 +39,7 @@ from run_pipeline import (
     run_multi_output_worker,
     run_worker,
     script_path,
+    set_cancel_event,
 )
 
 # 全书分析任务依赖顺序（阶段5）
@@ -86,19 +87,26 @@ class Orchestrator:
         self.bus.emit(Event(type, stage=stage, detail=detail, data=data or {}))
 
     def run(self) -> int:
-        """运行全流程。返回 0=全部完成，1=硬阻塞/致命（项目暂停）。"""
-        self.emit("pipeline_start", stage=self.state.current_stage)
-        while not self.state.is_done():
-            if self._cancel.is_set():
-                self.emit("pipeline_cancelled")
-                return 2
-            stage = self.state.current_stage
-            rc = self._run_stage_with_retries(stage)
-            if rc != 0:
-                self.emit("pipeline_blocked", stage=stage, detail=self.state.last_error)
-                return 1
-        self.emit("pipeline_done", detail="全流程完成")
-        return 0
+        """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
+        set_cancel_event(self._cancel)
+        try:
+            self.emit("pipeline_start", stage=self.state.current_stage)
+            while not self.state.is_done():
+                if self._cancel.is_set():
+                    self.emit("pipeline_cancelled")
+                    return 2
+                stage = self.state.current_stage
+                rc = self._run_stage_with_retries(stage)
+                if rc != 0:
+                    if rc == 2:
+                        self.emit("pipeline_cancelled")
+                        return 2
+                    self.emit("pipeline_blocked", stage=stage, detail=self.state.last_error)
+                    return 1
+            self.emit("pipeline_done", detail="全流程完成")
+            return 0
+        finally:
+            set_cancel_event(threading.Event())  # 重置，避免跨运行/跨测试泄漏
 
     def _run_stage_with_retries(self, stage: str) -> int:
         self.emit("stage_start", stage=stage)
@@ -123,6 +131,9 @@ class Orchestrator:
                 self.state.save()
                 self.emit("stage_done", stage=stage, data={"attempts": attempt})
                 return 0
+            if self._cancel.is_set():
+                self.emit("pipeline_cancelled")
+                return 2
             sig = self._signature(stage)
             stagnant = self.state.record_signature(stage, sig)
             self.state.last_error = f"{stage} attempt {attempt} rc={rc}"
