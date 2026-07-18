@@ -239,6 +239,14 @@ class Database:
             ).fetchall()
             return [self._decode_task(row) for row in rows]
 
+    def list_queued_tasks(self) -> list:
+        """Return every queued task in global FIFO order for scheduler admission."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM workbench_tasks WHERE status='queued' ORDER BY id ASC"
+            ).fetchall()
+            return [self._decode_task(row) for row in rows]
+
     def update_task(self, task_id: int, *, status: Optional[str] = None,
                     result: Any = _UNSET, error: Any = _UNSET,
                     cancel_requested: Optional[bool] = None,

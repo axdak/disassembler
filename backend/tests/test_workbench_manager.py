@@ -82,6 +82,81 @@ class AdapterFactory:
         return adapter
 
 
+class PreparedAdapter:
+    def __init__(self):
+        self.prepare_started = threading.Event()
+        self.prepare_release = threading.Event()
+        self.run_started = threading.Event()
+        self.run_release = threading.Event()
+        self.received = None
+
+    def prepare(self, context):
+        self.prepare_started.set()
+        self.prepare_release.wait(3)
+        return {"stable_task": context.task_id}
+
+    def run(self, context, prepared_input):
+        self.received = prepared_input
+        self.run_started.set()
+        self.run_release.wait(3)
+        return {"prepared": prepared_input}
+
+
+class ImmediateAdapter:
+    def run(self, context):
+        return {"task_id": context.task_id}
+
+
+class FailFirstAdapterFactory:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("adapter construction failed")
+        return ImmediateAdapter()
+
+
+class FailTaskStartedEventDatabase(Database):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_task_started_once = True
+
+    def add_event(self, run_id, project_id, type, *args, **kwargs):
+        if type == "task_started" and self.fail_task_started_once:
+            self.fail_task_started_once = False
+            raise RuntimeError("task_started persistence failed")
+        return super().add_event(run_id, project_id, type, *args, **kwargs)
+
+
+class FailRunStatusEventDatabase(Database):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_run_status_once = True
+
+    def add_event(self, run_id, project_id, type, *args, **kwargs):
+        if type == "run_status" and self.fail_run_status_once:
+            self.fail_run_status_once = False
+            raise RuntimeError("run_status persistence failed")
+        return super().add_event(run_id, project_id, type, *args, **kwargs)
+
+
+class FailWorkerProjectLookupDatabase(Database):
+    def __init__(self, path):
+        super().__init__(path)
+        self.fail_worker_lookup_once = True
+
+    def get_project(self, project_id):
+        if (
+            threading.current_thread().name.startswith("workbench-")
+            and self.fail_worker_lookup_once
+        ):
+            self.fail_worker_lookup_once = False
+            raise RuntimeError("worker project lookup failed")
+        return super().get_project(project_id)
+
+
 @pytest.fixture
 def manager_env(tmp_path):
     db = Database(tmp_path / "tasks.db")
@@ -99,7 +174,11 @@ def manager_env(tmp_path):
     manager = WorkbenchTaskManager(
         db,
         hub,
-        {"governance": writer_factory, "analysis": reader_factory},
+        {
+            "governance": writer_factory,
+            "chapter_analysis_rerun": writer_factory,
+            "analysis": reader_factory,
+        },
         poll_interval=0.01,
     )
     yield db, p1, p2, hub, monitor, gates, manager, writer_factory, reader_factory
@@ -131,6 +210,23 @@ def test_writer_fifo_per_project_and_parallel_across_projects(manager_env):
     wait_for(lambda: all(db.get_task(tid)["status"] == "done" for tid in (
         first["id"], second["id"], other_project["id"]
     )))
+
+
+def test_chapter_analysis_rerun_cannot_overlap_governance(manager_env):
+    db, p1, _, _, _, gates, manager, _, _ = manager_env
+    chapter_task = manager.create(p1["id"], "chapter_analysis_rerun", {})
+    wait_for(lambda: db.get_task(chapter_task["id"])["status"] == "running")
+    governance = manager.create(p1["id"], "governance", {})
+
+    time.sleep(0.05)
+    assert db.get_task(governance["id"])["status"] == "queued"
+
+    wait_for(lambda: chapter_task["id"] in gates)
+    gates[chapter_task["id"]].set()
+    wait_for(lambda: db.get_task(governance["id"])["status"] == "running")
+    wait_for(lambda: governance["id"] in gates)
+    gates[governance["id"]].set()
+    wait_for(lambda: db.get_task(governance["id"])["status"] == "done")
 
 
 class BlockingOrchestrator:
@@ -185,6 +281,34 @@ def test_legacy_run_and_workbench_writer_exclude_each_other_without_losing_queue
 
         gates[task["id"]].set()
         wait_for(lambda: db.get_task(task["id"])["status"] == "done")
+    finally:
+        for gate in gates.values():
+            gate.set()
+        manager.shutdown()
+        db.close()
+
+
+def test_chapter_analysis_rerun_blocks_legacy_automatic_run(tmp_path):
+    db = Database(tmp_path / "tasks.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    hub = BroadcastHub()
+    coordinator = WriterCoordinator()
+    run_manager = RunManager(db, hub, InstantOrchestrator, coordinator)
+    monitor, gates = RunMonitor(), {}
+    manager = WorkbenchTaskManager(
+        db,
+        hub,
+        {"chapter_analysis_rerun": AdapterFactory(monitor, gates)},
+        run_manager,
+        poll_interval=0.01,
+    )
+    try:
+        task = manager.create(project["id"], "chapter_analysis_rerun", {})
+        wait_for(lambda: db.get_task(task["id"])["status"] == "running")
+        with pytest.raises(RuntimeError, match="writer active"):
+            run_manager.start(project["id"], RunConfig())
     finally:
         for gate in gates.values():
             gate.set()
@@ -249,6 +373,70 @@ def test_readers_wait_for_writer_admission_then_run_concurrently(manager_env):
     gates[reader2["id"]].set()
     wait_for(lambda: db.get_task(reader1["id"])["status"] == "done")
     wait_for(lambda: db.get_task(reader2["id"])["status"] == "done")
+
+
+def test_reader_without_prepare_holds_lease_for_its_whole_run(manager_env):
+    db, p1, _, _, _, gates, manager, _, _ = manager_env
+    reader = manager.create(p1["id"], "analysis", {})
+    wait_for(lambda: db.get_task(reader["id"])["status"] == "running")
+    wait_for(lambda: reader["id"] in gates)
+    writer = manager.create(p1["id"], "governance", {})
+
+    time.sleep(0.05)
+    assert db.get_task(writer["id"])["status"] == "queued"
+
+    gates[reader["id"]].set()
+    wait_for(lambda: db.get_task(writer["id"])["status"] == "running")
+    wait_for(lambda: writer["id"] in gates)
+    gates[writer["id"]].set()
+    wait_for(lambda: db.get_task(writer["id"])["status"] == "done")
+
+
+def test_prepared_reader_releases_lease_after_stable_input_and_not_before(tmp_path):
+    db = Database(tmp_path / "tasks.db")
+    p1_path, p2_path = tmp_path / "p1", tmp_path / "p2"
+    p1_path.mkdir()
+    p2_path.mkdir()
+    p1 = db.create_project(str(p1_path))
+    p2 = db.create_project(str(p2_path))
+    hub = BroadcastHub()
+    prepared = PreparedAdapter()
+    monitor, gates = RunMonitor(), {}
+    writer_factory = AdapterFactory(monitor, gates)
+    manager = WorkbenchTaskManager(
+        db,
+        hub,
+        {"analysis": prepared, "governance": writer_factory},
+        poll_interval=0.01,
+    )
+    try:
+        reader = manager.create(p1["id"], "analysis", {})
+        assert prepared.prepare_started.wait(1)
+        same_project_writer = manager.create(p1["id"], "governance", {})
+        other_project_writer = manager.create(p2["id"], "governance", {})
+
+        wait_for(lambda: db.get_task(other_project_writer["id"])["status"] == "running")
+        time.sleep(0.05)
+        assert db.get_task(same_project_writer["id"])["status"] == "queued"
+
+        prepared.prepare_release.set()
+        assert prepared.run_started.wait(1)
+        assert prepared.received == {"stable_task": reader["id"]}
+        wait_for(lambda: db.get_task(same_project_writer["id"])["status"] == "running")
+        assert db.get_task(reader["id"])["status"] == "running"
+
+        prepared.run_release.set()
+        wait_for(lambda: same_project_writer["id"] in gates and other_project_writer["id"] in gates)
+        gates[same_project_writer["id"]].set()
+        gates[other_project_writer["id"]].set()
+        wait_for(lambda: db.get_task(reader["id"])["status"] == "done")
+    finally:
+        prepared.prepare_release.set()
+        prepared.run_release.set()
+        for gate in gates.values():
+            gate.set()
+        manager.shutdown()
+        db.close()
 
 
 def test_cancel_queued_and_running_tasks_and_retry_keeps_history(manager_env):
@@ -317,6 +505,131 @@ def test_exact_event_order_payload_progress_and_failure_evidence(tmp_path):
             gate.set()
         manager.shutdown()
         db.close()
+
+
+def test_scheduler_finds_queued_task_after_more_than_100_older_rows(tmp_path):
+    db = Database(tmp_path / "tasks.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    for index in range(101):
+        older = db.create_task(project["id"], "analysis", {"older": index}, {})
+        db.update_task(older["id"], status="done")
+    target = db.create_task(project["id"], "analysis", {"target": True}, {})
+    manager = WorkbenchTaskManager(
+        db, BroadcastHub(), {"analysis": ImmediateAdapter()}, poll_interval=0.01
+    )
+    try:
+        wait_for(lambda: db.get_task(target["id"])["status"] == "done")
+    finally:
+        manager.shutdown()
+        db.close()
+
+
+def test_adapter_construction_failure_releases_lease_and_scheduler_continues(tmp_path):
+    db = Database(tmp_path / "tasks.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    manager = WorkbenchTaskManager(
+        db,
+        BroadcastHub(),
+        {"governance": FailFirstAdapterFactory()},
+        poll_interval=0.01,
+    )
+    try:
+        failed = manager.create(project["id"], "governance", {"order": 1})
+        following = manager.create(project["id"], "governance", {"order": 2})
+
+        wait_for(lambda: db.get_task(failed["id"])["status"] == "failed")
+        assert db.get_task(failed["id"])["error"] == "adapter construction failed"
+        wait_for(lambda: db.get_task(following["id"])["status"] == "done")
+    finally:
+        manager.shutdown()
+        db.close()
+
+
+def test_task_started_event_failure_cleans_active_lease_and_next_task_runs(tmp_path):
+    db = FailTaskStartedEventDatabase(tmp_path / "tasks.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    manager = WorkbenchTaskManager(
+        db, BroadcastHub(), {"governance": ImmediateAdapter()}, poll_interval=0.01
+    )
+    try:
+        failed = manager.create(project["id"], "governance", {"order": 1})
+        following = manager.create(project["id"], "governance", {"order": 2})
+
+        wait_for(lambda: db.get_task(failed["id"])["status"] == "failed")
+        assert db.get_task(failed["id"])["error"] == "task_started persistence failed"
+        wait_for(lambda: db.get_task(following["id"])["status"] == "done")
+    finally:
+        manager.shutdown()
+        db.close()
+
+
+def test_worker_context_failure_releases_lease_and_next_task_runs(tmp_path):
+    db = FailWorkerProjectLookupDatabase(tmp_path / "tasks.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    manager = WorkbenchTaskManager(
+        db, BroadcastHub(), {"governance": ImmediateAdapter()}, poll_interval=0.01
+    )
+    try:
+        failed = manager.create(project["id"], "governance", {"order": 1})
+        following = manager.create(project["id"], "governance", {"order": 2})
+
+        wait_for(lambda: db.get_task(failed["id"])["status"] == "failed")
+        assert db.get_task(failed["id"])["error"] == "worker project lookup failed"
+        wait_for(lambda: db.get_task(following["id"])["status"] == "done")
+    finally:
+        manager.shutdown()
+        db.close()
+
+
+def test_legacy_worker_tail_failure_releases_lease_and_next_run_starts(tmp_path):
+    db = FailRunStatusEventDatabase(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    manager = RunManager(db, BroadcastHub(), InstantOrchestrator, WriterCoordinator())
+
+    first = manager.start(project["id"], RunConfig())
+    wait_for(lambda: manager.active_run_id(project["id"]) is None)
+    second = manager.start(project["id"], RunConfig())
+    wait_for(lambda: db.get_run(second)["status"] == "done")
+
+    assert db.get_run(first)["status"] == "done"
+    assert manager.active_run_id(project["id"]) is None
+    db.close()
+
+
+def test_legacy_thread_start_failure_cleans_active_and_writer_lease(tmp_path, monkeypatch):
+    db = Database(tmp_path / "runs.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    manager = RunManager(db, BroadcastHub(), InstantOrchestrator, WriterCoordinator())
+    original_start = threading.Thread.start
+    failed_once = False
+
+    def fail_first_run_start(thread):
+        nonlocal failed_once
+        if thread.name.startswith("run-") and not failed_once:
+            failed_once = True
+            raise RuntimeError("thread start failed")
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_first_run_start)
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        manager.start(project["id"], RunConfig())
+
+    assert manager.active_run_id(project["id"]) is None
+    second = manager.start(project["id"], RunConfig())
+    wait_for(lambda: db.get_run(second)["status"] == "done")
+    db.close()
 
 
 def test_shutdown_cancels_active_work_and_stops_admission(manager_env):

@@ -13,7 +13,12 @@ from hub import BroadcastHub
 from revisions import project_revisions, task_is_stale
 
 
-WRITER_TASK_TYPES = frozenset({"append_chapters", "chapter_delta_rerun", "governance"})
+WRITER_TASK_TYPES = frozenset({
+    "append_chapters",
+    "chapter_analysis_rerun",
+    "chapter_delta_rerun",
+    "governance",
+})
 TERMINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled", "interrupted"})
 
 
@@ -27,10 +32,11 @@ class WriterCoordinator:
     def __init__(self):
         self._lock = threading.RLock()
         self._owners: dict[int, object] = {}
+        self._readers: dict[int, set[object]] = {}
 
     def try_acquire(self, project_id: int, owner: object) -> bool:
         with self._lock:
-            if project_id in self._owners:
+            if project_id in self._owners or self._readers.get(project_id):
                 return False
             self._owners[project_id] = owner
             return True
@@ -44,12 +50,31 @@ class WriterCoordinator:
         with self._lock:
             return project_id in self._owners
 
-    def admit_reader(self, project_id: int, prepare: Callable[[], bool]) -> bool:
-        """Run the reader's fixed preparation admission while writers are excluded."""
+    def try_acquire_reader(self, project_id: int, owner: object) -> bool:
         with self._lock:
             if project_id in self._owners:
                 return False
+            self._readers.setdefault(project_id, set()).add(owner)
+            return True
+
+    def release_reader(self, project_id: int, owner: object) -> None:
+        with self._lock:
+            readers = self._readers.get(project_id)
+            if readers is None:
+                return
+            readers.discard(owner)
+            if not readers:
+                self._readers.pop(project_id, None)
+
+    def admit_reader(self, project_id: int, prepare: Callable[[], bool]) -> bool:
+        """Run the reader's fixed preparation admission while writers are excluded."""
+        owner = object()
+        if not self.try_acquire_reader(project_id, owner):
+            return False
+        try:
             return prepare()
+        finally:
+            self.release_reader(project_id, owner)
 
 
 @dataclass
@@ -70,7 +95,7 @@ class TaskContext:
 
 
 class TaskAdapter(Protocol):
-    def run(self, context: TaskContext) -> dict: ...
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict: ...
 
 
 @dataclass
@@ -81,6 +106,7 @@ class _ActiveTask:
     adapter: TaskAdapter
     cancellation_event: threading.Event
     writer_owner: object | None
+    reader_owner: object | None
 
 
 class WorkbenchTaskManager:
@@ -205,16 +231,16 @@ class WorkbenchTaskManager:
         return {**task, "stale": task_is_stale(task, current)}
 
     def _queued_tasks(self) -> list[dict]:
-        tasks = []
-        for project in self.db.list_projects():
-            tasks.extend(
-                task for task in self.db.list_tasks(project["id"]) if task["status"] == "queued"
-            )
-        return sorted(tasks, key=lambda task: task["id"])
+        return self.db.list_queued_tasks()
 
     def _schedule_loop(self) -> None:
         while not self._shutdown.is_set():
-            self._admit_queued()
+            try:
+                self._admit_queued()
+            except Exception:
+                # A transient database/query failure must not terminate the
+                # persistent scheduler thread.  The next poll retries it.
+                pass
             self._wake.wait(self.poll_interval)
             self._wake.clear()
 
@@ -235,9 +261,24 @@ class WorkbenchTaskManager:
                         )
                         self._emit(current, "task_cancelled")
                 continue
-            admitted = self._try_admit(task)
+            try:
+                admitted = self._try_admit(task)
+            except Exception as exc:
+                self._fail_admission(task, exc)
+                continue
             if not admitted:
                 blocked_projects.add(project_id)
+
+    def _fail_admission(self, task: dict, exc: Exception) -> None:
+        with self._lock:
+            self._active.pop(task["id"], None)
+            current = self.db.get_task(task["id"])
+            if not current or current["status"] not in {"queued", "running"}:
+                return
+            failed = self.db.update_task(
+                task["id"], status="failed", error=str(exc), ended_at=_now_iso()
+            )
+        self._emit(failed, "task_failed", error=str(exc), result=None)
 
     def _legacy_running(self, project_id: int) -> bool:
         return bool(self.run_manager and self.run_manager.is_running(project_id))
@@ -253,19 +294,36 @@ class WorkbenchTaskManager:
             if self._legacy_running(project_id):
                 self.writer_coordinator.release(project_id, owner)
                 return False
-            if not self._launch(task, owner):
+            try:
+                launched = self._launch(task, writer_owner=owner)
+            except Exception:
                 self.writer_coordinator.release(project_id, owner)
-                return False
-            return True
-        return self.writer_coordinator.admit_reader(
-            project_id, lambda: self._launch(task, None)
-        )
+                raise
+            if not launched:
+                self.writer_coordinator.release(project_id, owner)
+            return launched
+        reader_owner = object()
+        if not self.writer_coordinator.try_acquire_reader(project_id, reader_owner):
+            return False
+        try:
+            launched = self._launch(task, reader_owner=reader_owner)
+        except Exception:
+            self.writer_coordinator.release_reader(project_id, reader_owner)
+            raise
+        if not launched:
+            self.writer_coordinator.release_reader(project_id, reader_owner)
+        return launched
 
     def _adapter_for(self, task_type: str):
         provider = self.adapters[task_type]
         return provider if hasattr(provider, "run") else provider()
 
-    def _launch(self, task: dict, writer_owner: object | None) -> bool:
+    def _launch(
+        self,
+        task: dict,
+        writer_owner: object | None = None,
+        reader_owner: object | None = None,
+    ) -> bool:
         with self._lock:
             current = self.db.get_task(task["id"])
             if self._shutdown.is_set() or not current or current["status"] != "queued":
@@ -274,7 +332,7 @@ class WorkbenchTaskManager:
             cancellation_event = threading.Event()
             thread = threading.Thread(
                 target=self._run_task,
-                args=(current, adapter, cancellation_event, writer_owner),
+                args=(current, adapter, cancellation_event, writer_owner, reader_owner),
                 daemon=True,
                 name=f"workbench-{task['id']}",
             )
@@ -283,27 +341,40 @@ class WorkbenchTaskManager:
             )
             active = _ActiveTask(
                 task["id"], task["project_id"], thread, adapter,
-                cancellation_event, writer_owner,
+                cancellation_event, writer_owner, reader_owner,
             )
             self._active[task["id"]] = active
             self._emit(current, "task_started")
             thread.start()
             return True
 
-    def _run_task(self, task, adapter, cancellation_event, writer_owner) -> None:
-        project = self.db.get_project(task["project_id"])
-        context = TaskContext(
-            task_id=task["id"],
-            project_id=task["project_id"],
-            project_path=Path(project["path"]),
-            params=task["params"],
-            cancellation_event=cancellation_event,
-            _progress_callback=lambda percent, detail: self._progress(
-                task["id"], percent, detail
-            ),
-        )
+    def _run_task(
+        self, task, adapter, cancellation_event, writer_owner, reader_owner
+    ) -> None:
+        reader_released = False
         try:
-            result = adapter.run(context)
+            project = self.db.get_project(task["project_id"])
+            if not project:
+                raise KeyError(f"project {task['project_id']} not found")
+            context = TaskContext(
+                task_id=task["id"],
+                project_id=task["project_id"],
+                project_path=Path(project["path"]),
+                params=task["params"],
+                cancellation_event=cancellation_event,
+                _progress_callback=lambda percent, detail: self._progress(
+                    task["id"], percent, detail
+                ),
+            )
+            prepare = getattr(adapter, "prepare", None)
+            if callable(prepare):
+                prepared_input = prepare(context)
+                self.writer_coordinator.release_reader(task["project_id"], reader_owner)
+                reader_released = True
+                self._wake.set()
+                result = adapter.run(context, prepared_input)
+            else:
+                result = adapter.run(context)
             if not isinstance(result, dict):
                 raise TypeError("task adapter result must be a dict")
             if cancellation_event.is_set() or self.db.get_task(task["id"])["cancel_requested"]:
@@ -334,6 +405,8 @@ class WorkbenchTaskManager:
                 self._active.pop(task["id"], None)
             if writer_owner is not None:
                 self.writer_coordinator.release(task["project_id"], writer_owner)
+            if reader_owner is not None and not reader_released:
+                self.writer_coordinator.release_reader(task["project_id"], reader_owner)
             self._wake.set()
 
     def _progress(self, task_id: int, percent: int, detail: str) -> None:

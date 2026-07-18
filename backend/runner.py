@@ -84,6 +84,7 @@ class RunManager:
         if not project:
             self.writer_coordinator.release(project_id, writer_owner)
             raise KeyError(f"project {project_id} not found")
+        run_id = None
         try:
             config = runconfig_to_config(run_config)
             run = self.db.create_run(project_id, asdict(config))
@@ -92,7 +93,13 @@ class RunManager:
             bus = EventBus()
             orch = self.factory(Path(project["path"]), config, bus)
         except Exception:
-            self.writer_coordinator.release(project_id, writer_owner)
+            try:
+                if run_id is not None:
+                    self.db.update_run(
+                        run_id, status="blocked", rc=-1, ended_at=_now_iso()
+                    )
+            finally:
+                self.writer_coordinator.release(project_id, writer_owner)
             raise
 
         def on_event(ev: Event) -> None:
@@ -109,25 +116,52 @@ class RunManager:
 
         def worker() -> None:
             try:
-                rc = orch.run()
-            except Exception as exc:  # noqa: BLE001
-                rc = -1
-                self.db.add_event(run_id, project_id, "pipeline_error", detail=str(exc))
+                try:
+                    rc = orch.run()
+                except Exception as exc:  # noqa: BLE001
+                    rc = -1
+                    try:
+                        self.db.add_event(
+                            run_id, project_id, "pipeline_error", detail=str(exc)
+                        )
+                    except Exception:
+                        pass
+                    self.hub.broadcast({
+                        "run_id": run_id, "project_id": project_id,
+                        "type": "pipeline_error", "detail": str(exc), "ts": time.time(),
+                    })
+                status = {0: "done", 2: "cancelled"}.get(rc, "blocked")
+                try:
+                    self.db.add_event(
+                        run_id, project_id, "run_status", detail=status
+                    )
+                except Exception:
+                    pass
                 self.hub.broadcast({"run_id": run_id, "project_id": project_id,
-                                    "type": "pipeline_error", "detail": str(exc), "ts": time.time()})
-            status = {0: "done", 2: "cancelled"}.get(rc, "blocked")
-            self.db.add_event(run_id, project_id, "run_status", detail=status)
-            self.hub.broadcast({"run_id": run_id, "project_id": project_id,
-                                "type": "run_status", "detail": status, "ts": time.time()})
-            self.db.update_run(run_id, status=status, rc=rc, ended_at=_now_iso())
-            with self._lock:
-                self._active.pop(project_id, None)
-            self.writer_coordinator.release(project_id, writer_owner)
+                                    "type": "run_status", "detail": status, "ts": time.time()})
+                self.db.update_run(run_id, status=status, rc=rc, ended_at=_now_iso())
+            finally:
+                with self._lock:
+                    self._active.pop(project_id, None)
+                self.writer_coordinator.release(project_id, writer_owner)
 
         t = threading.Thread(target=worker, daemon=True, name=f"run-{run_id}")
         with self._lock:
             self._active[project_id] = _ActiveRun(run_id, project_id, t, orch)
-        t.start()
+        try:
+            t.start()
+        except Exception:
+            try:
+                with self._lock:
+                    active = self._active.get(project_id)
+                    if active is not None and active.thread is t:
+                        self._active.pop(project_id, None)
+                self.db.update_run(
+                    run_id, status="blocked", rc=-1, ended_at=_now_iso()
+                )
+            finally:
+                self.writer_coordinator.release(project_id, writer_owner)
+            raise
         return run_id
 
     def cancel(self, project_id: int) -> bool:
