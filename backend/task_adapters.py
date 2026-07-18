@@ -32,9 +32,18 @@ from revisions import project_revisions  # noqa: E402
 from workbench import TaskContext  # noqa: E402
 
 from run_pipeline import (  # noqa: E402
+    DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    DEFAULT_WORKER_RETRIES,
+    DEFAULT_WORKER_TIMEOUT_SECONDS,
+    DEFAULT_WORKER_WINDOW,
+    audit_paths,
+    audit_status,
+    commit_governance,
     copy_analysis_task_packages,
     latest_analysis_manifest,
     load_json,
+    prepare_audit_pack_or_split,
+    run_worker,
     scoped_analysis_pack,
     scoped_chapter_analysis_rerun,
     scoped_chapter_delta_rerun,
@@ -44,6 +53,7 @@ from run_pipeline import (  # noqa: E402
     snapshot_project_inputs,
 )
 from export_obsidian_vault import export_obsidian_markdown  # noqa: E402
+from split_chapters_append import apply_append  # noqa: E402
 
 
 def _result_json(*, artifacts, manifest, manifest_path, logs, revision, **extra) -> dict:
@@ -510,3 +520,169 @@ class ExportAdapter:
             clean=clean,
             filename_mode=filename_mode,
         )
+
+
+# === GovernanceTaskAdapter (writer) ======================================
+
+class GovernanceTaskAdapter:
+    """Writer adapter: run a periodic governance cycle for a chapter range.
+
+    Sequence mirrors run_pipeline.run_periodic_governance minus the supervision
+    loop: build the audit pack → (optional) audit correction worker →
+    commit_governance (which performs validate_delta → merge_delta →
+    apply_governance_ops → normalize → validate_structure, with before/after/diff
+    snapshots and automatic rollback on any step failure).
+    """
+
+    def __init__(self, manager: object = None):
+        # The adapter does not enqueue follow-up tasks; manager is accepted
+        # purely for symmetry with the append adapter and future use.
+        self.manager = manager
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        start = int(params.get("start", params.get("seq_start", 1)))
+        end = int(params.get("end", params.get("seq_end", 0)))
+        if end < start:
+            raise ValueError("governance requires 'start' <= 'end'")
+        force = _bool_param(params, "force", default=False)
+        max_context_chars = _int_param(
+            params, "max_context_chars", DEFAULT_AUDIT_MAX_CONTEXT_CHARS
+        )
+        worker_command = _str_param(
+            params, "worker_command", "audit_command", default=""
+        )
+        worker_timeout = _int_param(
+            params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
+        )
+        worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
+
+        project_dir = Path(context.project_path)
+
+        context.progress(10, "preparing audit pack")
+        rc = prepare_audit_pack_or_split(
+            project_dir, start, end,
+            force=force, max_context_chars=max_context_chars,
+        )
+        if rc != 0:
+            raise RuntimeError(f"audit pack preparation failed rc={rc}")
+
+        paths = audit_paths(project_dir, start, end)
+        correction_path = paths["correction"]
+
+        # Worker correction step: only invoke when the correction is missing.
+        if not correction_path.is_file() or correction_path.stat().st_size == 0:
+            if not worker_command:
+                raise RuntimeError(
+                    f"governance correction missing and no worker_command provided: {correction_path}"
+                )
+            context.progress(30, "running audit correction worker")
+            rc = run_worker(
+                worker_command, project_dir, "audit_correction",
+                paths["pack"], correction_path,
+                timeout=worker_timeout, retries=0, worker_window=worker_window,
+            )
+            if rc != 0:
+                raise RuntimeError(f"audit correction worker failed rc={rc}")
+
+        context.progress(60, "committing governance patch")
+        rc = commit_governance(project_dir, str(correction_path))
+        if rc != 0:
+            # commit_governance has already restored the before snapshot.
+            raise RuntimeError(f"governance commit failed rc={rc}")
+
+        status = audit_status(project_dir, start, end)
+        before = status.get("before", "") or ""
+        after = status.get("after", "") or ""
+        diff = status.get("diff", "") or ""
+
+        artifacts = [
+            {"name": "audit_pack", "path": str(paths["pack"])},
+            {"name": "correction", "path": str(correction_path)},
+            {"name": "audit_status", "path": str(paths["status"])},
+        ]
+        if before:
+            artifacts.append({"name": "before", "path": before})
+        if after:
+            artifacts.append({"name": "after", "path": after})
+        if diff:
+            artifacts.append({"name": "diff", "path": diff})
+
+        revision = project_revisions(project_dir)
+        context.progress(100, "governance committed")
+        return _result_json(
+            artifacts=artifacts,
+            manifest=status,
+            manifest_path=str(paths["status"]),
+            logs=[],
+            revision=revision,
+            task="governance",
+            start=start,
+            end=end,
+            before=before,
+            after=after,
+            diff=diff,
+        )
+
+
+# === AppendChaptersTaskAdapter (writer) ==================================
+
+class AppendChaptersTaskAdapter:
+    """Writer adapter: apply a previewed append plan under the writer lock.
+
+    Holds the project writer lock for the whole run (no prepare) because
+    apply_append mutates the chapter index.  After applying the plan it
+    refreshes revisions and queues chapter_analysis_rerun + chapter_delta_rerun
+    for the new seqs only — via the manager's task-creation path so writer
+    admission is preserved (the new tasks stay queued until this run releases
+    the lock).
+    """
+
+    def __init__(self, manager: object = None):
+        self.manager = manager
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        plan = params.get("plan")
+        if not isinstance(plan, dict):
+            raise ValueError("append_chapters requires a 'plan' (preview first)")
+        if plan.get("conflict"):
+            raise ValueError(
+                f"append_chapters plan has a prefix conflict: {plan['conflict'].get('message', '')}"
+            )
+        if not plan.get("appended"):
+            raise ValueError("append_chapters plan has no new chapters to append")
+
+        project_dir = Path(context.project_path)
+
+        context.progress(20, "appending new chapter files")
+        report = apply_append(plan)
+        context.progress(70, "queueing new chapter production work")
+
+        new_seqs = [int(entry["seq"]) for entry in report.get("appended", []) if entry.get("seq") is not None]
+        queued_tasks: list[dict] = []
+        if self.manager is not None and new_seqs:
+            for seq in new_seqs:
+                created = self.manager.create(
+                    context.project_id, "chapter_analysis_rerun", {"seqs": [seq]}
+                )
+                queued_tasks.append({"type": "chapter_analysis_rerun", "seq": seq, "id": created.get("id")})
+                created = self.manager.create(
+                    context.project_id, "chapter_delta_rerun", {"seqs": [seq]}
+                )
+                queued_tasks.append({"type": "chapter_delta_rerun", "seq": seq, "id": created.get("id")})
+
+        revision = project_revisions(project_dir)
+        context.progress(100, "append complete")
+        return _result_json(
+            artifacts=[{"name": "index", "path": report["index_path"]}],
+            manifest=report,
+            manifest_path=report["index_path"],
+            logs=[],
+            revision=revision,
+            task="append_chapters",
+            appended=report["appended"],
+            new_seqs=new_seqs,
+            queued_tasks=queued_tasks,
+        )
+

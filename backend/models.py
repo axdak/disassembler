@@ -114,6 +114,16 @@ class FromBook(BaseModel):
     project_dir: str = ""
 
 
+class AppendPreview(BaseModel):
+    source_file: str
+    pattern: str = ""
+    increment_only: bool = False
+
+
+class AppendApply(BaseModel):
+    plan: dict
+
+
 class Status(BaseModel):
     project: Project
     active_run: Optional[Run] = None

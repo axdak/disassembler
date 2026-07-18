@@ -20,12 +20,17 @@ from runner import QueueRunner, RunManager
 from db import Database
 from hub import BroadcastHub
 from models import (
-    FromBook, Project, ProjectCreate, QueueAdd, Run, RunConfig, RunStart,
+    AppendApply, AppendPreview, FromBook, Project, ProjectCreate, QueueAdd, Run, RunConfig, RunStart,
     SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
 )
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
 from run_pipeline import run_cmd, script_path
+from task_adapters import (
+    AnalysisAdapter, AppendChaptersTaskAdapter, ChapterAnalysisRerunAdapter,
+    ChapterDeltaRerunAdapter, ChapterStructureAdapter, ChapterVisualAdapter,
+    ExportAdapter, GovernanceTaskAdapter,
+)
 from workbench import WorkbenchTaskManager, WriterCoordinator
 
 ARTIFACT_MAX_CHARS = 200_000
@@ -76,9 +81,29 @@ def create_app(
     for run_id, project_id in app.state.db.mark_running_runs_interrupted():
         app.state.db.add_event(run_id, project_id, "run_status", detail="interrupted")
     app.state.db.mark_running_tasks_interrupted()
+    # 默认适配器集合：调用方未提供时，注册全部生产用 workbench 适配器。
+    if task_adapters is None:
+        append_adapter = AppendChaptersTaskAdapter()
+        governance_adapter = GovernanceTaskAdapter()
+        default_adapters: dict = {
+            "analysis": AnalysisAdapter(),
+            "chapter_visual": ChapterVisualAdapter(),
+            "chapter_structure": ChapterStructureAdapter(),
+            "chapter_analysis_rerun": ChapterAnalysisRerunAdapter(),
+            "chapter_delta_rerun": ChapterDeltaRerunAdapter(),
+            "export": ExportAdapter(),
+            "governance": governance_adapter,
+            "append_chapters": append_adapter,
+        }
+    else:
+        default_adapters = dict(task_adapters)
     app.state.workbench = WorkbenchTaskManager(
-        app.state.db, app.state.hub, task_adapters or {}, app.state.manager
+        app.state.db, app.state.hub, default_adapters, app.state.manager
     )
+    # Wire the manager reference for adapters that create follow-up tasks.
+    for adapter in app.state.workbench.adapters.values():
+        if isinstance(adapter, AppendChaptersTaskAdapter) and adapter.manager is None:
+            adapter.manager = app.state.workbench
 
     def resolve_run_config(override: Optional[RunConfig]) -> RunConfig:
         # 存档设置作为默认值，调用方覆盖（前端通常传空 config，需靠这里注入设置）。
@@ -258,6 +283,51 @@ def create_app(
                 "has_delta": bool(stem) and (chdir / f"{stem}.json").is_file(),
             })
         return out
+
+    @app.post(
+        "/projects/{pid}/chapters/append-preview",
+        dependencies=[Depends(require_token)],
+    )
+    def chapters_append_preview(pid: int, body: AppendPreview):
+        """只读预览：切分新原文并比对旧索引，返回 AppendPlan，不写盘。"""
+        project = _project_or_404(pid)
+        pdir = Path(project["path"])
+        src = Path(body.source_file).resolve()
+        if not src.is_file():
+            raise HTTPException(status_code=400, detail="source file not found")
+        split_dir = pdir / "原文拆解"
+        from split_chapters_append import plan_append
+        try:
+            plan = plan_append(
+                str(src), str(split_dir),
+                pattern=body.pattern, increment_only=body.increment_only,
+            )
+        except SystemExit as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return plan
+
+    @app.post(
+        "/projects/{pid}/chapters/apply",
+        dependencies=[Depends(require_token)],
+        response_model=WorkbenchTask,
+    )
+    def chapters_apply(pid: int, body: AppendApply):
+        """把预览出的 plan 排入 append_chapters 写者任务。"""
+        _project_or_404(pid)
+        plan = body.plan or {}
+        if plan.get("conflict"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"plan has a prefix conflict: {plan['conflict'].get('message', '')}",
+            )
+        if not plan.get("appended"):
+            raise HTTPException(status_code=422, detail="plan has no new chapters to append")
+        try:
+            return app.state.workbench.create(
+                pid, "append_chapters", {"plan": plan}
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
 
     @app.get("/projects/{pid}/artifact", dependencies=[Depends(require_token)])
     def project_artifact(pid: int, path: str = Query(...)):
