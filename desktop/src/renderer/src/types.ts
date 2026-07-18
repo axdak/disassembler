@@ -51,3 +51,81 @@ export interface QueueItem {
   position: number
   project_id: number
 }
+
+// Workbench task shapes (mirror backend/models.py WorkbenchTask).
+export type TaskType =
+  | 'analysis'
+  | 'chapter_visual'
+  | 'chapter_structure'
+  | 'governance'
+  | 'export'
+  | 'append_chapters'
+  | 'chapter_analysis_rerun'
+  | 'chapter_delta_rerun'
+
+export type TaskStatus =
+  | 'queued'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export interface WorkbenchTask {
+  id: number
+  project_id: number
+  task_type: TaskType
+  status: TaskStatus
+  params: Record<string, unknown>
+  input_revision: Record<string, unknown>
+  result: Record<string, unknown> | null
+  error: string | null
+  cancel_requested: boolean
+  retry_of: number | null
+  created_at: string
+  updated_at: string
+  started_at: string | null
+  ended_at: string | null
+  stale: boolean
+}
+
+// Artifact status card (mirror backend/models.py CardStatus + ArtifactStatusResponse).
+export interface CardStatus {
+  status:
+    | 'missing'
+    | 'latest'
+    | 'stale'
+    | 'queued'
+    | 'running'
+    | 'failed'
+    | 'cancelled'
+  artifact_present: boolean
+  latest_task_id: number | null
+  latest_task_status: string | null
+  error: string | null
+  paths: string[]
+}
+
+export interface ChapterCardStatus {
+  seq: number
+  filename: string
+  title: string
+  cards: Record<string, CardStatus>
+  stale: boolean
+  latest_task: Record<string, unknown> | null
+  error: string | null
+}
+
+export interface ArtifactStatusResponse {
+  dimensions: Record<string, CardStatus>
+  chapters: ChapterCardStatus[]
+  exports: Record<string, CardStatus>
+  counts: Record<string, number>
+}
+
+// Chapter append plan returned by append-preview and consumed by apply.
+export interface AppendPlan {
+  appended?: unknown
+  conflict?: Record<string, unknown> | null
+  [key: string]: unknown
+}

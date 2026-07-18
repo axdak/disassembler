@@ -9,6 +9,17 @@ interface Window {
     cancelRun(id: number): Promise<{ cancelled: boolean }>
     chapters(id: number): Promise<unknown>
     artifact(id: number, path: string): Promise<unknown>
+    tasksCreate(id: number, type: string, params: Record<string, unknown>): Promise<unknown>
+    tasksList(id: number): Promise<unknown[]>
+    taskGet(id: number, taskId: number): Promise<unknown>
+    taskCancel(id: number, taskId: number): Promise<unknown>
+    taskRetry(id: number, taskId: number): Promise<unknown>
+    artifactsStatus(id: number): Promise<unknown>
+    chaptersAppendPreview(
+      id: number,
+      body: { source_file: string; pattern?: string; increment_only?: boolean },
+    ): Promise<unknown>
+    chaptersApply(id: number, plan: Record<string, unknown>): Promise<unknown>
     logs(id: number): Promise<unknown>
     log(id: number, name: string): Promise<unknown>
     getSettings(): Promise<Record<string, unknown>>

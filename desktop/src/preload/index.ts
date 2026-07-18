@@ -11,6 +11,19 @@ const api = {
   cancelRun: (id: number) => ipcRenderer.invoke('nd:projects:cancel', id),
   chapters: (id: number) => ipcRenderer.invoke('nd:projects:chapters', id),
   artifact: (id: number, path: string) => ipcRenderer.invoke('nd:projects:artifact', id, path),
+  tasksCreate: (id: number, type: string, params: Record<string, unknown>) =>
+    ipcRenderer.invoke('nd:projects:tasks:create', id, type, params),
+  tasksList: (id: number) => ipcRenderer.invoke('nd:projects:tasks:list', id),
+  taskGet: (id: number, taskId: number) => ipcRenderer.invoke('nd:projects:task:get', id, taskId),
+  taskCancel: (id: number, taskId: number) => ipcRenderer.invoke('nd:projects:task:cancel', id, taskId),
+  taskRetry: (id: number, taskId: number) => ipcRenderer.invoke('nd:projects:task:retry', id, taskId),
+  artifactsStatus: (id: number) => ipcRenderer.invoke('nd:projects:artifacts:status', id),
+  chaptersAppendPreview: (
+    id: number,
+    body: { source_file: string; pattern?: string; increment_only?: boolean },
+  ) => ipcRenderer.invoke('nd:projects:chapters:appendPreview', id, body),
+  chaptersApply: (id: number, plan: Record<string, unknown>) =>
+    ipcRenderer.invoke('nd:projects:chapters:apply', id, plan),
   logs: (id: number) => ipcRenderer.invoke('nd:projects:logs', id),
   log: (id: number, name: string) => ipcRenderer.invoke('nd:projects:log', id, name),
   getSettings: () => ipcRenderer.invoke('nd:settings:get'),

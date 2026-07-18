@@ -1,13 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } from 'electron'
-import { join, resolve } from 'path'
-import { spawn, type ChildProcessByStdio } from 'child_process'
+import { join } from 'node:path'
+import type { ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'node:stream'
 import WebSocket from 'ws'
-
-// dev: out/main/index.js -> desktop -> 仓库根
-const REPO_ROOT = resolve(__dirname, '../../..')
-const VENV_PYTHON = join(REPO_ROOT, 'runtime/venv/Scripts/python.exe')
-const BACKEND_MAIN = join(REPO_ROOT, 'backend/main.py')
+import { startBackendProcess } from './backend-process'
 
 let backendProc: ChildProcessByStdio<null, Readable, Readable> | null = null
 let backendBase = ''
@@ -16,47 +12,10 @@ let isQuitting = false
 let tray: Tray | null = null
 
 function startBackend(): Promise<void> {
-  return new Promise((resolveP, rejectP) => {
-    const env = {
-      ...process.env,
-      NO_PROXY: '127.0.0.1,localhost',
-      no_proxy: '127.0.0.1,localhost',
-      PYTHONDONTWRITEBYTECODE: '1',
-      PYTHONUTF8: '1',
-      PYTHONIOENCODING: 'utf-8',
-    }
-    const proc = spawn(VENV_PYTHON, ['-u', BACKEND_MAIN, '--port', '0'], {
-      env, stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    backendProc = proc
-    let buf = ''
-    let resolved = false
-    const timer = setTimeout(() => {
-      if (!resolved) { resolved = true; rejectP(new Error('backend startup timeout')) }
-    }, 30000)
-    const onData = (chunk: Buffer) => {
-      buf += chunk.toString('utf8')
-      let idx: number
-      while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).trim()
-        buf = buf.slice(idx + 1)
-        if (line) process.stdout.write(`[backend] ${line}\n`)
-        const m = line.match(/BACKEND_READY host=(\S+) port=(\d+) token=(\S+)/)
-        if (m && !resolved) {
-          resolved = true
-          clearTimeout(timer)
-          backendBase = `http://${m[1]}:${m[2]}`
-          backendToken = m[3]
-          resolveP()
-        }
-      }
-    }
-    proc.stdout.on('data', onData)
-    proc.stderr.on('data', (d) => process.stderr.write(`[backend err] ${d.toString('utf8')}`))
-    proc.on('exit', (code) => {
-      process.stderr.write(`[backend] exited code=${code}\n`)
-      if (!resolved) { resolved = true; clearTimeout(timer); rejectP(new Error(`backend exited code=${code}`)) }
-    })
+  return startBackendProcess().then((h) => {
+    backendProc = h.proc
+    backendBase = h.base
+    backendToken = h.token
   })
 }
 
@@ -93,6 +52,24 @@ function registerIpc(): void {
   ipcMain.handle('nd:projects:chapters', (_e, id: number) => bget(`/projects/${id}/chapters`))
   ipcMain.handle('nd:projects:artifact', (_e, id: number, path: string) =>
     bget(`/projects/${id}/artifact?path=${encodeURIComponent(path)}`))
+  // Workbench tasks: create/list/get/cancel/retry
+  ipcMain.handle('nd:projects:tasks:create', (_e, id: number, type: string, params: Record<string, unknown>) =>
+    bpost(`/projects/${id}/tasks`, { type, params }))
+  ipcMain.handle('nd:projects:tasks:list', (_e, id: number) => bget(`/projects/${id}/tasks`))
+  ipcMain.handle('nd:projects:task:get', (_e, id: number, taskId: number) =>
+    bget(`/projects/${id}/tasks/${taskId}`))
+  ipcMain.handle('nd:projects:task:cancel', (_e, id: number, taskId: number) =>
+    bpost(`/projects/${id}/tasks/${taskId}/cancel`, {}))
+  ipcMain.handle('nd:projects:task:retry', (_e, id: number, taskId: number) =>
+    bpost(`/projects/${id}/tasks/${taskId}/retry`, {}))
+  // Workbench artifact status + chapter append flow
+  ipcMain.handle('nd:projects:artifacts:status', (_e, id: number) =>
+    bget(`/projects/${id}/artifacts/status`))
+  ipcMain.handle('nd:projects:chapters:appendPreview',
+    (_e, id: number, body: { source_file: string; pattern?: string; increment_only?: boolean }) =>
+      bpost(`/projects/${id}/chapters/append-preview`, body))
+  ipcMain.handle('nd:projects:chapters:apply', (_e, id: number, plan: Record<string, unknown>) =>
+    bpost(`/projects/${id}/chapters/apply`, { plan }))
   ipcMain.handle('nd:projects:logs', (_e, id: number) => bget(`/projects/${id}/logs`))
   ipcMain.handle('nd:projects:log', (_e, id: number, name: string) =>
     bget(`/projects/${id}/logs/${encodeURIComponent(name)}`))

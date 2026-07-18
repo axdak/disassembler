@@ -18,6 +18,24 @@ import uvicorn
 from app import create_app
 
 
+def _configure_stdio_utf8() -> None:
+    """Force stdio to UTF-8 so worker subprocess output survives the parent
+    pipeline on Windows consoles that default to GBK (code page 936).
+    PYTHONUTF8 / PYTHONIOENCODING handle most cases; this is belt-and-suspenders
+    for interpreters started before those env vars take effect on stdio buffers.
+    """
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (TypeError, ValueError, OSError):
+                pass
+
+
 def _free_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
@@ -32,6 +50,7 @@ def _default_db_path() -> str:
 
 
 def main(argv=None) -> int:
+    _configure_stdio_utf8()
     parser = argparse.ArgumentParser(description="Novel Disassembler Desktop 后端")
     parser.add_argument("--db", default="", help="SQLite 路径，默认 %APPDATA%/NovelDisassemblerDesktop/app.db")
     parser.add_argument("--port", type=int, default=0, help="端口，0=随机空闲端口")
