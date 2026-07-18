@@ -52,7 +52,31 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workbench_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(status IN ('queued', 'running', 'done', 'failed', 'cancelled', 'interrupted')),
+    params_json TEXT NOT NULL,
+    input_revision_json TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    retry_of INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    ended_at TEXT,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY(retry_of) REFERENCES workbench_tasks(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workbench_tasks_project_status_id
+    ON workbench_tasks(project_id, status, id);
 """
+
+TASK_STATUSES = frozenset({"queued", "running", "done", "failed", "cancelled", "interrupted"})
+_UNSET = object()
 
 
 class Database:
@@ -62,6 +86,7 @@ class Database:
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock:
+            self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
 
@@ -170,6 +195,114 @@ class Database:
                 )
                 self._conn.commit()
         return [(r["id"], r["project_id"]) for r in rows]
+
+    # ---- workbench tasks ----
+
+    @staticmethod
+    def _decode_task(row: sqlite3.Row) -> dict:
+        task = dict(row)
+        task["params"] = json.loads(task.pop("params_json") or "{}")
+        task["input_revision"] = json.loads(task.pop("input_revision_json") or "{}")
+        task["result"] = json.loads(task.pop("result_json") or "null")
+        task["cancel_requested"] = bool(task["cancel_requested"])
+        return task
+
+    def create_task(self, project_id: int, task_type: str, params: dict,
+                    input_revision: dict, retry_of: Optional[int] = None) -> dict:
+        """Persist a queued workbench task; reruns are new rows linked by retry_of."""
+        ts = _now()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO workbench_tasks("
+                "project_id, task_type, status, params_json, input_revision_json, retry_of, created_at, updated_at"
+                ") VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    project_id, task_type, "queued", json.dumps(params, ensure_ascii=False),
+                    json.dumps(input_revision, ensure_ascii=False), retry_of, ts, ts,
+                ),
+            )
+            self._conn.commit()
+            return self.get_task(cur.lastrowid)
+
+    def get_task(self, task_id: int) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM workbench_tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            return self._decode_task(row) if row else None
+
+    def list_tasks(self, project_id: int, limit: int = 100) -> list:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM workbench_tasks WHERE project_id=? ORDER BY id ASC LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+            return [self._decode_task(row) for row in rows]
+
+    def update_task(self, task_id: int, *, status: Optional[str] = None,
+                    result: Any = _UNSET, error: Any = _UNSET,
+                    cancel_requested: Optional[bool] = None,
+                    retry_of: Any = _UNSET,
+                    started_at: Any = _UNSET, ended_at: Any = _UNSET) -> Optional[dict]:
+        if status is not None and status not in TASK_STATUSES:
+            raise ValueError(f"invalid task status: {status}")
+        fields, values = [], []
+        if status is not None:
+            fields.append("status=?")
+            values.append(status)
+        if result is not _UNSET:
+            fields.append("result_json=?")
+            values.append(json.dumps(result, ensure_ascii=False))
+        if error is not _UNSET:
+            fields.append("error=?")
+            values.append(error)
+        if cancel_requested is not None:
+            fields.append("cancel_requested=?")
+            values.append(int(cancel_requested))
+        if retry_of is not _UNSET:
+            fields.append("retry_of=?")
+            values.append(retry_of)
+        if started_at is not _UNSET:
+            fields.append("started_at=?")
+            values.append(started_at)
+        if ended_at is not _UNSET:
+            fields.append("ended_at=?")
+            values.append(ended_at)
+        if not fields:
+            return self.get_task(task_id)
+        fields.append("updated_at=?")
+        values.extend([_now(), task_id])
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE workbench_tasks SET {', '.join(fields)} WHERE id=?", values
+            )
+            self._conn.commit()
+        return self.get_task(task_id)
+
+    def request_task_cancel(self, task_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE workbench_tasks SET cancel_requested=1, updated_at=? WHERE id=?",
+                (_now(), task_id),
+            )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def mark_running_tasks_interrupted(self) -> list:
+        """Mark residual workbench tasks interrupted after a process restart."""
+        ts = _now()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, project_id FROM workbench_tasks WHERE status='running' ORDER BY id"
+            ).fetchall()
+            if rows:
+                self._conn.execute(
+                    "UPDATE workbench_tasks SET status='interrupted', ended_at=?, updated_at=? "
+                    "WHERE status='running'",
+                    (ts, ts),
+                )
+                self._conn.commit()
+        return [(row["id"], row["project_id"]) for row in rows]
 
     # ---- events ----
 

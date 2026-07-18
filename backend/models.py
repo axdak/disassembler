@@ -2,7 +2,7 @@
 """FastAPI 请求/响应模型。"""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -10,6 +10,8 @@ DEFAULT_FULLBOOK_TASKS = [
     "summary", "characters", "plot", "worldview", "settings",
     "plotlines", "outline", "detailed_outline", "narrative_structure", "report",
 ]
+
+TASK_STATUSES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
 
 
 class ProjectCreate(BaseModel):
@@ -52,6 +54,23 @@ class Run(BaseModel):
     ended_at: Optional[str] = None
     rc: Optional[int] = None
     config: dict = {}
+
+
+class WorkbenchTask(BaseModel):
+    id: int
+    project_id: int
+    task_type: str
+    status: Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
+    params: dict = {}
+    input_revision: dict = {}
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    cancel_requested: bool = False
+    retry_of: Optional[int] = None
+    created_at: str
+    updated_at: str
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
 
 
 class StageEvent(BaseModel):
