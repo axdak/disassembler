@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -18,10 +19,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from runner import QueueRunner, RunManager
 from db import Database
 from hub import BroadcastHub
-from models import FromBook, Project, ProjectCreate, QueueAdd, Run, RunConfig, RunStart, SettingsUpdate, StageEvent, Status
+from models import (
+    FromBook, Project, ProjectCreate, QueueAdd, Run, RunConfig, RunStart,
+    SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
+)
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
 from run_pipeline import run_cmd, script_path
+from workbench import WorkbenchTaskManager, WriterCoordinator
 
 ARTIFACT_MAX_CHARS = 200_000
 
@@ -38,19 +43,42 @@ def _safe_project_path(project_dir: Path, rel: str) -> Optional[Path]:
     return target
 
 
-def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> FastAPI:
-    app = FastAPI(title="Novel Disassembler Desktop Backend", docs_url=None, redoc_url=None)
+def create_app(
+    db_path: str,
+    token: str,
+    orchestrator_factory=Orchestrator,
+    task_adapters: Optional[dict] = None,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        yield
+        application.state.queue.stop()
+        application.state.workbench.shutdown()
+
+    app = FastAPI(
+        title="Novel Disassembler Desktop Backend",
+        docs_url=None,
+        redoc_url=None,
+        lifespan=lifespan,
+    )
     app.add_middleware(
         CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
     )
     app.state.db = Database(db_path)
     app.state.hub = BroadcastHub()
-    app.state.manager = RunManager(app.state.db, app.state.hub, orchestrator_factory)
+    app.state.writer_coordinator = WriterCoordinator()
+    app.state.manager = RunManager(
+        app.state.db, app.state.hub, orchestrator_factory, app.state.writer_coordinator
+    )
     app.state.queue = QueueRunner(app.state.db, app.state.manager)
     app.state.token = token
     # 清理上一会话残留的 running 运行（崩溃/关闭未正常结束），解锁 UI 以便续跑
     for run_id, project_id in app.state.db.mark_running_runs_interrupted():
         app.state.db.add_event(run_id, project_id, "run_status", detail="interrupted")
+    app.state.db.mark_running_tasks_interrupted()
+    app.state.workbench = WorkbenchTaskManager(
+        app.state.db, app.state.hub, task_adapters or {}, app.state.manager
+    )
 
     def resolve_run_config(override: Optional[RunConfig]) -> RunConfig:
         # 存档设置作为默认值，调用方覆盖（前端通常传空 config，需靠这里注入设置）。
@@ -72,6 +100,13 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
         return project
+
+    def _task_or_404(pid: int, task_id: int) -> dict:
+        _project_or_404(pid)
+        task = app.state.db.get_task(task_id)
+        if not task or task["project_id"] != pid:
+            raise HTTPException(status_code=404, detail="task not found")
+        return task
 
     @app.get("/health")
     def health():
@@ -142,6 +177,57 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
     @app.post("/projects/{pid}/cancel", dependencies=[Depends(require_token)])
     def cancel_run(pid: int):
         return {"cancelled": app.state.manager.cancel(pid)}
+
+    @app.post(
+        "/projects/{pid}/tasks",
+        dependencies=[Depends(require_token)],
+        response_model=WorkbenchTask,
+    )
+    def create_task(pid: int, body: TaskCreate):
+        _project_or_404(pid)
+        try:
+            return app.state.workbench.create(pid, body.type, body.params)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+    @app.get(
+        "/projects/{pid}/tasks",
+        dependencies=[Depends(require_token)],
+        response_model=list[WorkbenchTask],
+    )
+    def list_tasks(pid: int):
+        _project_or_404(pid)
+        return app.state.workbench.list(pid)
+
+    @app.get(
+        "/projects/{pid}/tasks/{task_id}",
+        dependencies=[Depends(require_token)],
+        response_model=WorkbenchTask,
+    )
+    def get_task(pid: int, task_id: int):
+        _task_or_404(pid, task_id)
+        return app.state.workbench.get(task_id)
+
+    @app.post(
+        "/projects/{pid}/tasks/{task_id}/cancel",
+        dependencies=[Depends(require_token)],
+        response_model=WorkbenchTask,
+    )
+    def cancel_task(pid: int, task_id: int):
+        _task_or_404(pid, task_id)
+        return app.state.workbench.cancel(task_id)
+
+    @app.post(
+        "/projects/{pid}/tasks/{task_id}/retry",
+        dependencies=[Depends(require_token)],
+        response_model=WorkbenchTask,
+    )
+    def retry_task(pid: int, task_id: int):
+        _task_or_404(pid, task_id)
+        try:
+            return app.state.workbench.retry(task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @app.get("/projects/{pid}/events", dependencies=[Depends(require_token)])
     def project_events(pid: int, limit: int = Query(200, ge=1, le=2000)):

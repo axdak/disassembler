@@ -21,6 +21,7 @@ from orchestrator import Config, Orchestrator  # noqa: E402
 from db import Database  # noqa: E402
 from hub import BroadcastHub  # noqa: E402
 from models import RunConfig  # noqa: E402
+from workbench import WriterCoordinator  # noqa: E402
 
 
 def _now_iso() -> str:
@@ -54,12 +55,14 @@ class _ActiveRun:
 
 class RunManager:
     def __init__(self, db: Database, hub: BroadcastHub,
-                 orchestrator_factory: Callable[..., Orchestrator] = Orchestrator):
+                 orchestrator_factory: Callable[..., Orchestrator] = Orchestrator,
+                 writer_coordinator: Optional[WriterCoordinator] = None):
         self.db = db
         self.hub = hub
         self.factory = orchestrator_factory
         self._active: dict[int, _ActiveRun] = {}
         self._lock = threading.Lock()
+        self.writer_coordinator = writer_coordinator or WriterCoordinator()
 
     def is_running(self, project_id: int) -> bool:
         with self._lock:
@@ -74,15 +77,23 @@ class RunManager:
     def start(self, project_id: int, run_config: RunConfig) -> int:
         if self.is_running(project_id):
             raise RuntimeError(f"project {project_id} already running")
+        writer_owner = object()
+        if not self.writer_coordinator.try_acquire(project_id, writer_owner):
+            raise RuntimeError(f"project {project_id} writer active")
         project = self.db.get_project(project_id)
         if not project:
+            self.writer_coordinator.release(project_id, writer_owner)
             raise KeyError(f"project {project_id} not found")
-        config = runconfig_to_config(run_config)
-        run = self.db.create_run(project_id, asdict(config))
-        run_id = run["id"]
+        try:
+            config = runconfig_to_config(run_config)
+            run = self.db.create_run(project_id, asdict(config))
+            run_id = run["id"]
 
-        bus = EventBus()
-        orch = self.factory(Path(project["path"]), config, bus)
+            bus = EventBus()
+            orch = self.factory(Path(project["path"]), config, bus)
+        except Exception:
+            self.writer_coordinator.release(project_id, writer_owner)
+            raise
 
         def on_event(ev: Event) -> None:
             edict = {
@@ -111,6 +122,7 @@ class RunManager:
             self.db.update_run(run_id, status=status, rc=rc, ended_at=_now_iso())
             with self._lock:
                 self._active.pop(project_id, None)
+            self.writer_coordinator.release(project_id, writer_owner)
 
         t = threading.Thread(target=worker, daemon=True, name=f"run-{run_id}")
         with self._lock:
@@ -184,7 +196,15 @@ class QueueRunner:
                 continue
             try:
                 run_id = self.manager.start(project_id, config)
-            except (KeyError, RuntimeError):
+            except KeyError:
+                continue
+            except RuntimeError:
+                # A workbench writer currently owns the project.  Preserve the
+                # legacy queue row and retry after its admission is released.
+                with self._lock:
+                    self._queue.insert(0, (project_id, config))
+                if self._stop.wait(0.05):
+                    break
                 continue
             while not self._stop.is_set():
                 run = self.db.get_run(run_id)

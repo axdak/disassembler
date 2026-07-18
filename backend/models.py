@@ -12,6 +12,16 @@ DEFAULT_FULLBOOK_TASKS = [
 ]
 
 TASK_STATUSES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
+TaskType = Literal[
+    "analysis",
+    "chapter_visual",
+    "chapter_structure",
+    "governance",
+    "export",
+    "append_chapters",
+    "chapter_analysis_rerun",
+    "chapter_delta_rerun",
+]
 
 
 class ProjectCreate(BaseModel):
@@ -71,6 +81,12 @@ class WorkbenchTask(BaseModel):
     updated_at: str
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
+    stale: bool = False
+
+
+class TaskCreate(BaseModel):
+    type: TaskType
+    params: dict
 
 
 class StageEvent(BaseModel):
