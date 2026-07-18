@@ -23,6 +23,7 @@ function startBackend(): Promise<void> {
       no_proxy: '127.0.0.1,localhost',
       PYTHONDONTWRITEBYTECODE: '1',
       PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
     }
     const proc = spawn(VENV_PYTHON, ['-u', BACKEND_MAIN, '--port', '0'], {
       env, stdio: ['ignore', 'pipe', 'pipe'],
@@ -51,7 +52,7 @@ function startBackend(): Promise<void> {
       }
     }
     proc.stdout.on('data', onData)
-    proc.stderr.on('data', (d) => process.stderr.write(`[backend err] ${d}`))
+    proc.stderr.on('data', (d) => process.stderr.write(`[backend err] ${d.toString('utf8')}`))
     proc.on('exit', (code) => {
       process.stderr.write(`[backend] exited code=${code}\n`)
       if (!resolved) { resolved = true; clearTimeout(timer); rejectP(new Error(`backend exited code=${code}`)) }

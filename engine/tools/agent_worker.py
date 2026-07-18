@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List
 
@@ -79,6 +80,11 @@ def provider_command(provider: str, project_dir: Path, timeout: str) -> List[str
             "--add-dir",
             str(project_dir),
         ]
+        # 让 agy 把内部日志（含被它吞掉的真实错误，如 429 RESOURCE_EXHAUSTED）
+        # 写到指定文件，失败时由 main 转发尾部到 worker 日志，便于排查。
+        agy_log = os.environ.get("ND_AGY_LOG_FILE", "").strip()
+        if agy_log:
+            parts.extend(["--log-file", agy_log])
         if os.environ.get("ND_AGY_SKIP_PERMISSIONS", "1") != "0":
             parts.append("--dangerously-skip-permissions")
         if model:
@@ -283,6 +289,23 @@ def run_provider(
     return run_provider_command([*command, "-p", prompt], "", project_dir)
 
 
+def _dump_provider_log_tail(log_path: str) -> None:
+    """agy 失败时把其内部日志尾部追加到 worker 日志（stderr，会被 stream_shell_command 合并进 worker log）。"""
+    try:
+        lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    # 优先抛出真正的错误行（E 开头 = agy 的 error 级日志）。
+    errors = [ln for ln in lines if ln.startswith("E") or "error" in ln.lower()]
+    tail = errors[-20:] if errors else lines[-40:]
+    if not tail:
+        return
+    print("---- provider log tail ----", file=sys.stderr)
+    for ln in tail:
+        print(ln, file=sys.stderr)
+    print("---- end provider log tail ----", file=sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run agy/codebuddy as a controlled task-package worker.")
     parser.add_argument(
@@ -303,55 +326,68 @@ def main() -> int:
 
     last_returncode = 1
     attempted = False
-    for provider in provider_order(args.provider):
-        if provider not in PROVIDER_ORDER:
-            continue
-        capture_stdout = env_capture_stdout and provider_captures_stdout(provider)
-        if provider_uses_task_pack_path(provider):
-            prompt = build_path_prompt(task_type, task_pack, expected_outputs)
-        else:
-            prompt = build_prompt(task_type, task_pack, expected_outputs, capture_stdout)
-        command = provider_command(provider, project_dir, args.print_timeout)
-        if not command_available(command):
-            continue
-        attempted = True
-        if args.provider == "auto":
-            print(f"selected provider: {provider}", file=sys.stderr)
-        result = run_provider(provider, command, prompt, project_dir)
-        last_returncode = result.returncode
-        if result.returncode != 0:
+    # agy 默认把真实异常吞掉（只吐 "Agent execution terminated due to error."）。
+    # 强制 --log-file 写到临时文件，失败时把尾部追加进 worker 日志，便于排查 429 等。
+    agy_log_fd, agy_log_path = tempfile.mkstemp(suffix=".log", prefix="agy_diag_")
+    os.close(agy_log_fd)
+    os.environ.setdefault("ND_AGY_LOG_FILE", agy_log_path)
+    try:
+        for provider in provider_order(args.provider):
+            if provider not in PROVIDER_ORDER:
+                continue
+            capture_stdout = env_capture_stdout and provider_captures_stdout(provider)
+            if provider_uses_task_pack_path(provider):
+                prompt = build_path_prompt(task_type, task_pack, expected_outputs)
+            else:
+                prompt = build_prompt(task_type, task_pack, expected_outputs, capture_stdout)
+            command = provider_command(provider, project_dir, args.print_timeout)
+            if not command_available(command):
+                continue
+            attempted = True
+            if args.provider == "auto":
+                print(f"selected provider: {provider}", file=sys.stderr)
+            result = run_provider(provider, command, prompt, project_dir)
+            last_returncode = result.returncode
+            if result.returncode != 0:
+                if result.stdout:
+                    print(result.stdout, end="")
+                if result.stderr:
+                    print(result.stderr, file=sys.stderr, end="")
+                _dump_provider_log_tail(agy_log_path)
+                if args.provider == "auto":
+                    continue
+                return result.returncode
+
+            if capture_stdout:
+                content = (result.stdout or "").strip()
+                if not content:
+                    print(f"provider produced empty output: {provider}", file=sys.stderr)
+                    if args.provider == "auto":
+                        last_returncode = 1
+                        continue
+                    return 1
+                expected_output = expected_outputs[0]
+                expected_output.parent.mkdir(parents=True, exist_ok=True)
+                expected_output.write_text(content + "\n", encoding="utf-8")
+                return 0
             if result.stdout:
                 print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, file=sys.stderr, end="")
-            if args.provider == "auto":
-                continue
-            return result.returncode
-
-        if capture_stdout:
-            content = (result.stdout or "").strip()
-            if not content:
-                print(f"provider produced empty output: {provider}", file=sys.stderr)
+            missing = [path for path in expected_outputs if not path.is_file() or path.stat().st_size == 0]
+            if missing:
+                print("provider did not write expected output file(s):", file=sys.stderr)
+                for path in missing:
+                    print(f"- {path}", file=sys.stderr)
                 if args.provider == "auto":
                     last_returncode = 1
                     continue
                 return 1
-            expected_output = expected_outputs[0]
-            expected_output.parent.mkdir(parents=True, exist_ok=True)
-            expected_output.write_text(content + "\n", encoding="utf-8")
             return 0
-        if result.stdout:
-            print(result.stdout, end="")
-        missing = [path for path in expected_outputs if not path.is_file() or path.stat().st_size == 0]
-        if missing:
-            print("provider did not write expected output file(s):", file=sys.stderr)
-            for path in missing:
-                print(f"- {path}", file=sys.stderr)
-            if args.provider == "auto":
-                last_returncode = 1
-                continue
-            return 1
-        return 0
+    finally:
+        os.environ.pop("ND_AGY_LOG_FILE", None)
+        try:
+            os.unlink(agy_log_path)
+        except OSError:
+            pass
 
     if not attempted:
         print("no supported provider CLI found; install agy/codebuddy or set ND_AGY_BIN or ND_CODEBUDDY_BIN", file=sys.stderr)

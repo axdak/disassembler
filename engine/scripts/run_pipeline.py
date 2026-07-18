@@ -160,6 +160,26 @@ def set_cancel_event(event: "threading.Event") -> None:
     _cancel_event = event
 
 
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """杀掉 proc 及其整棵子进程树。
+
+    Windows 上 Popen.kill()（= TerminateProcess）只杀直接子进程；经 shell=True
+    启动的 worker 实为 cmd.exe -> python -> agy/node，单杀 cmd.exe 会让真正在
+    干活的 agy 成孤儿、继续占锁，导致续跑时新 worker 启动即报错。故取消/
+    超时统一用 taskkill /T 递归杀整棵树。
+    """
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+        )
+    else:
+        proc.kill()
+    proc.wait()
+
+
 def stream_shell_command(
     command: str,
     cwd: Path,
@@ -206,8 +226,7 @@ def stream_shell_command(
     while True:
         drain_output()
         if _cancel_event.is_set():
-            proc.kill()
-            proc.wait()
+            _kill_tree(proc)
             reader.join(timeout=1)
             drain_output()
             message = "[cancelled by user]\n"
@@ -218,8 +237,7 @@ def stream_shell_command(
         if proc.poll() is not None:
             break
         if deadline is not None and time.monotonic() >= deadline:
-            proc.kill()
-            proc.wait()
+            _kill_tree(proc)
             reader.join(timeout=1)
             drain_output()
             message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=""), timeout)

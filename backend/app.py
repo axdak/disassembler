@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from runner import QueueRunner, RunManager
 from db import Database
 from hub import BroadcastHub
-from models import FromBook, Project, ProjectCreate, QueueAdd, Run, RunStart, SettingsUpdate, StageEvent, Status
+from models import FromBook, Project, ProjectCreate, QueueAdd, Run, RunConfig, RunStart, SettingsUpdate, StageEvent, Status
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
 from run_pipeline import run_cmd, script_path
@@ -51,6 +51,12 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
     # 清理上一会话残留的 running 运行（崩溃/关闭未正常结束），解锁 UI 以便续跑
     for run_id, project_id in app.state.db.mark_running_runs_interrupted():
         app.state.db.add_event(run_id, project_id, "run_status", detail="interrupted")
+
+    def resolve_run_config(override: Optional[RunConfig]) -> RunConfig:
+        # 存档设置作为默认值，调用方覆盖（前端通常传空 config，需靠这里注入设置）。
+        merged: dict = {**app.state.db.all_settings()}
+        merged.update((override or RunStart().config).model_dump())
+        return RunConfig(**{k: v for k, v in merged.items() if k in RunConfig.model_fields})
 
     def require_token(request: Request) -> None:
         auth = request.headers.get("authorization", "")
@@ -123,8 +129,10 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
 
     @app.post("/projects/{pid}/run", dependencies=[Depends(require_token)])
     def start_run(pid: int, body: RunStart):
+        # 存档设置作为默认值，请求体覆盖（前端 run() 传空 config，需靠这里注入设置）。
+        config = resolve_run_config(body.config)
         try:
-            run_id = app.state.manager.start(pid, body.config)
+            run_id = app.state.manager.start(pid, config)
         except KeyError:
             raise HTTPException(status_code=404, detail="project not found")
         except RuntimeError as e:
@@ -210,7 +218,7 @@ def create_app(db_path: str, token: str, orchestrator_factory=Orchestrator) -> F
 
     @app.post("/queue", dependencies=[Depends(require_token)])
     def queue_add(body: QueueAdd):
-        pos = app.state.queue.add(body.project_id, body.config or RunStart().config)
+        pos = app.state.queue.add(body.project_id, resolve_run_config(body.config))
         return {"position": pos}
 
     @app.get("/queue", dependencies=[Depends(require_token)])
