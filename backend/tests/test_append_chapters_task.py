@@ -250,6 +250,57 @@ def test_append_apply_endpoint_queues_writer_and_updates_index(app_client):
     assert new_analysis_seqs == [4]
 
 
+def test_append_adapter_confines_split_dir_to_project(tmp_path):
+    """A tampered/stale plan whose split_dir points outside the project must
+    NOT escape: the adapter overrides split_dir to the canonical project
+    chapter dir so the writer lock actually covers the index being mutated.
+    """
+    project, out_dir = _seed_project(tmp_path / "project")
+    new_src = tmp_path / "book_new.txt"
+    new_src.write_text(
+        "第1章 序章\n内容1\n第2章 相遇\n内容2\n第3章 冲突\n内容3\n"
+        "第4章 续写\n内容4\n",
+        encoding="utf-8",
+    )
+
+    from split_chapters_append import plan_append
+    # Build the plan against the real out_dir, then tamper: redirect
+    # split_dir to a dir OUTSIDE the project.
+    plan = plan_append(str(new_src), str(out_dir))
+    tampered_dir = tmp_path / "tampered_split_dir"
+    tampered_dir.mkdir(parents=True)
+    plan["split_dir"] = str(tampered_dir)
+    # Sanity: the tampered dir is outside the project.
+    assert not Path(tampered_dir).resolve().is_relative_to(
+        Path(project).resolve()
+    )
+
+    class FakeManager:
+        def create(self, project_id, task_type, params):
+            return {"id": 1, "project_id": project_id, "task_type": task_type,
+                    "params": params, "status": "queued"}
+
+    adapter = AppendChaptersTaskAdapter(manager=FakeManager())
+    ctx = _make_context(project, {"plan": plan})
+    result = adapter.run(ctx)
+
+    # New chapter md + updated index land under the project's 原文拆解.
+    assert (out_dir / "_索引.json").is_file()
+    new_index = json.loads((out_dir / "_索引.json").read_text(encoding="utf-8"))
+    assert [c["seq"] for c in new_index["chapters"]] == [1, 2, 3, 4]
+    assert new_index["source_file"] == str(new_src.resolve())
+    assert any(p.name.startswith("第004章") for p in out_dir.glob("*.md"))
+    assert "index_path" in result["manifest"]
+    assert Path(result["manifest"]["index_path"]).resolve().is_relative_to(
+        Path(project).resolve()
+    )
+
+    # Nothing was written under the tampered split_dir.
+    assert list(tampered_dir.iterdir()) == [], (
+        "tampered split_dir must not receive any writes"
+    )
+
+
 def test_append_apply_rejects_conflict_plan(app_client):
     client, tmp_path, app = app_client
     project, out_dir = _seed_project(tmp_path / "project")

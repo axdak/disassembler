@@ -2476,7 +2476,6 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     diff = project_dir / "结构变更日志" / f"diff_governance_{ts}.json"
     report_delta = governance_dir / f"validate_delta_governance_{ts}.txt"
     report_schema = governance_dir / f"validate_schema_governance_{ts}.txt"
-    shutil.copy2(story, before)
     report_repair_json = governance_dir / f"repair_json_governance_{ts}.json"
     rc = repair_llm_json(patch, report_repair_json, backup=True)
     if rc != 0:
@@ -2491,6 +2490,9 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     if rc != 0:
         print(f"治理补丁Delta校验失败: {report_delta}")
         return 1
+    # validate_delta is read-only — only persist the before snapshot once it
+    # has passed, so a validation-only failure leaves no snapshot artifacts.
+    shutil.copy2(story, before)
     rc = run_cmd([sys.executable, str(script_path("merge_delta.py")), str(story), str(patch)], governance_dir / f"merge_governance_{ts}.txt")
     if rc != 0:
         shutil.copy2(before, story); print("治理新增/修改合并失败，已回滚。") ; return 1

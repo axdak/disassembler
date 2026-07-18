@@ -250,8 +250,25 @@ def test_governance_adapter_validation_failure_leaves_process_unchanged(tmp_path
     with pytest.raises(Exception):
         adapter.run(ctx)
 
-    # Process JSON untouched (commit_governance rolled back to before snapshot).
+    # Process JSON untouched — validate_delta fails BEFORE any mutation, so
+    # "unchanged" must reflect "short-circuited before mutation", not merely
+    # "mutated then restored". The distinguishing evidence: no before/after/diff
+    # snapshot files may be left on disk.
     assert process_path.read_text(encoding="utf-8") == before_process
+    story_versions = project / "故事结构版本"
+    change_logs = project / "结构变更日志"
+    before_files = list(story_versions.glob("story_before_governance_*.json")) if story_versions.is_dir() else []
+    after_files = list(story_versions.glob("story_after_governance_*.json")) if story_versions.is_dir() else []
+    diff_files = list(change_logs.glob("diff_governance_*.json")) if change_logs.is_dir() else []
+    assert before_files == [], (
+        f"validation-only failure must not persist a before snapshot: {before_files}"
+    )
+    assert after_files == [], (
+        f"validation-only failure must not persist an after snapshot: {after_files}"
+    )
+    assert diff_files == [], (
+        f"validation-only failure must not persist a diff snapshot: {diff_files}"
+    )
     # Audit status is NOT committed.
     status = json.loads(paths["status"].read_text(encoding="utf-8"))
     assert status["status"] != "committed"

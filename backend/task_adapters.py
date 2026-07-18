@@ -655,6 +655,11 @@ class AppendChaptersTaskAdapter:
 
         project_dir = Path(context.project_path)
 
+        # Confine the plan's split_dir to the canonical project chapter dir so
+        # the writer lock this adapter holds actually covers the index being
+        # mutated — a tampered or stale plan must not escape the project root.
+        plan["split_dir"] = str(project_dir / "原文拆解")
+
         context.progress(20, "appending new chapter files")
         report = apply_append(plan)
         context.progress(70, "queueing new chapter production work")
