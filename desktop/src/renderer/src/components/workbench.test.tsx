@@ -34,7 +34,7 @@ const STATUS: Status = {
   completed: ['chapter_analysis'],
   last_error: null,
   recent_events: [],
-  revisions: { chapter_index: 'v1', story_structure: 'v1' },
+  revisions: { chapter: '0123456789abcdef', process: 'abcdef0123456789', final: 'fedcba9876543210' },
   task_summary: { queued: 1, running: 1, failed: 2 },
   stale_task_count: 3,
 }

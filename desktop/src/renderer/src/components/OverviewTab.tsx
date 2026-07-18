@@ -85,6 +85,11 @@ export function OverviewTab({
   const running = tasks.filter((t) => t.status === 'running')
   const recentFailed = tasks.filter((t) => t.status === 'failed').slice(-3)
 
+  function shortHash(value: unknown): string {
+    const s = typeof value === 'string' && value ? value : ''
+    return s ? s.slice(0, 8) : '-'
+  }
+
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
@@ -100,8 +105,9 @@ export function OverviewTab({
 
       <h4 style={{ margin: '12px 0 4px' }}>版本与任务摘要</h4>
       <div style={{ fontSize: 13, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <span>章节索引版本: <code>{revisions.chapter_index || '-'}</code></span>
-        <span>故事结构版本: <code>{revisions.story_structure || '-'}</code></span>
+        <span>章节索引版本: <code>{shortHash(revisions.chapter)}</code></span>
+        <span>过程结构版本: <code>{shortHash(revisions.process)}</code></span>
+        <span>最终结构版本: <code>{shortHash(revisions.final)}</code></span>
         <span>排队: {summary.queued ?? 0}</span>
         <span>运行中: {summary.running ?? 0}</span>
         <span>失败: {summary.failed ?? 0}</span>

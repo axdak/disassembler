@@ -25,6 +25,16 @@ export interface BackendHandle {
   proc: ChildProcessByStdio<null, Readable, Readable>
 }
 
+/** A synchronous handle on the spawned backend plus a ready promise.
+ *
+ * Exposing ``proc`` synchronously lets the caller wire a kill on
+ * ``before-quit`` during the startup window (before ``BACKEND_READY`` fires),
+ * so quitting mid-startup cannot orphan the Python child on Windows. */
+export interface BackendSpawn {
+  proc: ChildProcessByStdio<null, Readable, Readable>
+  ready: Promise<BackendHandle>
+}
+
 /** Env passed to the backend subprocess. Kept here so tests can assert it. */
 export function buildBackendEnv(): NodeJS.ProcessEnv {
   return {
@@ -64,14 +74,19 @@ export function streamUtf8(stream: Readable, onText: (text: string) => void): ()
   }
 }
 
-/** Spawn the venv backend, decode its stdio, and resolve once BACKEND_READY fires. */
-export function startBackendProcess(): Promise<BackendHandle> {
-  return new Promise((resolveP, rejectP) => {
-    const proc = spawn(VENV_PYTHON, ['-u', BACKEND_MAIN, '--port', '0'], {
-      env: buildBackendEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+/** Spawn the venv backend, decode its stdio, and resolve once BACKEND_READY fires.
+ *
+ * Returns the spawned ``proc`` synchronously (so the caller can kill it during
+ * the startup window) plus a ``ready`` promise that resolves with the decoded
+ * base/token handle once the ``BACKEND_READY`` handshake completes. Preserves
+ * the 30s startup timeout and the ready-handshake/env behavior. */
+export function startBackendProcess(): BackendSpawn {
+  const proc = spawn(VENV_PYTHON, ['-u', BACKEND_MAIN, '--port', '0'], {
+    env: buildBackendEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
 
+  const ready = new Promise<BackendHandle>((resolveP, rejectP) => {
     let resolved = false
     let stdoutBuf = ''
     const timer = setTimeout(() => {
@@ -109,4 +124,6 @@ export function startBackendProcess(): Promise<BackendHandle> {
       }
     })
   })
+
+  return { proc, ready }
 }

@@ -69,7 +69,6 @@ export function ExportTab({
         </label>
       </div>
       <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-        <button onClick={() => onOpenArtifact('导出')}>打开导出目录</button>
         <button onClick={submit} disabled={kinds.length === 0}>创建导出任务</button>
       </div>
 

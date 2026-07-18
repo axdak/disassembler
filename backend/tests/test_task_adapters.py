@@ -174,7 +174,8 @@ def test_analysis_adapter_passes_task_chapters_targets_question_original_and_for
         "chapters": "all",
         "targets": ["角色:林婉"],
         "question": "谁是主角？",
-        "include_original": "none",
+        # Spec §3.3 canonical param name (the UI sends original_text).
+        "original_text": "none",
         "force": True,
     }
     ctx = _make_context(project, params)
@@ -188,6 +189,7 @@ def test_analysis_adapter_passes_task_chapters_targets_question_original_and_for
     assert manifest["targets"] == ["角色:林婉"]
     assert manifest["question"] == "谁是主角？"
     assert manifest["include_original"] == "none"
+    assert result["include_original"] == "none"
 
     # Adapter records the forwarded force flag.
     assert result["force"] is True
@@ -375,16 +377,19 @@ def test_chapter_delta_rerun_adapter_honors_force_false(project):
 # --- ExportAdapter --------------------------------------------------------
 
 def test_export_adapter_selects_process_source_and_forwards_options(project, tmp_path):
+    """Canonical spec path (§3.5/§8): {source, kinds, force}.
+
+    kinds translates to engine flags: single → single_file (default path when
+    none given), dataview/canvas → on; vault is always produced. force wipes
+    the existing export dir before regenerating.
+    """
     adapter = ExportAdapter()
     out_dir = tmp_path / "vault"
-    single_file = tmp_path / "故事结构总览.md"
     params = {
         "source": "process",
+        "kinds": ["single", "vault", "dataview", "canvas"],
+        "force": True,
         "out_dir": str(out_dir),
-        "single_file": str(single_file),
-        "include_dataview": True,
-        "include_canvas": True,
-        "clean": True,
         "filename_mode": "type-name",
     }
     ctx = _make_context(project, params)
@@ -395,8 +400,13 @@ def test_export_adapter_selects_process_source_and_forwards_options(project, tmp
     assert "故事结构_增量.json" in result["manifest"]["source_file"]
     assert result["source"] == "process"
 
-    # All forwarded options are reflected in the export report.
-    assert result["manifest"]["single_file"] == str(single_file)
+    # kinds + force are echoed on the result.
+    assert result["kinds"] == ["single", "vault", "dataview", "canvas"]
+    assert result["force"] is True
+
+    # "single" with no explicit path → default single-file path beside the vault.
+    single_file_path = out_dir.parent / (out_dir.name + "_single.md")
+    assert result["manifest"]["single_file"] == str(single_file_path)
     assert result["manifest"]["dataview_enabled"] is True
     assert result["manifest"]["canvas_enabled"] is True
     assert result["manifest"]["filename_mode"] == "type-name"
@@ -406,7 +416,7 @@ def test_export_adapter_selects_process_source_and_forwards_options(project, tmp
     assert (out_dir / "00-总览" / "故事总览.md").is_file()
     assert (out_dir / "_dataview" / "查询-主角.md").is_file()
     assert (out_dir / "00-总览" / "故事图谱.canvas").is_file()
-    assert single_file.is_file()
+    assert single_file_path.is_file()
 
     # type-name filename mode produces type-prefixed object pages.
     assert (out_dir / "角色" / "角色-约翰娜.md").is_file()
@@ -431,16 +441,18 @@ def test_export_adapter_selects_final_source_by_default(project, tmp_path):
     assert result["manifest"]["filename_mode"] == "name"
 
 
-def test_export_adapter_clean_wipes_existing_vault(project, tmp_path):
+def test_export_adapter_force_wipes_existing_vault(project, tmp_path):
+    """force (spec §3.5) wipes the existing export dir before regenerating,
+    preserving task history (the adapter never touches task rows)."""
     out_dir = tmp_path / "vault-clean"
     out_dir.mkdir(parents=True)
     (out_dir / "stale.md").write_text("stale", encoding="utf-8")
 
     adapter = ExportAdapter()
-    params = {"source": "final", "out_dir": str(out_dir), "clean": True}
+    params = {"source": "final", "kinds": ["vault"], "force": True, "out_dir": str(out_dir)}
     ctx = _make_context(project, params)
     adapter.run(ctx, adapter.prepare(ctx))
 
-    # Stale file is gone after a clean export.
+    # Stale file is gone after a forced (clean) export.
     assert not (out_dir / "stale.md").exists()
     assert (out_dir / "00-总览" / "故事总览.md").is_file()

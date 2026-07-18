@@ -219,10 +219,14 @@ def test_governance_adapter_success_records_before_after_diff(tmp_path):
     _write_json(paths["correction"], _no_change_correction(start, end))
 
     adapter = GovernanceTaskAdapter()
-    ctx = _make_context(project, {"start": start, "end": end})
+    # Spec canonical param: chapters range string (translated to start/end).
+    ctx = _make_context(project, {"chapters": "1-1"})
     result = adapter.run(ctx)
 
     assert result["task"] == "governance"
+    assert result["chapters"] == "1-1"
+    assert result["start"] == 1
+    assert result["end"] == 1
     assert result["before"] and Path(result["before"]).is_file()
     assert result["after"] and Path(result["after"]).is_file()
     assert result["diff"] and Path(result["diff"]).is_file()
@@ -232,6 +236,41 @@ def test_governance_adapter_success_records_before_after_diff(tmp_path):
     assert status["before"] == result["before"]
     assert status["after"] == result["after"]
     assert status["diff"] == result["diff"]
+
+
+def test_governance_adapter_chapters_all_derives_from_index(tmp_path):
+    project = _seed_project(tmp_path)
+    # Seed the chapter index so "all" can derive min..max seq.
+    _write_json(project / "原文拆解" / "_索引.json", {"chapters": [
+        {"seq": 1, "filename": "第001章_测试.md", "title": "测试"}
+    ]})
+    from run_pipeline import audit_paths
+    paths = audit_paths(project, 1, 1)
+    _write_json(paths["correction"], _no_change_correction(1, 1))
+
+    adapter = GovernanceTaskAdapter()
+    ctx = _make_context(project, {"chapters": "all"})
+    result = adapter.run(ctx)
+    # The seeded project has a single chapter (seq 1), so "all" resolves to 1..1.
+    assert result["start"] == 1
+    assert result["end"] == 1
+    assert result["chapters"] == "all"
+
+
+def test_governance_adapter_start_end_fallback_still_accepted(tmp_path):
+    """Explicit start/end remains a backward-compat fallback (spec §8 uses
+    chapters, but the adapter must not break callers that still send start/end)."""
+    project = _seed_project(tmp_path)
+    from run_pipeline import audit_paths
+    paths = audit_paths(project, 1, 1)
+    _write_json(paths["correction"], _no_change_correction(1, 1))
+
+    adapter = GovernanceTaskAdapter()
+    ctx = _make_context(project, {"start": 1, "end": 1})
+    result = adapter.run(ctx)
+    assert result["start"] == 1
+    assert result["end"] == 1
+    assert result["chapters"] == ""
 
 
 def test_governance_adapter_validation_failure_leaves_process_unchanged(tmp_path):
@@ -336,7 +375,7 @@ def test_governance_endpoint_queues_writer_task(app_client):
 
     response = client.post(
         f"/projects/{pid}/tasks",
-        json={"type": "governance", "params": {"start": 1, "end": 1}},
+        json={"type": "governance", "params": {"chapters": "1-1", "force": False, "auto_apply": True}},
         headers=AUTH,
     )
     assert response.status_code == 200, response.text

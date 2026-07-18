@@ -12,8 +12,12 @@ let isQuitting = false
 let tray: Tray | null = null
 
 function startBackend(): Promise<void> {
-  return startBackendProcess().then((h) => {
-    backendProc = h.proc
+  // Spawn synchronously so the handle is available for before-quit kill even
+  // during the startup window (before BACKEND_READY fires); Windows does not
+  // auto-reap an orphaned Python child.
+  const { proc, ready } = startBackendProcess()
+  backendProc = proc
+  return ready.then((h) => {
     backendBase = h.base
     backendToken = h.token
   })

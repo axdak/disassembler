@@ -209,6 +209,9 @@ def test_append_invalidates_whole_book_and_new_chapters_only(tmp_path):
     # stale + missing counts
     assert resp.counts["stale"] >= 3
     assert resp.counts["missing"] >= 4
+    # spec §3.1 overview derived counts: stale whole-book analysis + stale export
+    assert resp.counts["stale_analysis"] >= 3
+    assert resp.counts["stale_export"] >= 1
 
 
 # ---- Step 1: governance invalidation mapping ---------------------------
@@ -274,9 +277,15 @@ def test_counts_total_cards_correctly(tmp_path):
     _seed_whole_book_artifact(project, "summary")
     tasks = [_task(1, "analysis", "done", {"task": "summary"}, rev)]
     resp = collect_artifact_status(project, tasks)
-    total = sum(resp.counts.values())
+    # Card-state counts (the seven states) sum to total cards. The derived
+    # stale_analysis/stale_export summary keys (spec §3.1) are excluded.
+    card_states = ("missing", "latest", "stale", "queued", "running", "failed", "cancelled")
+    total = sum(resp.counts.get(s, 0) for s in card_states)
     # dimensions (12) + per-chapter cards (4) + exports (2) = 18 cards
     assert total == len(resp.dimensions) + sum(len(c.cards) for c in resp.chapters) + len(resp.exports)
+    # Derived overview counts are present (spec §3.1).
+    assert "stale_analysis" in resp.counts
+    assert "stale_export" in resp.counts
 
 
 def test_chapter_row_exposes_latest_task_and_error(tmp_path):

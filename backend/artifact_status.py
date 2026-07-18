@@ -370,6 +370,13 @@ def collect_artifact_status(project_dir, tasks, *, revisions: dict | None = None
     for card in all_cards:
         counts[card.status] = counts.get(card.status, 0) + 1
 
+    # spec §3.1: overview surfaces "已过期分析和导出数量". These are derived
+    # summary counts (whole-book analysis dimension cards + export cards in
+    # stale state); they are NOT card states and excluded from the total-card
+    # invariant asserted by tests.
+    counts["stale_analysis"] = sum(1 for c in dimensions.values() if c.status == "stale")
+    counts["stale_export"] = sum(1 for c in exports.values() if c.status == "stale")
+
     return ArtifactStatusResponse(
         dimensions=dimensions,
         chapters=chapter_cards,

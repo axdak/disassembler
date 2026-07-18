@@ -17,6 +17,8 @@ for the whole run (no prepare) and run directly against the live project dir.
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import sys
 import tempfile
@@ -51,6 +53,7 @@ from run_pipeline import (  # noqa: E402
     scoped_chapter_visual_aggregate,
     scoped_chapter_visual_pack,
     snapshot_project_inputs,
+    unresolved_audits,
 )
 from export_obsidian_vault import export_obsidian_markdown  # noqa: E402
 from split_chapters_append import apply_append  # noqa: E402
@@ -90,6 +93,55 @@ def _int_param(params: dict, name: str, default: int) -> int:
     return int(value)
 
 
+def _chapter_index_seq_range(project_dir: Path) -> tuple[int, int]:
+    """Derive (min_seq, max_seq) from the project's ``_索引.json`` chapters."""
+    index_path = Path(project_dir) / "原文拆解" / "_索引.json"
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return (1, 0)
+    raw = data.get("chapters", []) if isinstance(data, dict) else data
+    seqs = [int(c["seq"]) for c in raw if isinstance(c, dict) and c.get("seq") is not None]
+    if not seqs:
+        return (1, 0)
+    return (min(seqs), max(seqs))
+
+
+def _parse_governance_chapters(project_dir: Path, chapters: str) -> tuple[int, int]:
+    """Translate the spec's ``chapters`` param to a (start, end) range.
+
+    - ``"all"`` → min..max seq from ``_索引.json``.
+    - ``"recent"`` → the first unresolved periodic-audit range; if none is
+      unresolved, fall back to the whole-book range (the book has been fully
+      audited, so audit the whole book again on demand).
+    - ``"101-150"`` (or any ``"N-M"``) → parsed start/end.
+    """
+    chapters = (chapters or "").strip().lower()
+    if chapters in ("", "all"):
+        start, end = _chapter_index_seq_range(project_dir)
+        if end < start:
+            raise ValueError("governance 'all' requires chapters in the project index")
+        return start, end
+    if chapters == "recent":
+        unresolved = unresolved_audits(Path(project_dir))
+        for entry in unresolved:
+            start = entry.get("_start")
+            end = entry.get("_end")
+            if start is not None and end is not None and end >= start:
+                return int(start), int(end)
+        start, end = _chapter_index_seq_range(project_dir)
+        if end < start:
+            raise ValueError("governance 'recent' has no unaudited chapters and no index")
+        return start, end
+    m = re.match(r"^(\d+)\s*-\s*(\d+)$", chapters)
+    if not m:
+        raise ValueError(f"governance 'chapters' must be all/recent/N-M, got: {chapters!r}")
+    start, end = int(m.group(1)), int(m.group(2))
+    if end < start:
+        raise ValueError(f"governance 'chapters' requires start <= end: {chapters!r}")
+    return start, end
+
+
 def _latest_manifest(project_dir: Path, suffix: str) -> Optional[Path]:
     """Locate the most recent manifest matching suffix in the real project dir."""
     path = latest_analysis_manifest(project_dir, suffix)
@@ -106,19 +158,40 @@ class AnalysisAdapter:
         snapshot_dir = snapshot_project_inputs(project_dir)
         return {"snapshot_dir": snapshot_dir, "project_dir": project_dir}
 
+    @staticmethod
+    def _parse_params(params: dict) -> dict:
+        """Translate the spec public params to engine call params.
+
+        spec §8/§3.3: ``{task, chapters, targets, question, original_text,
+        force}``. The ``original_text`` alias is the canonical UI name; legacy
+        ``include_original``/``original`` remain accepted.
+        """
+        return {
+            "task": _str_param(params, "task", "analysis_task", "name", default="summary"),
+            "chapters": _str_param(params, "chapters", "chapter_range", default="all"),
+            "targets": params.get("targets") or None,
+            "question": _str_param(params, "question", default=""),
+            "include_original": _str_param(
+                params, "include_original", "original", "original_text", default="sample"
+            ),
+            "force": _bool_param(params, "force", default=False),
+            "max_pack_chars": _int_param(params, "max_pack_chars", 70000),
+            "max_original_chars": _int_param(params, "max_original_chars", 6000),
+            "max_analysis_chars": _int_param(params, "max_analysis_chars", 12000),
+        }
+
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
-        task = _str_param(params, "task", "analysis_task", "name", default="summary")
-        chapters = _str_param(params, "chapters", "chapter_range", default="all")
-        targets = params.get("targets") or None
-        question = _str_param(params, "question", default="")
-        include_original = _str_param(
-            params, "include_original", "original", default="sample"
-        )
-        force = _bool_param(params, "force", default=False)
-        max_pack_chars = _int_param(params, "max_pack_chars", 70000)
-        max_original_chars = _int_param(params, "max_original_chars", 6000)
-        max_analysis_chars = _int_param(params, "max_analysis_chars", 12000)
+        parsed = self._parse_params(params)
+        task = parsed["task"]
+        chapters = parsed["chapters"]
+        targets = parsed["targets"]
+        question = parsed["question"]
+        include_original = parsed["include_original"]
+        force = parsed["force"]
+        max_pack_chars = parsed["max_pack_chars"]
+        max_original_chars = parsed["max_original_chars"]
+        max_analysis_chars = parsed["max_analysis_chars"]
 
         project_dir = Path(context.project_path)
         snapshot_dir = (
@@ -445,6 +518,24 @@ class ExportAdapter:
             raise FileNotFoundError(f"story structure file not found: {candidate}")
         return candidate
 
+    @staticmethod
+    def _translate_kinds(kinds) -> dict:
+        """Translate the spec's ``kinds`` array to engine output flags.
+
+        "vault" is always produced (the default Obsidian vault output) and
+        therefore has no flag here. Returns a dict with single/dataview/canvas
+        bools, all False when ``kinds`` is absent (caller falls back to the
+        granular flags).
+        """
+        flags = {"single": False, "dataview": False, "canvas": False}
+        if not kinds:
+            return flags
+        for item in kinds:
+            key = str(item).lower().strip()
+            if key in flags:
+                flags[key] = True
+        return flags
+
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         source = _str_param(params, "source", "export_source", default="final").lower()
@@ -461,19 +552,36 @@ class ExportAdapter:
         if not out_dir_path.is_absolute():
             out_dir_path = (project_dir / out_dir_path).resolve()
 
+        # spec §3.5: UI sends ``kinds`` (array of single/vault/dataview/canvas)
+        # and ``force``. Translate to the engine flags. The granular flags
+        # remain accepted as a fallback. "vault" is always produced.
+        kind_flags = self._translate_kinds(params.get("kinds"))
+
         single_file = params.get("single_file")
         single_file_path: Optional[Path] = None
         if single_file:
             single_file_path = Path(single_file)
             if not single_file_path.is_absolute():
                 single_file_path = (project_dir / single_file_path).resolve()
+        elif kind_flags["single"]:
+            # Default single-file Markdown path sits beside the vault export.
+            single_file_path = out_dir_path.parent / (out_dir_path.name + "_single.md")
 
         clean = _bool_param(params, "clean", default=False)
-        include_dataview = _bool_param(
-            params, "include_dataview", "dataview", default=False
+        include_dataview = (
+            _bool_param(params, "include_dataview", "dataview", default=False)
+            or kind_flags["dataview"]
         )
-        include_canvas = _bool_param(params, "include_canvas", "canvas", default=False)
+        include_canvas = (
+            _bool_param(params, "include_canvas", "canvas", default=False)
+            or kind_flags["canvas"]
+        )
         filename_mode = _str_param(params, "filename_mode", default="name")
+        # spec §3.5 "强制重新导出": wipe the existing export dir before
+        # regenerating. Task history (DB rows) is never touched here.
+        force = _bool_param(params, "force", default=False)
+        if force:
+            clean = True
 
         context.progress(10, "exporting obsidian vault")
         try:
@@ -519,6 +627,8 @@ class ExportAdapter:
             include_canvas=include_canvas,
             clean=clean,
             filename_mode=filename_mode,
+            kinds=list(params.get("kinds") or []),
+            force=force,
         )
 
 
@@ -539,12 +649,25 @@ class GovernanceTaskAdapter:
         # purely for symmetry with the append adapter and future use.
         self.manager = manager
 
-    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
-        params = context.params or {}
+    @staticmethod
+    def _resolve_range(project_dir: Path, params: dict) -> tuple[int, int]:
+        """Resolve the audit chapter range from the spec's ``chapters`` param,
+        falling back to an explicit ``start``/``end`` for backward compat."""
+        chapters = _str_param(params, "chapters", default="")
+        if chapters:
+            return _parse_governance_chapters(project_dir, chapters)
         start = int(params.get("start", params.get("seq_start", 1)))
         end = int(params.get("end", params.get("seq_end", 0)))
         if end < start:
-            raise ValueError("governance requires 'start' <= 'end'")
+            raise ValueError(
+                "governance requires 'chapters' (all/recent/N-M) or explicit 'start'<='end'"
+            )
+        return start, end
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        project_dir = Path(context.project_path)
+        start, end = self._resolve_range(project_dir, params)
         force = _bool_param(params, "force", default=False)
         max_context_chars = _int_param(
             params, "max_context_chars", DEFAULT_AUDIT_MAX_CONTEXT_CHARS
@@ -556,8 +679,6 @@ class GovernanceTaskAdapter:
             params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
         )
         worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
-
-        project_dir = Path(context.project_path)
 
         context.progress(10, "preparing audit pack")
         rc = prepare_audit_pack_or_split(
@@ -617,6 +738,7 @@ class GovernanceTaskAdapter:
             logs=[],
             revision=revision,
             task="governance",
+            chapters=_str_param(params, "chapters", default=""),
             start=start,
             end=end,
             before=before,
