@@ -82,6 +82,39 @@ def test_state_persisted_between_runs(tmp_path):
     assert m2.call_count == 0
 
 
+def test_rc2_handoff_reruns_until_success(tmp_path):
+    # rc=2 是交接/检查点，不是失败：重跑同阶段直到成功，不发 stage_fail、不计停滞。
+    bus = EventBus()
+    ev = collect(bus)
+    with patch.object(orchestrator, "cmd_run", side_effect=[2, 2, 0, 0]) as m:
+        orch = Orchestrator(tmp_path, config=Config(max_attempts=10, stagnant_limit=3), bus=bus)
+        rc = orch.run()
+    types = [(e.type, e.stage) for e in ev]
+    assert m.call_count == 4  # chapter_analysis:2,2,0 + chapter_delta:0
+    assert ("stage_handoff", "chapter_analysis") in types
+    assert ("stage_fail", "chapter_analysis") not in types
+    assert ("hard_block", "chapter_analysis") not in types
+    assert "chapter_analysis" in orch.state.completed
+    # chapter_structure 未实现，最终 rc=1
+    assert rc == 1
+
+
+def test_rc2_handoff_capped_by_max_attempts(tmp_path):
+    # 持续交接不解决时，由 max_attempts 上限硬阻塞（而非停滞 3 次）。
+    bus = EventBus()
+    hard = []
+    bus.subscribe(lambda e: hard.append(e) if e.type == "hard_block" else None)
+    with patch.object(orchestrator, "cmd_run", return_value=2) as m:
+        orch = Orchestrator(tmp_path, config=Config(max_attempts=3, stagnant_limit=99), bus=bus)
+        rc = orch.run()
+    assert rc == 1
+    assert len(hard) == 1
+    assert hard[0].stage == "chapter_analysis"
+    assert "handoff" in hard[0].detail
+    assert m.call_count == 3
+
+
+
 def test_structure_and_visual_stages_dispatch(tmp_path):
     bus = EventBus()
     with patch.object(orchestrator, "cmd_run", side_effect=[0, 0]), \

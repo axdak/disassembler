@@ -526,6 +526,31 @@ raise SystemExit("serial route must not call provider")
         assert not paths["analysis"].is_file()
 
 
+def test_delta_phase_with_all_analyses_valid_does_not_pass_rerun_command_to_cmd_run():
+    """Regression: cmd_run_delta's tail call to cmd_run must not pass rerun_command.
+
+    cmd_run builds its own rerun_command internally and no longer accepts it as a
+    keyword argument. Passing it raised ``TypeError: cmd_run() got an unexpected
+    keyword argument 'rerun_command'`` once every chapter analysis was valid and
+    cmd_run_delta fell through to its tail call — i.e. the chapter_delta stage
+    died the moment all analyses were ready.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in (1, 2):
+            chapter = project / "原文拆解" / f"第{seq:03d}章_测试.md"
+            chapter.parent.mkdir(parents=True, exist_ok=True)
+            chapter.write_text(f"# 第{seq:03d}章\n测试原文。\n", encoding="utf-8")
+            paths = artifact_paths(project, chapter)
+            paths["analysis"].parent.mkdir(parents=True, exist_ok=True)
+            paths["analysis"].write_text(valid_analysis(seq), encoding="utf-8")
+
+        rc = cmd_run(project, audit_interval=0, phase="delta")
+
+        assert isinstance(rc, int)
+
+
 if __name__ == "__main__":
     test_run_hands_off_analysis_then_delta_before_committing()
     test_run_regenerates_structurally_shrunken_analysis_before_delta_handoff()
@@ -535,4 +560,5 @@ if __name__ == "__main__":
     test_delta_phase_requires_every_analysis_md_before_first_delta_task()
     test_worker_route_defaults_to_supervised_handoffs_after_each_worker_task()
     test_run_with_chapter_worker_continuous_loop_completes_analysis_and_delta()
+    test_delta_phase_with_all_analyses_valid_does_not_pass_rerun_command_to_cmd_run()
     print("\n全部测试通过 [PASS]")

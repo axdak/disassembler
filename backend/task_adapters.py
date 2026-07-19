@@ -43,6 +43,7 @@ from run_pipeline import (  # noqa: E402
     commit_governance,
     copy_analysis_task_packages,
     latest_analysis_manifest,
+    latest_snapshot_seq,
     load_json,
     prepare_audit_pack_or_split,
     run_worker,
@@ -679,6 +680,26 @@ class GovernanceTaskAdapter:
             params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
         )
         worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
+
+        # 周期审计的职责是审计已提交章节。零已提交章节（无 story_after_chNNN.json）
+        # 时无内容可审，跑下去只会让 worker 产出空 no_change 并刷出空快照。直接
+        # 短路返回，不建 pack、不调 worker/commit。与 governance.md「禁止跳过真实
+        # 审计」不冲突：那是禁止对有内容的审计偷懒，这里根本没有已提交章节。
+        if latest_snapshot_seq(project_dir) is None:
+            revision = project_revisions(project_dir)
+            context.progress(100, "skipped: no committed chapters")
+            return _result_json(
+                artifacts=[],
+                manifest={"status": "skipped_no_chapters",
+                          "range": f"{start:03d}-{end:03d}"},
+                manifest_path="",
+                logs=["尚无已提交章节（无 story_after_chNNN.json），周期治理无内容可审，已跳过。"],
+                revision=revision,
+                task="governance",
+                chapters=_str_param(params, "chapters", default=""),
+                start=start,
+                end=end,
+            )
 
         context.progress(10, "preparing audit pack")
         rc = prepare_audit_pack_or_split(

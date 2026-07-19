@@ -399,6 +399,10 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
 
                 if mode == "process":
                     validate_process_patch_item(collection_key, item, label, name_sets, alias_maps, errors, warnings)
+                    # delta_extraction.md 规则5：每个新增/修改元素都必须在 详情 提供非空
+                    # 提取理由 用于 Delta 审计。process 阶段同样强制，避免无理由元素混入
+                    # 过程库；缺失时回填脚本或修复任务补齐，不得静默放行。
+                    validate_evidence_detail(item, label, errors)
                 else:
                     validate_types(collection_key, item, label, errors, warnings)
                     validate_evidence_detail(item, label, errors)
@@ -491,6 +495,38 @@ def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], 
     return errors
 
 
+def validate_set_field_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], mode: str) -> List[str]:
+    """校验治理操作.设置字段不得改变既有事件的不可变字段。
+
+    story_structure_quality_governance.md: 对既有事件只允许重分类，不允许改变
+    时间、涉及章节或数组位置。设置字段直接覆写顶层字段：作用于事件的 时间
+    会改时序；作用于 详情 会整块替换详情（含 涉及章节）。两者均违反该约束。
+    事件详情更新应走 追加详情（按键追加去重），不得用 设置字段 整块覆盖。
+    """
+    ops = delta.get("治理操作", {}) if isinstance(delta, dict) else {}
+    if not isinstance(ops, dict) or "设置字段" not in ops:
+        return []
+    if mode != "governance":
+        return ["治理操作.设置字段 仅允许在 governance 模式使用"]
+    set_ops = ops.get("设置字段")
+    if not isinstance(set_ops, list):
+        return ["治理操作.设置字段 必须是数组"]
+    errors: List[str] = []
+    immutable_fields = {"时间", "详情"}
+    for index, op in enumerate(set_ops):
+        if not isinstance(op, dict):
+            errors.append(f"治理操作.设置字段[{index}] 必须是对象")
+            continue
+        type_name = op.get("类型")
+        field = op.get("字段")
+        if type_name == "事件" and field in immutable_fields:
+            errors.append(
+                f"治理操作.设置字段[{index}] 不得设置事件[{op.get('名称')}]的 {field}；"
+                "对既有事件只允许重分类，时间/涉及章节/数组位置不可变（详情更新请用追加详情）"
+            )
+    return errors
+
+
 def _is_empty_governance_workload(delta: Dict[str, Any]) -> bool:
     """治理Delta是否完全没有作业：无新增/修改元素，且无任何非空治理操作。"""
     for section in ("新增元素", "修改元素"):
@@ -566,6 +602,7 @@ def validate_delta(current_path: str, delta_path: str, mode: str = "process", st
         errors.extend(e2)
         warnings.extend(w2)
         errors.extend(validate_tag_governance_ops(current if isinstance(current, dict) else {}, delta, mode))
+        errors.extend(validate_set_field_governance_ops(current if isinstance(current, dict) else {}, delta, mode))
         if mode == "governance":
             errors.extend(validate_no_change_metadata(delta))
     if strict and warnings:

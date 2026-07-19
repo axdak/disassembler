@@ -134,6 +134,20 @@ class Orchestrator:
             if self._cancel.is_set():
                 self.emit("pipeline_cancelled")
                 return 2
+            if rc == 2:
+                # rc=2 是交接/检查点（cmd_run supervised checkpoint、worker 未配置等），
+                # 不是失败：产物由 worker/主控在下一次派发前补齐后重跑同一路由。
+                # autonomous_loop.md：rc=2 主控必须重跑同一路由，不当作结束/失败。
+                # 不计停滞、不发 stage_fail，只受 max_attempts 上限保护，避免死循环。
+                self.emit("stage_handoff", stage=stage,
+                          detail=f"attempt {attempt} rc=2 (handoff), rerun same stage")
+                self.state.last_error = None
+                self.state.save()
+                if attempt >= self.config.max_attempts:
+                    self.emit("hard_block", stage=stage,
+                              detail=f"exhausted {attempt} attempts on handoff")
+                    return 1
+                continue
             sig = self._signature(stage)
             stagnant = self.state.record_signature(stage, sig)
             self.state.last_error = f"{stage} attempt {attempt} rc={rc}"

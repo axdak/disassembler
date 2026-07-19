@@ -12,7 +12,15 @@ ROOT = Path(__file__).resolve().parent.parent / "scripts"
 RUNNER = ROOT / "run_pipeline.py"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import cmd_run, commit_governance, prepare_audit_pack_or_split, write_audit_pack
+from run_pipeline import (
+    artifact_paths,
+    build_delta_story_context,
+    cmd_run,
+    commit_governance,
+    prepare_audit_pack_or_split,
+    run_periodic_governance,
+    write_audit_pack,
+)
 
 
 def write_json(path, data):
@@ -579,6 +587,169 @@ def test_governance_patch_repairs_llm_json_before_validation():
     print("[OK] 治理补丁校验前修复 LLM JSON 语法")
 
 
+def test_periodic_governance_skipped_when_no_committed_chapters():
+    # 零已提交章节（无 story_after_chNNN.json）时，周期治理整体跳过：
+    # 不建 pack、不 commit、不产生空快照。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+
+        rc = run_periodic_governance(project, 1, 5)
+
+        assert rc == 0
+        audit_dir = project / "质量治理" / "周期审计"
+        assert not list(audit_dir.glob("audit_*.md"))
+        versions = project / "故事结构版本"
+        assert not list(versions.glob("story_before_governance_*.json"))
+        assert not list(versions.glob("story_after_governance_*.json"))
+
+    print("[OK] 零已提交章节时周期治理整体跳过，不产空快照")
+
+
+def test_commit_governance_rejects_no_change_missing_metadata():
+    # no_change 周期补丁缺 质量说明/证据范围 时，validate_no_change_metadata 报错，
+    # commit_governance 不接受（不标记 committed）——治理补丁必须真实，禁止空补丁跳过审计。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        patch = project / "质量治理" / "周期审计" / "correction_001-005.json"
+        write_json(patch, {
+            "章节范围": "第001章-第005章",
+            "治理类型": "no_change",
+            # 故意缺 质量说明 和 证据范围
+            "新增元素": empty_delta(1)["新增元素"],
+            "修改元素": empty_delta(1)["修改元素"],
+        })
+
+        rc = commit_governance(project, str(patch))
+
+        assert rc != 0
+        versions = project / "故事结构版本"
+        assert not list(versions.glob("story_after_governance_*.json"))
+
+    print("[OK] no_change 补丁缺元数据时 commit_governance 拒绝")
+
+
+def test_delta_story_context_passes_full_story_when_small():
+    # < 80KB：完整故事 JSON 直接传给 Delta 提取器。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = project / "故事结构_增量.json"
+        data = empty_story()
+        data["角色集"] = [
+            {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER"},
+        ]
+        write_json(story, data)
+
+        ctx = build_delta_story_context(story, project, chapter_seq=1)
+
+        assert "FULL_ONLY_MARKER" in ctx
+        assert "主角介绍" in ctx
+
+    print("[OK] 小故事(<80KB) Delta 上下文传完整 JSON")
+
+
+def test_delta_story_context_passes_name_index_plus_recent_when_medium():
+    # 80-200KB：传元素名称摘要 + 最近10章 Delta，不传完整详情。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = project / "故事结构_增量.json"
+        data = empty_story()
+        data["角色集"] = [
+            {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 90000},
+        ]
+        write_json(story, data)
+
+        ctx = build_delta_story_context(story, project, chapter_seq=1)
+
+        assert "FULL_ONLY_MARKER" not in ctx
+        assert "主角A" in ctx
+        assert "路人B" in ctx
+
+    print("[OK] 中故事(80-200KB) Delta 上下文传名称摘要+最近10章Delta")
+
+
+def test_delta_story_context_passes_protagonist_factions_when_large():
+    # > 200KB：传主角/主要阵营 + 最近10章摘要，不传完整故事。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = project / "故事结构_增量.json"
+        data = empty_story()
+        data["角色集"] = [
+            {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 210000},
+        ]
+        write_json(story, data)
+
+        ctx = build_delta_story_context(story, project, chapter_seq=1)
+
+        assert "FULL_ONLY_MARKER" not in ctx
+        assert "主角介绍" in ctx
+
+    print("[OK] 大故事(>200KB) Delta 上下文传主角/阵营+最近10章")
+
+
+def test_delta_story_context_large_tier_only_main_factions():
+    # >200KB：只传主要阵营（顶层+主角所属），不传从属阵营的完整档案。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = project / "故事结构_增量.json"
+        data = empty_story()
+        data["角色集"] = [
+            {"名称": "主角A", "是否主角": True, "所属阵营": ["大公会"], "介绍": "x" * 210000},
+        ]
+        data["阵营集"] = [
+            {"名称": "大公会", "父级阵营": ""},
+            {"名称": "大公会下属小队", "父级阵营": "大公会"},
+            {"名称": "无关边缘公会", "父级阵营": ""},
+        ]
+        write_json(story, data)
+
+        ctx = build_delta_story_context(story, project, chapter_seq=1)
+
+        assert "大公会" in ctx
+        assert "无关边缘公会" in ctx
+        assert "大公会下属小队" not in ctx
+
+    print("[OK] >200KB 档只传主要阵营(顶层+主角所属)，不传从属阵营")
+
+
+def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
+    # 80-200KB：名称摘要 + 最近10章 Delta 实际内容（不只是名称）。
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = project / "故事结构_增量.json"
+        data = empty_story()
+        data["角色集"] = [
+            {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 90000},
+        ]
+        write_json(story, data)
+        # 准备前一章已提交的 Delta，带一个可识别的实际内容标记
+        prev_chapter = project / "原文拆解" / "第001章_测试.md"
+        prev_chapter.parent.mkdir(parents=True, exist_ok=True)
+        prev_chapter.write_text("# 第001章\n原文。\n", encoding="utf-8")
+        prev_paths = artifact_paths(project, prev_chapter)
+        prev_paths["delta"].parent.mkdir(parents=True, exist_ok=True)
+        write_json(prev_paths["delta"], {
+            "章节": "第001章",
+            "新增元素": {"角色集": [{"名称": "前章角色C"}], "事件集": [], "地点集": [],
+                          "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []},
+            "修改元素": {"角色集": [], "事件集": [], "地点集": [],
+                          "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []},
+        })
+
+        ctx = build_delta_story_context(story, project, chapter_seq=2)
+
+        assert "前章角色C" in ctx  # 实际 Delta 内容被嵌入
+        assert "FULL_ONLY_MARKER" not in ctx  # 故事详情不进摘要
+        assert "第001章 Delta:" in ctx  # 实际 Delta 块标记
+
+    print("[OK] 80-200KB 档传名称摘要+最近10章Delta实际内容")
+
+
 if __name__ == "__main__":
     test_audit_pack_cli_creates_review_package()
     test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch()
@@ -587,4 +758,11 @@ if __name__ == "__main__":
     test_governance_patch_compresses_tags_before_validation()
     test_chapter_delta_repairs_llm_json_before_validation()
     test_governance_patch_repairs_llm_json_before_validation()
+    test_periodic_governance_skipped_when_no_committed_chapters()
+    test_commit_governance_rejects_no_change_missing_metadata()
+    test_delta_story_context_passes_full_story_when_small()
+    test_delta_story_context_passes_name_index_plus_recent_when_medium()
+    test_delta_story_context_passes_protagonist_factions_when_large()
+    test_delta_story_context_large_tier_only_main_factions()
+    test_delta_story_context_medium_tier_includes_actual_recent_deltas()
     print("\n全部测试通过 [PASS]")

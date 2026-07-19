@@ -132,14 +132,17 @@ def test_bad_delta_fails():
         assert result.returncode != 0, result.stdout
 
 
-def test_delta_without_evidence_is_permissive_in_process_but_fails_in_governance():
+def test_delta_without_evidence_fails_in_both_process_and_governance():
+    # delta_extraction.md 规则5：提取理由 对所有模式都是必填；process 与 governance
+    # 均应拒绝缺提取理由的元素。
     with tempfile.TemporaryDirectory() as td:
         story = Path(td) / "story.json"
         delta = Path(td) / "delta.json"
         write_json(story, base_story())
         write_json(delta, bad_delta_missing_evidence())
         process = run([sys.executable, str(VALIDATOR), "--mode", "process", str(story), str(delta)])
-        assert process.returncode == 0, process.stdout
+        assert process.returncode != 0, process.stdout
+        assert "提取理由" in process.stdout, process.stdout
         governance = run([sys.executable, str(VALIDATOR), "--mode", "governance", str(story), str(delta)])
         assert governance.returncode != 0, governance.stdout
         assert "提取理由" in governance.stdout, governance.stdout
@@ -262,6 +265,59 @@ def test_governance_delta_allows_unregistered_event_location_as_warning():
         assert result.returncode == 0, result.stdout
         assert "青云山山门口" in result.stdout, result.stdout
         assert "警告" in result.stdout, result.stdout
+
+
+def _story_with_event():
+    s = base_story()
+    s["事件集"] = [{
+        "名称": "入门试炼", "发生地点": "青云山", "参与成员": ["张三"],
+        "重量级": 20, "目标事件": [], "分组": "00000001-卷一开篇", "时间": "0001-01-01T00:00:00",
+        "别名": [], "标签集": ["试炼"], "介绍": "张三参加入门试炼。",
+        "详情": {"涉及章节": "0001"},
+    }]
+    return s
+
+
+def _set_field_patch(field, value):
+    empty = {k: [] for k in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集", "其他事项集"]}
+    return {
+        "章节范围": "第001章-第005章",
+        "治理操作": {"设置字段": [{"类型": "事件", "名称": "入门试炼", "字段": field, "值": value}]},
+        "新增元素": empty,
+        "修改元素": empty,
+    }
+
+
+def test_governance_set_field_cannot_mutate_event_time_or_detail():
+    # §133：对既有事件只允许重分类，不得改 时间/涉及章节/数组位置。
+    # 设置字段 覆写 时间 或 整块 详情(含涉及章节) 均应被治理校验拒绝。
+    with tempfile.TemporaryDirectory() as td:
+        story = Path(td) / "story.json"
+        delta = Path(td) / "correction_001-005.json"
+        write_json(story, _story_with_event())
+
+        write_json(delta, _set_field_patch("时间", "0002-01-01T00:00:00"))
+        rc_time = run([sys.executable, str(VALIDATOR), "--mode", "governance", str(story), str(delta)])
+        assert rc_time.returncode != 0, rc_time.stdout
+        assert "时间" in rc_time.stdout and "不可变" in rc_time.stdout, rc_time.stdout
+
+        write_json(delta, _set_field_patch("详情", {"涉及章节": "0002"}))
+        rc_detail = run([sys.executable, str(VALIDATOR), "--mode", "governance", str(story), str(delta)])
+        assert rc_detail.returncode != 0, rc_detail.stdout
+        assert "详情" in rc_detail.stdout and "不可变" in rc_detail.stdout, rc_detail.stdout
+
+
+def test_governance_set_field_allows_event_reclassification():
+    # 设置字段 改事件的非不可变字段（如 分组，即重分类）应放行。
+    with tempfile.TemporaryDirectory() as td:
+        story = Path(td) / "story.json"
+        delta = Path(td) / "correction_001-005.json"
+        write_json(story, _story_with_event())
+        write_json(delta, _set_field_patch("分组", "00000002-宗门考核"))
+
+        result = run([sys.executable, str(VALIDATOR), "--mode", "governance", str(story), str(delta)])
+
+        assert result.returncode == 0, result.stdout
 
 
 def test_governance_delta_still_rejects_unregistered_event_participant():
