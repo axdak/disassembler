@@ -60,6 +60,7 @@ from run_pipeline import (  # noqa: E402
     unresolved_audits,
 )
 from export_obsidian_vault import export_obsidian_markdown  # noqa: E402
+from migrate_chronology import run_migrate  # noqa: E402
 from split_chapters_append import apply_append  # noqa: E402
 
 
@@ -775,6 +776,30 @@ class GovernanceTaskAdapter:
             before=before,
             after=after,
             diff=diff,
+        )
+
+
+# === MigrateChronologyAdapter (writer) ===================================
+
+class MigrateChronologyAdapter:
+    """Writer adapter: chronology migration (time backfill, retrospective
+    compaction, event reorder) on the process story JSON."""
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        project_dir = Path(context.project_path)
+        dry_run = _bool_param(params, "dry_run", default=False)
+        context.progress(30, "migrating chronology")
+        rc = run_migrate(project_dir, dry_run=dry_run)
+        if rc != 0:
+            raise RuntimeError(f"chronology migration failed rc={rc}")
+        report = project_dir / "质量治理" / "规范化" / "chronology_migration.txt"
+        return _result_json(
+            artifacts=[str(report)] if report.is_file() else [],
+            manifest={"dry_run": dry_run},
+            manifest_path="",
+            logs=[],
+            revision=project_revisions(project_dir),
         )
 
 

@@ -44,15 +44,9 @@ def migrate_story(data: Any) -> tuple[dict[str, Any], list[str]]:
     return story, logs
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="迁移故事结构的章节时间和事件分组字段")
-    parser.add_argument("project_dir")
-    parser.add_argument("--file", default="故事结构_增量.json")
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-
-    project_dir = Path(args.project_dir)
-    story_path = project_dir / args.file
+def run_migrate(project_dir: Path, file: str = "故事结构_增量.json", dry_run: bool = False) -> int:
+    project_dir = Path(project_dir)
+    story_path = project_dir / file
     if not story_path.is_file():
         print(f"故事结构不存在: {story_path}")
         return 1
@@ -66,7 +60,7 @@ def main() -> int:
 
     print(f"章节索引已确认: {len(sequences)} 个seq，范围 {sequences[0]}-{sequences[-1]}")
     print(f"迁移记录: {len(logs)} 条")
-    if args.dry_run:
+    if dry_run:
         print("dry-run：未写入文件。")
         return 0
 
@@ -81,6 +75,15 @@ def main() -> int:
     print(f"备份: {backup}")
     print(f"迁移报告: {report}")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="迁移故事结构的章节时间和事件分组字段")
+    parser.add_argument("project_dir")
+    parser.add_argument("--file", default="故事结构_增量.json")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    return run_migrate(args.project_dir, file=args.file, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
