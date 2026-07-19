@@ -41,6 +41,10 @@ from run_pipeline import (  # noqa: E402
     audit_paths,
     audit_status,
     builtin_agent_worker_command,
+    cmd_commit_final_draft,
+    cmd_finalize,
+    cmd_final_pack,
+    cmd_validate_final,
     commit_governance,
     copy_analysis_task_packages,
     latest_analysis_manifest,
@@ -931,5 +935,89 @@ class AppendChaptersTaskAdapter:
             appended=report["appended"],
             new_seqs=new_seqs,
             queued_tasks=queued_tasks,
+        )
+
+
+# === FinalizeAdapter (writer, worker-backed) ===============================
+
+class FinalizeAdapter:
+    """Writer, worker-backed adapter: rerun finalization on demand.
+
+    Mirrors orchestrator ``_stage_final_pack`` / ``_stage_commit_final_draft``
+    / ``_stage_finalize``: ``cmd_final_pack`` → worker revises the draft →
+    ``cmd_commit_final_draft`` (repair loop on failure) → ``cmd_validate_final``
+    → ``cmd_finalize``. Holds the project writer lock for the whole run.
+    """
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        project_dir = Path(context.project_path)
+        worker_command = _str_param(params, "worker_command", default="")
+        worker_timeout = _int_param(
+            params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
+        )
+        worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
+        worker_retries = _int_param(params, "worker_retries", 0)
+
+        task_pack = project_dir / "质量治理" / "最终审计" / "final_task_pack.md"
+        draft = project_dir / "故事结构_草稿.json"
+        repair = project_dir / "质量治理" / "最终审计" / "repair_final.md"
+
+        context.progress(10, "final pack")
+        rc = cmd_final_pack(project_dir)
+        if rc != 0:
+            raise RuntimeError(f"final_pack failed rc={rc}")
+        if worker_command:
+            context.progress(30, "final draft worker")
+            rc = run_worker(
+                worker_command, project_dir, "final_draft",
+                task_pack, draft,
+                timeout=worker_timeout, retries=worker_retries,
+                worker_window=worker_window,
+            )
+            if rc != 0:
+                raise RuntimeError(f"final_draft worker failed rc={rc}")
+
+        context.progress(60, "commit final draft")
+        for _ in range(4):
+            rc = cmd_commit_final_draft(project_dir)
+            if rc == 0:
+                break
+            if not repair.is_file():
+                raise RuntimeError(
+                    f"commit_final_draft failed rc={rc} (no repair task)"
+                )
+            if not worker_command:
+                raise RuntimeError(
+                    f"commit_final_draft failed rc={rc} and no worker_command"
+                )
+            wrc = run_worker(
+                worker_command, project_dir, "repair_final",
+                repair, draft,
+                timeout=worker_timeout, retries=worker_retries,
+                worker_window=worker_window,
+            )
+            if wrc != 0:
+                raise RuntimeError("repair_final worker failed")
+        else:
+            raise RuntimeError("commit_final_draft did not converge")
+
+        context.progress(80, "validate final")
+        rc = cmd_validate_final(project_dir)
+        if rc != 0:
+            raise RuntimeError(f"validate_final failed rc={rc}")
+        context.progress(95, "finalize")
+        rc = cmd_finalize(project_dir)
+        if rc != 0:
+            raise RuntimeError(f"finalize failed rc={rc}")
+        final = project_dir / "故事结构.json"
+        context.progress(100, "finalize complete")
+        return _result_json(
+            artifacts=[str(final)],
+            manifest={"final": str(final)},
+            manifest_path="",
+            logs=[],
+            revision=project_revisions(project_dir),
+            task="finalize",
         )
 
