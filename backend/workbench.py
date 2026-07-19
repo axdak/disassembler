@@ -18,6 +18,11 @@ WRITER_TASK_TYPES = frozenset({
     "chapter_analysis_rerun",
     "chapter_delta_rerun",
     "governance",
+    "recover_story",
+    "migrate_chronology",
+    "finalize",
+    "normalize",
+    "repair",
 })
 TERMINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled", "interrupted"})
 

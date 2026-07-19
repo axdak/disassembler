@@ -21,6 +21,11 @@ TaskType = Literal[
     "append_chapters",
     "chapter_analysis_rerun",
     "chapter_delta_rerun",
+    "recover_story",
+    "migrate_chronology",
+    "finalize",
+    "normalize",
+    "repair",
 ]
 
 

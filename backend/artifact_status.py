@@ -200,7 +200,7 @@ def _task_targets(task: dict) -> list[tuple]:
     if ttype == "export":
         source = str(params.get("source", params.get("export_source", "final"))).lower()
         return [("export", source)]
-    return []  # append_chapters / governance: no direct card (affect staleness via revisions)
+    return []  # append_chapters / governance / recover_story / migrate_chronology / finalize / normalize / repair: no direct card (affect staleness via revisions)
 
 
 def _card_for(target, current, latest_task, paths_for_target):

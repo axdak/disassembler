@@ -29,7 +29,9 @@ from run_pipeline import run_cmd, script_path
 from task_adapters import (
     AnalysisAdapter, AppendChaptersTaskAdapter, ChapterAnalysisRerunAdapter,
     ChapterDeltaRerunAdapter, ChapterStructureAdapter, ChapterVisualAdapter,
-    ExportAdapter, GovernanceTaskAdapter, list_recover_snapshots,
+    ExportAdapter, FinalizeAdapter, GovernanceTaskAdapter,
+    MigrateChronologyAdapter, NormalizeAdapter, RecoverStoryAdapter,
+    RepairAdapter, list_recover_snapshots,
 )
 from workbench import WorkbenchTaskManager, WriterCoordinator
 from artifact_status import (
@@ -102,6 +104,11 @@ def create_app(
             "export": ExportAdapter(),
             "governance": governance_adapter,
             "append_chapters": append_adapter,
+            "recover_story": RecoverStoryAdapter(),
+            "migrate_chronology": MigrateChronologyAdapter(),
+            "finalize": FinalizeAdapter(),
+            "normalize": NormalizeAdapter(),
+            "repair": RepairAdapter(),
         }
     else:
         default_adapters = dict(task_adapters)
