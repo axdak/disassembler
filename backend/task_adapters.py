@@ -53,6 +53,10 @@ from run_pipeline import (  # noqa: E402
     max_available_delta_seq,
     prepare_audit_pack_or_split,
     recover_story_from_snapshot,
+    repair_llm_json,
+    artifact_paths,
+    chapter_files,
+    seq_from_file,
     run_worker,
     scoped_analysis_pack,
     scoped_chapter_analysis_rerun,
@@ -501,6 +505,54 @@ class ChapterDeltaRerunAdapter:
             task="chapter_delta_rerun",
             seqs=seqs,
             force=force,
+        )
+
+
+# === RepairAdapter (writer) ================================================
+
+class RepairAdapter:
+    """Writer adapter: repair syntactically broken chapter Delta JSON in place.
+
+    Walks ``chapter_files`` → ``artifact_paths`` → ``p["delta"]`` for the
+    requested ``chapters`` range (``all``/``recent``/``N-M``) and invokes the
+    engine's ``repair_llm_json`` on any delta that fails to parse as strict
+    JSON. Deltas that already parse are skipped, leaving them untouched.
+    """
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        project_dir = Path(context.project_path)
+        chapters_spec = _str_param(params, "chapters", default="all")
+        all_chapters = chapter_files(project_dir)
+        # _parse_governance_chapters handles "all"/"recent"/"N-M" (local helper).
+        start, end = _parse_governance_chapters(project_dir, chapters_spec)
+        sel = set(range(start, end + 1))
+        selected = [c for c in all_chapters if seq_from_file(c) in sel]
+        repaired: list[str] = []
+        reports: list[str] = []
+        context.progress(10, f"scanning {len(selected)} chapter deltas")
+        for ch in selected:
+            p = artifact_paths(project_dir, ch)
+            delta = p["delta"]
+            if not delta.is_file():
+                continue
+            try:
+                json.loads(delta.read_text(encoding="utf-8"))
+                continue  # already valid — skip
+            except (json.JSONDecodeError, ValueError):
+                pass
+            report = delta.with_name(delta.name + ".repair.txt")
+            rc = repair_llm_json(delta, report, backup=True)
+            if rc == 0:
+                repaired.append(str(delta))
+                reports.append(str(report))
+        context.progress(90, f"repaired {len(repaired)} deltas")
+        return _result_json(
+            artifacts=repaired,
+            manifest={"repaired": len(repaired), "reports": reports},
+            manifest_path="",
+            logs=[],
+            revision=project_revisions(project_dir),
         )
 
 
