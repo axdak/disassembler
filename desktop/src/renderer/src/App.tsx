@@ -72,8 +72,13 @@ export function App() {
   useEffect(() => {
     if (selected != null && tab === 'chapters') {
       window.api.chapters(selected).then((c) => setChapters(c as Chapter[])).catch(() => {})
+      // 章节卡片优先用 artifactStatus；legacy 编排器只发 stage_*/pipeline_*
+      // 事件（非 task_*），不触发 useProjectTasks 刷新，导致切回章节 tab 时
+      // delta 卡片停留在旧快照（明明文件已生成却显示未生成）。这里随章节
+      // 列表一起重拉 artifactStatus。
+      workbench.refresh().catch(() => {})
     }
-  }, [selected, tab])
+  }, [selected, tab, workbench.refresh])
 
   useEffect(() => {
     if (selected != null && tab === 'logs') {

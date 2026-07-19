@@ -40,6 +40,7 @@ from run_pipeline import (  # noqa: E402
     DEFAULT_WORKER_WINDOW,
     audit_paths,
     audit_status,
+    builtin_agent_worker_command,
     commit_governance,
     copy_analysis_task_packages,
     latest_analysis_manifest,
@@ -714,6 +715,13 @@ class GovernanceTaskAdapter:
 
         # Worker correction step: only invoke when the correction is missing.
         if not correction_path.is_file() or correction_path.stat().st_size == 0:
+            # 任务参数未显式指定 worker_command 时，按全局 worker_provider 设置
+            # 自动解析内置 agent_worker 命令（默认 agy），对齐 orchestrator 的
+            # _worker_command()，使周期治理可一键自动跑，无需手动配 worker 命令。
+            if not worker_command:
+                provider = _str_param(params, "worker_provider", default="") or context.worker_provider
+                if provider and provider != "manual":
+                    worker_command = builtin_agent_worker_command(provider)
             if not worker_command:
                 raise RuntimeError(
                     f"governance correction missing and no worker_command provided: {correction_path}"

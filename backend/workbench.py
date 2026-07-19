@@ -85,6 +85,10 @@ class TaskContext:
     params: dict
     cancellation_event: threading.Event
     _progress_callback: Callable[[int, str], None]
+    # 全局 worker_provider 设置（默认 agy），供需要跑 worker 的 adapter
+    # （如 governance）在任务参数未显式指定 worker_command 时自动解析内置
+    # agent_worker 命令，对齐 orchestrator 的 _worker_command() 行为。
+    worker_provider: str = "agy"
 
     @property
     def id(self) -> int:
@@ -368,6 +372,7 @@ class WorkbenchTaskManager:
                 _progress_callback=lambda percent, detail: self._progress(
                     task["id"], percent, detail
                 ),
+                worker_provider=str(self.db.get_setting("worker_provider", "agy")),
             )
             prepare = getattr(adapter, "prepare", None)
             if callable(prepare):
