@@ -46,7 +46,9 @@ from run_pipeline import (  # noqa: E402
     latest_analysis_manifest,
     latest_snapshot_seq,
     load_json,
+    max_available_delta_seq,
     prepare_audit_pack_or_split,
+    recover_story_from_snapshot,
     run_worker,
     scoped_analysis_pack,
     scoped_chapter_analysis_rerun,
@@ -773,6 +775,70 @@ class GovernanceTaskAdapter:
             before=before,
             after=after,
             diff=diff,
+        )
+
+
+# === RecoverStoryAdapter (writer) ========================================
+
+def list_recover_snapshots(project_dir: Path) -> list[dict]:
+    """List ``story_after_chNNN.json`` snapshots in the project's version dir.
+
+    Read-only: globs the engine's own discovery pattern and reports each
+    snapshot's seq, relative path, size, and the max delta seq it could be
+    replayed up to (``max_available_delta_seq``). Returns ``[]`` when the
+    version dir or snapshots are absent.
+    """
+    project_dir = Path(project_dir)
+    version_dir = project_dir / "故事结构版本"
+    max_delta = max_available_delta_seq(project_dir)
+    snaps: list[dict] = []
+    if not version_dir.is_dir():
+        return snaps
+    for p in sorted(version_dir.glob("story_after_ch*.json")):
+        m = re.match(r"story_after_ch(\d+)\.json$", p.name)
+        if not m:
+            continue
+        snaps.append({
+            "snapshot_seq": int(m.group(1)),
+            "path": str(p.relative_to(project_dir)),
+            "size": p.stat().st_size,
+            "replayable_to": max_delta,
+        })
+    return snaps
+
+
+class RecoverStoryAdapter:
+    """Writer adapter: roll the process library back to a story_after_chNNN
+    snapshot and replay later deltas via recover_story_from_snapshot."""
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        project_dir = Path(context.project_path)
+        snapshot_seq = _int_param(params, "snapshot_seq", 0)
+        if snapshot_seq <= 0:
+            raise ValueError("recover_story requires 'snapshot_seq'")
+        available = {s["snapshot_seq"] for s in list_recover_snapshots(project_dir)}
+        if snapshot_seq not in available:
+            raise RuntimeError(f"snapshot seq {snapshot_seq} not found")
+        before = project_dir / "故事结构_增量.json"
+        before_bytes = before.read_bytes() if before.is_file() else b""
+        context.progress(20, f"recovering to snapshot seq={snapshot_seq}")
+        rc = recover_story_from_snapshot(project_dir, snapshot_seq=snapshot_seq)
+        if rc != 0:
+            if before_bytes:
+                before.write_bytes(before_bytes)
+            raise RuntimeError(f"recover_story failed rc={rc}")
+        context.progress(90, "recovery complete")
+        return _result_json(
+            artifacts=[str(before)],
+            manifest={
+                "snapshot_seq": snapshot_seq,
+                "replayed_to": max_available_delta_seq(project_dir),
+            },
+            manifest_path="",
+            logs=[],
+            revision=project_revisions(project_dir),
+            snapshot_seq=snapshot_seq,
         )
 
 

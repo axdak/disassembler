@@ -165,3 +165,10 @@ class ArtifactStatusResponse(BaseModel):
     chapters: list[ChapterCardStatus] = []
     exports: dict[str, CardStatus] = {}
     counts: dict[str, int] = {}
+
+
+class RecoverSnapshot(BaseModel):
+    snapshot_seq: int
+    path: str
+    size: int
+    replayable_to: int

@@ -20,8 +20,8 @@ from runner import QueueRunner, RunManager
 from db import Database
 from hub import BroadcastHub
 from models import (
-    AppendApply, AppendPreview, FromBook, Project, ProjectCreate, QueueAdd, Run, RunConfig, RunStart,
-    SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
+    AppendApply, AppendPreview, FromBook, Project, ProjectCreate, QueueAdd, RecoverSnapshot,
+    Run, RunConfig, RunStart, SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
 )
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
@@ -29,7 +29,7 @@ from run_pipeline import run_cmd, script_path
 from task_adapters import (
     AnalysisAdapter, AppendChaptersTaskAdapter, ChapterAnalysisRerunAdapter,
     ChapterDeltaRerunAdapter, ChapterStructureAdapter, ChapterVisualAdapter,
-    ExportAdapter, GovernanceTaskAdapter,
+    ExportAdapter, GovernanceTaskAdapter, list_recover_snapshots,
 )
 from workbench import WorkbenchTaskManager, WriterCoordinator
 from artifact_status import (
@@ -321,6 +321,16 @@ def create_app(
         revisions = project_revisions(pdir)
         tasks = app.state.workbench.list(pid, revisions=revisions)
         return collect_artifact_status(pdir, tasks, revisions=revisions)
+
+    @app.get(
+        "/projects/{pid}/recover/snapshots",
+        dependencies=[Depends(require_token)],
+        response_model=list[RecoverSnapshot],
+    )
+    def project_recover_snapshots(pid: int):
+        """只读预览：列出 story_after_chNNN 快照及其可重放到的章节序号。"""
+        project = _project_or_404(pid)
+        return list_recover_snapshots(Path(project["path"]))
 
     @app.post(
         "/projects/{pid}/chapters/append-preview",
