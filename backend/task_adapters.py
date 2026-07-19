@@ -65,6 +65,7 @@ from run_pipeline import (  # noqa: E402
 )
 from export_obsidian_vault import export_obsidian_markdown  # noqa: E402
 from migrate_chronology import run_migrate  # noqa: E402
+from normalize_story_schema import normalize_structure  # noqa: E402
 from split_chapters_append import apply_append  # noqa: E402
 
 
@@ -780,6 +781,30 @@ class GovernanceTaskAdapter:
             before=before,
             after=after,
             diff=diff,
+        )
+
+
+# === NormalizeAdapter (writer) ============================================
+
+class NormalizeAdapter:
+    """Writer adapter: preserving-style normalization of the process story JSON."""
+
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        params = context.params or {}
+        project_dir = Path(context.project_path)
+        story_path = project_dir / "故事结构_增量.json"
+        if not story_path.is_file():
+            raise RuntimeError("故事结构_增量.json not found")
+        data = json.loads(story_path.read_text(encoding="utf-8"))
+        context.progress(40, "normalizing story schema")
+        normalized, logs = normalize_structure(data, quarantine_invalid_refs=False)
+        story_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        return _result_json(
+            artifacts=[str(story_path)],
+            manifest={"logs": len(logs)},
+            manifest_path="",
+            logs=logs,
+            revision=project_revisions(project_dir),
         )
 
 
