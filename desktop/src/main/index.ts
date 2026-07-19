@@ -74,6 +74,8 @@ function registerIpc(): void {
       bpost(`/projects/${id}/chapters/append-preview`, body))
   ipcMain.handle('nd:projects:chapters:apply', (_e, id: number, plan: Record<string, unknown>) =>
     bpost(`/projects/${id}/chapters/apply`, { plan }))
+  ipcMain.handle('nd:projects:recoverSnapshots', (_e, id: number) =>
+    bget(`/projects/${id}/recover/snapshots`))
   ipcMain.handle('nd:projects:logs', (_e, id: number) => bget(`/projects/${id}/logs`))
   ipcMain.handle('nd:projects:log', (_e, id: number, name: string) =>
     bget(`/projects/${id}/logs/${encodeURIComponent(name)}`))

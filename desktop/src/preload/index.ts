@@ -24,6 +24,8 @@ const api = {
   ) => ipcRenderer.invoke('nd:projects:chapters:appendPreview', id, body),
   chaptersApply: (id: number, plan: Record<string, unknown>) =>
     ipcRenderer.invoke('nd:projects:chapters:apply', id, plan),
+  recoverSnapshots: (id: number) =>
+    ipcRenderer.invoke('nd:projects:recoverSnapshots', id),
   logs: (id: number) => ipcRenderer.invoke('nd:projects:logs', id),
   log: (id: number, name: string) => ipcRenderer.invoke('nd:projects:log', id, name),
   getSettings: () => ipcRenderer.invoke('nd:settings:get'),

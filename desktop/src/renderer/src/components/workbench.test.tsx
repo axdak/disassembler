@@ -15,6 +15,7 @@ import type {
   ArtifactStatusResponse,
   WorkbenchTask,
   AppendPlan,
+  RecoverSnapshot,
 } from '../types'
 
 // ----- fixtures ----------------------------------------------------------------
@@ -76,6 +77,10 @@ const ARTIFACT_STATUS: ArtifactStatusResponse = {
   counts: { stale_analysis: 1, stale_export: 1 },
 }
 
+const SNAPSHOTS: RecoverSnapshot[] = [
+  { snapshot_seq: 120, path: 'story_after_ch120.json', size: 100, replayable_to: 125 },
+]
+
 const TASKS: WorkbenchTask[] = [
   {
     id: 10, project_id: 1, task_type: 'analysis', status: 'done', params: { task: 'summary' },
@@ -103,6 +108,7 @@ interface FakeApi {
     apply: number
     artifact: number
     log: number
+    recoverSnapshots: number
   }
   emit: (ev: unknown) => void
   setAppendPreview: (plan: AppendPlan) => void
@@ -112,7 +118,7 @@ function mountFakeApi(opts: { appendPreview?: AppendPlan } = {}): FakeApi {
   const handlers: ((ev: unknown) => void)[] = []
   const calls = {
     tasksList: 0, artifactsStatus: 0, tasksCreate: [] as { type: string; params: Record<string, unknown> }[],
-    appendPreview: 0, apply: 0, artifact: 0, log: 0,
+    appendPreview: 0, apply: 0, artifact: 0, log: 0, recoverSnapshots: 0,
   }
   let appendPreview: AppendPlan = opts.appendPreview ?? { appended: [{ seq: 3, filename: '003.md', title: '第三章 转' }] }
   const api: Window['api'] = {
@@ -132,6 +138,7 @@ function mountFakeApi(opts: { appendPreview?: AppendPlan } = {}): FakeApi {
     artifactsStatus: async () => { calls.artifactsStatus++; return ARTIFACT_STATUS },
     chaptersAppendPreview: async () => { calls.appendPreview++; return appendPreview },
     chaptersApply: async () => { calls.apply++; return { applied: true } },
+    recoverSnapshots: async () => { calls.recoverSnapshots++; return SNAPSHOTS },
     logs: async () => [{ name: 'worker.log', size: 0, mtime: 0 }],
     log: async () => { calls.log++; return { content: 'worker 日志内容' } },
     getSettings: async () => ({ worker_provider: 'agy' }),
@@ -174,7 +181,7 @@ function goTab(label: string) {
 
 // ----- tests ------------------------------------------------------------------
 
-describe('workbench six-tab UI', () => {
+describe('workbench seven-tab UI', () => {
   let fake: FakeApi
   let restore: () => void
   let unmount: () => void
@@ -187,9 +194,9 @@ describe('workbench six-tab UI', () => {
   })
   afterEach(() => { unmount(); restore() })
 
-  it('renders the six required tabs after selecting a project', async () => {
+  it('renders the seven required tabs after selecting a project', async () => {
     await selectProject()
-    for (const label of ['概览', '章节', '分析工作台', '质量治理', '导出', '日志']) {
+    for (const label of ['概览', '章节', '分析工作台', '质量治理', '导出', '日志', '维护']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
   })
@@ -328,5 +335,33 @@ describe('workbench six-tab UI', () => {
     fireEvent.click(await screen.findByText('worker.log'))
     await waitFor(() => expect(fake.calls.log).toBe(1))
     expect(screen.getByText('worker 日志内容')).toBeInTheDocument()
+  })
+
+  it('maintenance tab: recover apply + 4 direct-submit actions', async () => {
+    await selectProject()
+    goTab('维护')
+    // Five action labels render (快照恢复 is the section heading; the other
+    // four are direct-submit buttons).
+    expect(screen.getByText('快照恢复')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '时间线迁移' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新收尾' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '归一化故事结构' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '修复 Delta' })).toBeInTheDocument()
+    // Snapshot preview list loaded via recoverSnapshots.
+    await waitFor(() => expect(fake.calls.recoverSnapshots).toBe(1))
+    // Select a snapshot + apply → recover_story task with snapshot_seq.
+    fireEvent.change(screen.getByLabelText('快照选择'), { target: { value: '120' } })
+    fireEvent.click(screen.getByRole('button', { name: '应用恢复' }))
+    // Four direct-submit actions.
+    fireEvent.click(screen.getByRole('button', { name: '时间线迁移' }))
+    fireEvent.click(screen.getByRole('button', { name: '重新收尾' }))
+    fireEvent.click(screen.getByRole('button', { name: '归一化故事结构' }))
+    fireEvent.click(screen.getByRole('button', { name: '修复 Delta' }))
+    await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(5))
+    expect(fake.calls.tasksCreate[0]).toEqual({ type: 'recover_story', params: { snapshot_seq: 120 } })
+    expect(fake.calls.tasksCreate[1]).toEqual({ type: 'migrate_chronology', params: {} })
+    expect(fake.calls.tasksCreate[2]).toEqual({ type: 'finalize', params: {} })
+    expect(fake.calls.tasksCreate[3]).toEqual({ type: 'normalize', params: {} })
+    expect(fake.calls.tasksCreate[4]).toEqual({ type: 'repair', params: { chapters: 'all' } })
   })
 })

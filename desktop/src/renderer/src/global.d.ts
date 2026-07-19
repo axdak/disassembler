@@ -11,6 +11,7 @@ import type {
   WorkbenchTask,
   ArtifactStatusResponse,
   AppendPlan,
+  RecoverSnapshot,
 } from './types'
 
 declare global {
@@ -35,6 +36,7 @@ declare global {
         body: { source_file: string; pattern?: string; increment_only?: boolean },
       ): Promise<AppendPlan>
       chaptersApply(id: number, plan: Record<string, unknown>): Promise<{ applied?: unknown }>
+      recoverSnapshots(id: number): Promise<RecoverSnapshot[]>
       logs(id: number): Promise<LogEntry[]>
       log(id: number, name: string): Promise<{ content: string }>
       getSettings(): Promise<Record<string, unknown>>

@@ -66,6 +66,11 @@ export type TaskType =
   | 'append_chapters'
   | 'chapter_analysis_rerun'
   | 'chapter_delta_rerun'
+  | 'recover_story'
+  | 'migrate_chronology'
+  | 'finalize'
+  | 'normalize'
+  | 'repair'
 
 export type TaskStatus =
   | 'queued'
@@ -132,4 +137,12 @@ export interface AppendPlan {
   appended?: unknown
   conflict?: Record<string, unknown> | null
   [key: string]: unknown
+}
+
+// Recover snapshot preview (mirror backend/models.py RecoverSnapshot).
+export interface RecoverSnapshot {
+  snapshot_seq: number
+  path: string
+  size: number
+  replayable_to: number
 }

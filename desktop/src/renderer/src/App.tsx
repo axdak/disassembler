@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { Project, StageEvent, Status, Chapter, LogEntry, QueueItem, TaskType } from './types'
+import type { Project, StageEvent, Status, Chapter, LogEntry, QueueItem, TaskType, RecoverSnapshot } from './types'
 import { useProjectTasks } from './hooks/useProjectTasks'
 import { OverviewTab } from './components/OverviewTab'
 import { ChaptersTab } from './components/ChaptersTab'
@@ -7,9 +7,10 @@ import { AnalysisWorkbenchTab } from './components/AnalysisWorkbenchTab'
 import { GovernanceTab } from './components/GovernanceTab'
 import { ExportTab } from './components/ExportTab'
 import { LogsTab } from './components/LogsTab'
+import { MaintenanceTab } from './components/MaintenanceTab'
 import { ArtifactDrawer, type ArtifactDrawerState } from './components/ArtifactDrawer'
 
-type Tab = 'overview' | 'chapters' | 'analysis' | 'governance' | 'export' | 'logs'
+type Tab = 'overview' | 'chapters' | 'analysis' | 'governance' | 'export' | 'logs' | 'maintenance'
 type View = 'project' | 'settings'
 
 const TABS: { key: Tab; label: string }[] = [
@@ -19,6 +20,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'governance', label: '质量治理' },
   { key: 'export', label: '导出' },
   { key: 'logs', label: '日志' },
+  { key: 'maintenance', label: '维护' },
 ]
 
 export function App() {
@@ -30,6 +32,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>('overview')
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [logsList, setLogsList] = useState<LogEntry[]>([])
+  const [snapshots, setSnapshots] = useState<RecoverSnapshot[]>([])
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [settings, setSettings] = useState<Record<string, unknown>>({})
   const [err, setErr] = useState('')
@@ -83,6 +86,16 @@ export function App() {
   useEffect(() => {
     if (selected != null && tab === 'logs') {
       window.api.logs(selected).then((l) => setLogsList(l as LogEntry[])).catch(() => {})
+    }
+  }, [selected, tab])
+
+  async function refreshSnapshots() {
+    if (selected == null) return
+    try { setSnapshots(await window.api.recoverSnapshots(selected)) } catch { /* ignore */ }
+  }
+  useEffect(() => {
+    if (selected != null && tab === 'maintenance') {
+      refreshSnapshots()
     }
   }, [selected, tab])
 
@@ -242,6 +255,15 @@ export function App() {
                 <LogsTab
                   logsList={logsList}
                   onOpenLog={loadLog}
+                />
+              )}
+              {tab === 'maintenance' && (
+                <MaintenanceTab
+                  tasks={workbench.tasks}
+                  onCreateTask={createTask}
+                  onOpenArtifact={loadArtifact}
+                  snapshots={snapshots}
+                  onRefreshSnapshots={refreshSnapshots}
                 />
               )}
             </>
