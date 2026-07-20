@@ -1,6 +1,6 @@
 # Workbench Gap-Fill Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Expose the 4 remaining engine capabilities (snapshot recovery, chronology migration, on-demand finalization, normalize, repair) as workbench writer tasks behind a new "维护" tab, and document the `custom` dimension's intentional exclusion from the auto pipeline.
 
@@ -34,7 +34,7 @@
 - Consumes: `recover_story_from_snapshot(project_dir: Path, snapshot_seq: Optional[int] = None, to_seq: Optional[int] = None) -> int`, `latest_snapshot_seq(project_dir: Path) -> Optional[int]`, `max_available_delta_seq(project_dir: Path) -> int` (all in `engine/scripts/run_pipeline.py`); `_result_json`, `_str_param`, `_int_param` from `backend/task_adapters.py`; `TaskContext` from `backend/workbench.py`.
 - Produces: `RecoverStoryAdapter` (writer, no `prepare`); `list_recover_snapshots(project_dir: Path) -> list[dict]`; `GET /projects/{pid}/recover/snapshots`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `backend/tests/test_recover_story_task.py`:
 
@@ -121,12 +121,12 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_recover_story_task.py -q`
 Expected: FAIL — `ImportError: cannot import name 'RecoverStoryAdapter'` / `list_recover_snapshots`.
 
-- [ ] **Step 3: Implement the helper and adapter**
+- [x] **Step 3: Implement the helper and adapter**
 
 In `backend/task_adapters.py`, after the existing helpers and imports, add:
 
@@ -198,7 +198,7 @@ class RecoverStoryAdapter:
 
 (`project_revisions` is already imported at the top of `task_adapters.py`.)
 
-- [ ] **Step 4: Add the preview endpoint and DTO**
+- [x] **Step 4: Add the preview endpoint and DTO**
 
 In `backend/models.py`, add:
 
@@ -226,12 +226,12 @@ def recover_snapshots(pid: int):
 
 Add `RecoverSnapshot` to the `from models import (...)` block in `app.py`.
 
-- [ ] **Step 5: Run tests, verify GREEN**
+- [x] **Step 5: Run tests, verify GREEN**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_recover_story_task.py -q`
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add backend/task_adapters.py backend/app.py backend/models.py backend/tests/test_recover_story_task.py
@@ -249,7 +249,7 @@ git commit -m "feat(workbench): add recover_story snapshot adapter and preview e
 - Consumes: `migrate_chronology.index_sequences(project_dir: Path) -> list[int]`, `migrate_chronology.migrate_story(data: Any) -> tuple[dict, list[str]]` (in `engine/scripts/migrate_chronology.py`); `_result_json`, `project_revisions`, `TaskContext`.
 - Produces: `run_migrate(project_dir: Path, file: str = "故事结构_增量.json", dry_run: bool = False) -> int` (extracted from `main`); `MigrateChronologyAdapter` (writer).
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `backend/tests/test_migrate_chronology_task.py`:
 
@@ -299,12 +299,12 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_migrate_chronology_task.py -q`
 Expected: FAIL — `ImportError: cannot import name 'MigrateChronologyAdapter'`.
 
-- [ ] **Step 3: Extract run_migrate from migrate_chronology.main**
+- [x] **Step 3: Extract run_migrate from migrate_chronology.main**
 
 In `engine/scripts/migrate_chronology.py`, refactor `main()` so its body (after arg parsing) becomes a reusable function `run_migrate(project_dir, file="故事结构_增量.json", dry_run=False) -> int`, and `main()` parses args then calls `run_migrate`. The extracted function keeps the existing load → index_sequences → migrate_story → backup → save → report logic verbatim. Do not change behavior.
 
@@ -349,7 +349,7 @@ def main() -> int:
     return run_migrate(args.project_dir, file=args.file, dry_run=args.dry_run)
 ```
 
-- [ ] **Step 4: Implement MigrateChronologyAdapter**
+- [x] **Step 4: Implement MigrateChronologyAdapter**
 
 In `backend/task_adapters.py`, add the import and adapter:
 
@@ -380,13 +380,13 @@ class MigrateChronologyAdapter:
         )
 ```
 
-- [ ] **Step 5: Run tests + engine regression**
+- [x] **Step 5: Run tests + engine regression**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_migrate_chronology_task.py -q`
 Run from `engine`: `..\runtime\venv\Scripts\python.exe -m pytest tests\test_migrate_chronology.py -q` (if it exists; otherwise skip)
 Expected: PASS.
 
-- [ ] **Step 6: Commit Task 2**
+- [x] **Step 6: Commit Task 2**
 
 ```bash
 git add engine/scripts/migrate_chronology.py backend/task_adapters.py backend/tests/test_migrate_chronology_task.py
@@ -403,7 +403,7 @@ git commit -m "feat(workbench): add migrate_chronology adapter"
 - Consumes: `cmd_final_pack(project_dir: Path, force: bool = False) -> int`, `cmd_commit_final_draft(project_dir: Path) -> int`, `cmd_validate_final(project_dir: Path, file: str = "") -> int`, `cmd_finalize(project_dir: Path) -> int` (all in `engine/scripts/run_pipeline.py`); `run_worker(worker_command, project_dir, task_kind, pack_path, output_path, *, timeout, retries, worker_window)`; `_result_json`, `_str_param`, `_int_param`, `project_revisions`, `TaskContext`; `DEFAULT_WORKER_TIMEOUT_SECONDS`, `DEFAULT_WORKER_WINDOW`, `DEFAULT_WORKER_RETRIES` (constants imported from `run_pipeline` — confirm names exist; if `DEFAULT_WORKER_RETRIES` is not exported, use the literal the orchestrator uses).
 - Produces: `FinalizeAdapter` (writer, worker-backed).
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `backend/tests/test_finalize_task.py`. The test uses a fake worker command (a python one-liner that copies the task pack to the draft) so the composite chain completes without a real LLM. Mirror `engine/tests/test_chapter_staging.py`'s `write_simple_chapter_worker` pattern.
 
@@ -468,12 +468,12 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_finalize_task.py -q`
 Expected: FAIL — `ImportError: cannot import name 'FinalizeAdapter'`.
 
-- [ ] **Step 3: Implement FinalizeAdapter**
+- [x] **Step 3: Implement FinalizeAdapter**
 
 In `backend/task_adapters.py`, merge into the `from run_pipeline import (...)` block: `cmd_final_pack`, `cmd_commit_final_draft`, `cmd_validate_final`, `cmd_finalize`, `run_worker` (and the worker default constants if not already imported). Then add:
 
@@ -545,12 +545,12 @@ class FinalizeAdapter:
         )
 ```
 
-- [ ] **Step 4: Run tests, verify GREEN**
+- [x] **Step 4: Run tests, verify GREEN**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_finalize_task.py -q`
 Expected: PASS. (If the fake-worker approach does not satisfy `cmd_commit_final_draft`'s strict validate, adjust the fake worker to emit a minimal valid story schema — but first try the copy approach.)
 
-- [ ] **Step 5: Commit Task 3**
+- [x] **Step 5: Commit Task 3**
 
 ```bash
 git add backend/task_adapters.py backend/tests/test_finalize_task.py
@@ -567,7 +567,7 @@ git commit -m "feat(workbench): add composite finalize adapter"
 - Consumes: `normalize_structure(data: Any, *, quarantine_invalid_refs: bool = False) -> Tuple[dict, list[str]]` (in `engine/scripts/normalize_story_schema.py`); `_result_json`, `project_revisions`, `TaskContext`.
 - Produces: `NormalizeAdapter` (writer).
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `backend/tests/test_normalize_task.py`:
 
@@ -618,12 +618,12 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_normalize_task.py -q`
 Expected: FAIL — `ImportError: cannot import name 'NormalizeAdapter'`.
 
-- [ ] **Step 3: Implement NormalizeAdapter**
+- [x] **Step 3: Implement NormalizeAdapter**
 
 In `backend/task_adapters.py`, add the import and adapter:
 
@@ -656,12 +656,12 @@ class NormalizeAdapter:
 
 (If `json` is not already imported at the top of `task_adapters.py`, add `import json`.)
 
-- [ ] **Step 4: Run tests, verify GREEN**
+- [x] **Step 4: Run tests, verify GREEN**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_normalize_task.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 4**
+- [x] **Step 5: Commit Task 4**
 
 ```bash
 git add backend/task_adapters.py backend/tests/test_normalize_task.py
@@ -678,7 +678,7 @@ git commit -m "feat(workbench): add normalize story schema adapter"
 - Consumes: `repair_llm_json(path: Path, report_path: Path, backup: bool = False) -> int`, `chapter_files(project_dir: Path) -> List[Path]`, `artifact_paths(project_dir: Path, chapter: Path) -> Dict[str, Path]` (in `engine/scripts/run_pipeline.py`); `_parse_governance_chapters` (for chapter-range selection) or `_chapter_index_seq_range`; `_result_json`, `project_revisions`, `TaskContext`.
 - Produces: `RepairAdapter` (writer).
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `backend/tests/test_repair_task.py`:
 
@@ -743,12 +743,12 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_repair_task.py -q`
 Expected: FAIL — `ImportError: cannot import name 'RepairAdapter'`.
 
-- [ ] **Step 3: Implement RepairAdapter**
+- [x] **Step 3: Implement RepairAdapter**
 
 In `backend/task_adapters.py`, merge into the `from run_pipeline import (...)` block: `repair_llm_json`, `chapter_files`, `artifact_paths`. Then add:
 
@@ -800,12 +800,12 @@ class RepairAdapter:
 
 (Add `import json` if missing. `seq_from_file` is already imported in run_pipeline; add it to the import block if not already present in task_adapters.)
 
-- [ ] **Step 4: Run tests, verify GREEN**
+- [x] **Step 4: Run tests, verify GREEN**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_repair_task.py -q`
 Expected: PASS.
 
-- [ ] **Step 5: Commit Task 5**
+- [x] **Step 5: Commit Task 5**
 
 ```bash
 git add backend/task_adapters.py backend/tests/test_repair_task.py
@@ -824,7 +824,7 @@ git commit -m "feat(workbench): add repair delta adapter"
 - Consumes: the 5 adapter classes from Task 1-5.
 - Produces: the 5 task types reachable via `POST /projects/{id}/tasks` through the manager; maintenance types do not produce dimension cards but affect staleness via revisions.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Create `backend/tests/test_gap_fill_wiring.py`:
 
@@ -880,12 +880,12 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_gap_fill_wiring.py -q`
 Expected: FAIL — new types not in `WRITER_TASK_TYPES`; adapters not registered by default.
 
-- [ ] **Step 3: Add new types to WRITER_TASK_TYPES**
+- [x] **Step 3: Add new types to WRITER_TASK_TYPES**
 
 In `backend/workbench.py`:
 
@@ -903,7 +903,7 @@ WRITER_TASK_TYPES = frozenset({
 })
 ```
 
-- [ ] **Step 4: Register the 5 adapters in create_app**
+- [x] **Step 4: Register the 5 adapters in create_app**
 
 In `backend/app.py`, extend the `from task_adapters import (...)` block to include `RecoverStoryAdapter`, `MigrateChronologyAdapter`, `FinalizeAdapter`, `NormalizeAdapter`, `RepairAdapter`. In the `default_adapters` dict (around line 94-106), add:
 
@@ -918,7 +918,7 @@ In `backend/app.py`, extend the `from task_adapters import (...)` block to inclu
         }
 ```
 
-- [ ] **Step 5: Extend artifact_status no-card set**
+- [x] **Step 5: Extend artifact_status no-card set**
 
 In `backend/artifact_status.py`, find the branch that returns `[]` for `append_chapters`/`governance` (around line 203) and extend it to include the 5 new maintenance types (they affect staleness via revisions, not dimension cards). For example, change the condition to:
 
@@ -930,12 +930,12 @@ if ttype in {"append_chapters", "governance", "recover_story",
 
 (Adjust to match the actual structure — the goal is that the 5 new types do not crash card derivation and do not produce dimension cards.)
 
-- [ ] **Step 6: Run wiring tests + backend regression**
+- [x] **Step 6: Run wiring tests + backend regression**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_gap_fill_wiring.py backend\tests -q`
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 6**
+- [x] **Step 7: Commit Task 6**
 
 ```bash
 git add backend/workbench.py backend/app.py backend/artifact_status.py backend/tests/test_gap_fill_wiring.py
@@ -956,7 +956,7 @@ git commit -m "feat(workbench): wire recover/migrate/finalize/normalize/repair t
 - Consumes: Task 6 typed `window.api` methods; `useProjectTasks` hook; `TaskStatus`, `ArtifactDrawer`.
 - Produces: `MaintenanceTab` with 5 actions; 7th tab in App.
 
-- [ ] **Step 1: Write failing renderer tests**
+- [x] **Step 1: Write failing renderer tests**
 
 Extend `desktop/src/renderer/src/components/workbench.test.tsx` (or create `maintenance.test.tsx`) with a fake typed API asserting: the 维护 tab renders; the 5 action buttons exist; recover shows snapshots from `recoverSnapshots()` and applies; the other 4 submit tasks with the right `{type, params}`. Mirror the existing fake-API pattern in `workbench.test.tsx`.
 
@@ -1007,12 +1007,12 @@ describe('MaintenanceTab', () => {
 })
 ```
 
-- [ ] **Step 2: Verify tests fail**
+- [x] **Step 2: Verify tests fail**
 
 Run from `desktop`: `npm test -- --run src/renderer/src/components/maintenance.test.tsx`
 Expected: FAIL — `MaintenanceTab` does not exist.
 
-- [ ] **Step 3: Add typed IPC methods + handlers**
+- [x] **Step 3: Add typed IPC methods + handlers**
 
 In `desktop/src/renderer/src/global.d.ts`, extend `Window.api`:
 
@@ -1038,7 +1038,7 @@ In `desktop/src/main/index.ts` `registerIpc()`:
     bpost(`/projects/${id}/tasks`, { type, params }))
 ```
 
-- [ ] **Step 4: Implement MaintenanceTab**
+- [x] **Step 4: Implement MaintenanceTab**
 
 Create `desktop/src/renderer/src/components/MaintenanceTab.tsx`:
 
@@ -1092,16 +1092,16 @@ export function MaintenanceTab({ projectId, api }: { projectId: number; api: any
 }
 ```
 
-- [ ] **Step 5: Add the 7th tab in App.tsx**
+- [x] **Step 5: Add the 7th tab in App.tsx**
 
 In `desktop/src/renderer/src/App.tsx`, extend the `TABS` array (or tab type) to include `'maintenance'` labeled `维护`, and render `<MaintenanceTab projectId={selected} api={window.api} />` when active. Preserve all existing tabs and behavior.
 
-- [ ] **Step 6: Run renderer tests, typechecks, build**
+- [x] **Step 6: Run renderer tests, typechecks, build**
 
 Run from `desktop`: `npm test -- --run && npm run typecheck:node && npm run typecheck:web && npm run build`
 Expected: PASS.
 
-- [ ] **Step 7: Commit Task 7**
+- [x] **Step 7: Commit Task 7**
 
 ```bash
 git add desktop/src/renderer/src/global.d.ts desktop/src/preload/index.ts desktop/src/main/index.ts desktop/src/renderer/src/components/MaintenanceTab.tsx desktop/src/renderer/src/App.tsx desktop/src/renderer/src/components/maintenance.test.tsx
@@ -1118,24 +1118,24 @@ git commit -m "feat(desktop): add maintenance tab for recover/migrate/finalize/n
 **Interfaces:**
 - Verifies all previous task interfaces together.
 
-- [ ] **Step 1: Write integration tests**
+- [x] **Step 1: Write integration tests**
 
 Create `backend/tests/test_gap_fill_integration.py` using real `Database`/`WorkbenchTaskManager`/`TestClient` + fake workers (mirror `test_workbench_integration.py`). Cover: maintenance tasks queue as writers and respect the project writer mutex with the auto pipeline; recover_story preview is read-only; normalize changes the process revision and marks whole-book analyses stale; finalize writes `故事结构.json` and marks exports stale; repair fixes a broken delta without changing the story revision; task events carry `task_id`+`project_id`.
 
-- [ ] **Step 2: Verify integration tests pass**
+- [x] **Step 2: Verify integration tests pass**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests\test_gap_fill_integration.py -q`
 Expected: PASS (fix production wiring, not expectations, if any fail).
 
-- [ ] **Step 3: Update README**
+- [x] **Step 3: Update README**
 
 In `README.md`, add a "维护" tab section documenting the 5 maintenance actions and their safety semantics (recover-story preview/apply + rollback, finalize composite, normalize before/after, repair target). Add a one-paragraph note under the analysis section: "`custom` 分析维度需用户自定义问题，故仅在工作台手动触发，不进自动流水线 `FULLBOOK_TASKS`。"
 
-- [ ] **Step 4: Tick plan checkboxes**
+- [x] **Step 4: Tick plan checkboxes**
 
 In `docs/superpowers/plans/2026-07-19-workbench-gap-fill.md`, mark each completed step `[ ]` → `[x]` honestly.
 
-- [ ] **Step 5: Run complete verification**
+- [x] **Step 5: Run complete verification**
 
 Run: `runtime\venv\Scripts\python.exe -m pytest backend\tests -q`
 Run from `engine`: `..\runtime\venv\Scripts\python.exe -m pytest tests -q`
@@ -1143,7 +1143,7 @@ Run from `desktop`: `npm test -- --run && npm run typecheck:node && npm run type
 Run: `runtime\venv\Scripts\python.exe validate_engine.py`
 Expected: all exit 0, no failures.
 
-- [ ] **Step 6: Commit Task 8**
+- [x] **Step 6: Commit Task 8**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-07-19-workbench-gap-fill.md backend/tests/test_gap_fill_integration.py

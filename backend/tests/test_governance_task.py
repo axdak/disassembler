@@ -145,6 +145,10 @@ def _seed_project(tmp_path: Path, with_character: bool = False) -> Path:
             "详情": {"首次章节": "0001", "最近章节": "0001"},
         })
     _write_json(project / "故事结构_增量.json", story)
+    # Commit the seeded story as the seq-1 snapshot so the governance early-skip
+    # guard (latest_snapshot_seq is None -> skipped_no_chapters) does not fire:
+    # the seed represents "1 chapter already committed" and governance must run.
+    _write_json(project / "故事结构版本" / "story_after_ch001.json", story)
     _write_completed_chapter(project, 1)
     return project
 

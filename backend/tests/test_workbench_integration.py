@@ -483,7 +483,12 @@ def _gov_structure_breaking_correction(start: int, end: int) -> dict:
 
 
 def _gov_seed_project(project: Path) -> None:
-    _write_json(project / "故事结构_增量.json", _gov_empty_story(with_character=True))
+    story = _gov_empty_story(with_character=True)
+    _write_json(project / "故事结构_增量.json", story)
+    # Commit the seeded story as the seq-1 snapshot so the governance early-skip
+    # guard (latest_snapshot_seq is None -> skipped_no_chapters) does not fire:
+    # the seed represents "1 chapter already committed" and governance must run.
+    _write_json(project / "故事结构版本" / "story_after_ch001.json", story)
     chapter = project / "原文拆解" / "第001章_测试.md"
     chapter.parent.mkdir(parents=True, exist_ok=True)
     chapter.write_text("# 第001章\n测试原文。\n", encoding="utf-8")

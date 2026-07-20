@@ -73,17 +73,19 @@ SQLite 存储，调度线程按项目 FIFO 排队，写者任务（治理 / 章�
 `WriterCoordinator` 与自动流水线互斥共享同一项目的写权限；读者任务（全书分析 / 视觉 /
 结构 / 导出）可在写者空闲时并发。任务事件经 `BroadcastHub` 推送到 WebSocket。
 
-### 六个标签页（desktop 桌面端）
+### 七个标签页（desktop 桌面端）
 
 - **总览**：项目状态、当前阶段、自动流水线一键运行/取消、任务与陈旧计数摘要。
 - **章节**：章节卡片（分析 / Delta / 视觉 / 结构四维状态 + 陈旧标记 + 最近任务 + 错误），
   支持多选与批量重跑。
 - **分析工作台**：全书分析维度卡片，配置范围（全部 / 区间 / 离散）、目标、问题、原文策略、
-  强制重跑，创建 `analysis` 读者任务。
+  强制重跑，创建 `analysis` 读者任务。`custom` 分析维度需用户自定义问题，故仅在工作台手动触发，
+  不进自动流水线 `FULLBOOK_TASKS`。
 - **治理**：章节区间与历史，创建 `governance` 写者任务（审计包 → 修正 → 提交，结构校验失败
   自动回滚 before 快照）。
 - **导出**：选择 process / final 源、单文件 / Dataview / Canvas / 清空 / 文件名模式，
   创建 `export` 读者任务，产出 Obsidian vault。
+- **维护**：快照恢复、时间线迁移、重新收尾、归一化故事结构、修复 Delta 五项写者任务（详见下文）。
 - **日志**：worker 日志文件列表与内容预览；任务/产物抽屉按需打开。
 
 ### 任务生命周期
@@ -100,6 +102,25 @@ SQLite 存储，调度线程按项目 FIFO 排队，写者任务（治理 / 章�
   拒绝带前缀冲突的 plan，且只写新增章节 md + 原子更新索引（永不覆盖旧章节）。apply 完成后为
   新 seq 排入 `chapter_analysis_rerun` + `chapter_delta_rerun`，全书分析产物因章节 revision 变化
   而变陈旧。
+
+### 维护
+
+维护标签页把 5 项引擎维护能力暴露为写者任务，按项目写者互斥串行执行（与治理/追加共享同一项目的
+写权限），失败时由后端回滚到操作前状态。
+
+- **快照恢复（recover_story）**：`GET /projects/{id}/recover/snapshots` 只读列出
+  `故事结构版本/story_after_chNNN.json` 及其可重放到的章节序号；`POST /projects/{id}/tasks`
+  提交 `{type: recover_story, params: {snapshot_seq}}` 将过程库回滚到所选快照并重放后续 Delta。
+  应用会丢弃所选快照之后的所有过程库改动；失败时后端回滚到恢复前状态。
+- **时间线迁移（migrate_chronology）**：对 `故事结构_增量.json` 执行章节时间回填、回溯压缩与
+  事件重排，写前生成 `.before_chronology_migration.bak` 备份与 `质量治理/规范化/chronology_migration.txt`
+  报告。
+- **重新收尾（finalize）**：复合适配器，复刻编排器的 `final_pack -> worker 修订草稿 -> commit_final_draft
+  （含修复循环）-> validate_final -> finalize` 链，按需重跑最终整理并写出 `故事结构.json`。
+- **归一化故事结构（normalize）**：对 `故事结构_增量.json` 执行保全式规范化（补全缺失集合、迁移
+  规范外字段、规范引用），原地覆盖；process revision 变化使相关全书分析产物变陈旧。
+- **修复 Delta（repair）**：扫描 `章节处理/第NNN章_*.json`，仅对无法解析的 Delta 调用
+  `repair_llm_json` 原地修复（写前备份），已合法的 Delta 不动。
 
 ### JSON 权威性
 
