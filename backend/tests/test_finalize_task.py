@@ -56,6 +56,20 @@ EMPTY_STORY = {
     "其他事项集": [],
 }
 
+# Invalid-for-strict seed: 介绍.{标题,描述} empty -> validate_structure --strict
+# fails with "介绍.标题 为空" / "介绍.描述 为空", so cmd_commit_final_draft writes
+# repair_final.md and returns 1 (i.e. the draft needs the worker repair loop).
+INVALID_FOR_STRICT_STORY = {
+    "介绍": {"标题": "", "描述": ""},
+    "角色集": [],
+    "事件集": [],
+    "地点集": [],
+    "线索集": [],
+    "阵营集": [],
+    "物品集": [],
+    "其他事项集": [],
+}
+
 
 def _write_finalize_worker(worker: Path) -> None:
     """Fake worker: for final_draft/repair_final, write EMPTY_STORY JSON to
@@ -80,7 +94,7 @@ else:
     )
 
 
-def _seed_project(tmp_path: Path) -> Path:
+def _seed_project(tmp_path: Path, story: dict | None = None) -> Path:
     project = tmp_path / "拆书_finalize"
     _write_json(project / "原文拆解" / "_索引.json", {
         "chapters": [{"seq": 1, "filename": "第001章_测试.md", "title": "测试"}]
@@ -88,7 +102,7 @@ def _seed_project(tmp_path: Path) -> Path:
     chapter = project / "原文拆解" / "第001章_测试.md"
     chapter.parent.mkdir(parents=True, exist_ok=True)
     chapter.write_text("# 第001章\n测试原文。\n", encoding="utf-8")
-    _write_json(project / "故事结构_增量.json", EMPTY_STORY)
+    _write_json(project / "故事结构_增量.json", story if story is not None else EMPTY_STORY)
     return project
 
 
@@ -112,29 +126,22 @@ def test_finalize_adapter_produces_valid_final_json(tmp_path):
         assert key in data, f"final story missing top-level key {key}"
 
 
-def test_finalize_adapter_without_worker_command_raises(tmp_path):
-    """No worker_command: cmd_final_pack succeeds but commit_final_draft fails
-    strict validation (the seed draft is a copy of 增量 which IS valid here,
-    so this mainly asserts the error-path wiring when no worker is configured
-    and the draft cannot pass). The happy-path test above is the real check."""
-    project = _seed_project(tmp_path)
+def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path):
+    """Regression guard for the no-worker failure path (FinalizeAdapter fix).
+
+    Seed a draft that FAILS ``cmd_commit_final_draft``'s strict validation
+    (empty 介绍.标题/描述) so the repair loop is required. With
+    ``worker_provider="manual"`` and no explicit ``worker_command``, the
+    adapter's auto-resolve is suppressed (no worker available), so the run
+    must raise RuntimeError citing "commit_final_draft failed ... and no
+    worker_command" - the exact path MaintenanceTab would hit in production
+    without the auto-resolve fix.
+    """
+    project = _seed_project(tmp_path, story=INVALID_FOR_STRICT_STORY)
     adapter = FinalizeAdapter()
-    ctx = _make_context(project, {"worker_command": ""})
-    # With a valid seed the run may actually succeed even without a worker
-    # (cmd_final_pack copies 增量 -> draft, and 增量 already validates strict).
-    # So this test only asserts the adapter either succeeds OR raises
-    # RuntimeError citing a finalize-stage failure — both are acceptable
-    # outcomes of the no-worker path for a valid seed.
-    try:
-        result = adapter.run(ctx)
-    except RuntimeError as exc:
-        # Error path: failure must cite a finalize-stage step.
-        assert any(s in str(exc) for s in (
-            "final_pack", "final_draft worker", "commit_final_draft",
-            "validate_final", "finalize",
-        ))
-        return
-    # Happy path: a valid seed means the draft already passes strict, so
-    # finalize can succeed without ever invoking the worker.
-    assert result["revision"]
-    assert (project / "故事结构.json").is_file()
+    ctx = _make_context(project, {"worker_command": "", "worker_provider": "manual"})
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter.run(ctx)
+    msg = str(excinfo.value)
+    assert "commit_final_draft failed" in msg
+    assert "no worker_command" in msg

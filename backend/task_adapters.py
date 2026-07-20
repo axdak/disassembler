@@ -1035,6 +1035,14 @@ class FinalizeAdapter:
         )
         worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
         worker_retries = _int_param(params, "worker_retries", 0)
+        # 任务参数未显式指定 worker_command 时，按全局 worker_provider 自动解析内置
+        # agent_worker 命令（默认 agy），对齐 orchestrator 的 _worker_command() 与
+        # GovernanceTaskAdapter/AnalysisAdapter，使 MaintenanceTab 一键 finalize
+        # 无需手动配 worker 命令（spec §3.2：worker 步是 finalize 链的一环）。
+        if not worker_command:
+            provider = _str_param(params, "worker_provider", default="") or context.worker_provider
+            if provider and provider != "manual":
+                worker_command = builtin_agent_worker_command(provider)
 
         task_pack = project_dir / "质量治理" / "最终审计" / "final_task_pack.md"
         draft = project_dir / "故事结构_草稿.json"
