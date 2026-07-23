@@ -112,12 +112,9 @@ def select_provider() -> str:
             continue
         command = provider_command(provider, Path.cwd(), os.environ.get("ND_AGENT_PRINT_TIMEOUT", "30m"))
         if command_available(command):
-            print(f"selected provider: {provider}", file=sys.stderr)
+            print(f"已选择 provider: {provider}", file=sys.stderr)
             return provider
-    raise SystemExit(
-        "no supported provider CLI found; install agy/codebuddy or set "
-        "ND_AGY_BIN or ND_CODEBUDDY_BIN"
-    )
+    raise SystemExit("未找到支持的 provider CLI;请安装 agy/codebuddy 或设置 ND_AGY_BIN/ND_CODEBUDDY_BIN")
 
 
 def provider_order(provider: str) -> List[str]:
@@ -129,33 +126,14 @@ def provider_order(provider: str) -> List[str]:
 
 def task_guidance(task_type: str) -> str:
     guidance = {
-        "analysis": (
-            "Task focus: write the chapter analysis Markdown requested by the task pack. "
-            "Extract and organize only the current chapter's plot, characters, conflicts, "
-            "information increments, structure, and narrative signals according to the pack."
-        ),
-        "analysis_regenerate": (
-            "Task focus: regenerate the chapter analysis Markdown because validation failed. "
-            "Use the validation feedback inside the task pack and rewrite the full target Markdown."
-        ),
-        "delta": (
-            "Task focus: write the current chapter Delta JSON. Use the task pack's chapter analysis, "
-            "current structure context, and rules to output only the incremental JSON requested."
-        ),
-        "repair_chapter": (
-            "Task focus: repair the current chapter Delta JSON based on the validation report in the "
-            "task pack. Preserve valid semantics; change only what is needed for the requested target."
-        ),
-        "audit_correction": (
-            "Task focus: write the periodic governance correction JSON. Review the audit pack and "
-            "produce only real no_change/add/modify/delete governance operations requested by the pack."
-        ),
-        "audit_repair": (
-            "Task focus: repair the periodic governance correction JSON based on the validation report. "
-            "Preserve valid audit intent; change only what is needed for the correction target."
-        ),
+        "analysis": "任务重点:按任务包要求写章节分析 Markdown。根据任务包,只提取和组织本章的剧情、人物、冲突、信息增量、结构和叙事信号。",
+        "analysis_regenerate": "任务重点:因校验失败重新生成章节分析 Markdown。使用任务包内的校验反馈,重写完整的目标 Markdown。",
+        "delta": "任务重点:写本章 Delta JSON。使用任务包的章节分析、当前结构上下文和规则,只输出要求的增量 JSON。",
+        "repair_chapter": "任务重点:根据任务包内的校验报告修复本章 Delta JSON。保留有效语义;只改达成目标所需的。",
+        "audit_correction": "任务重点:写周期治理补丁 JSON。审查审计任务包,只产出任务包要求的真实 no_change/add/modify/delete 治理操作。",
+        "audit_repair": "任务重点:根据校验报告修复周期治理补丁 JSON。保留有效审计意图;只改达成目标所需的。",
     }
-    return guidance.get(task_type, "Task focus: follow the task pack exactly and write only the requested target artifact.")
+    return guidance.get(task_type, "任务重点:严格遵循任务包,只写要求的目标产物。")
 
 
 def build_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path], capture_stdout: bool) -> str:
@@ -163,17 +141,11 @@ def build_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path], 
     if capture_stdout and len(expected_outputs) == 1:
         expected_output_text = str(expected_outputs[0])
         output_kind = "JSON" if expected_outputs[0].suffix.lower() == ".json" else "Markdown"
-        output_rule = (
-            f"Output only the complete content of the expected {output_kind} artifact. "
-            "Do not edit the file directly; stdout will be captured by the pipeline."
-        )
+        output_rule = f"只输出期望 {output_kind} 产物的完整内容。不要直接编辑文件;stdout 会被管线捕获。"
     else:
         expected_output_text = "\n".join(f"- {path}" for path in expected_outputs)
-        output_kind = "project files"
-        output_rule = (
-            "Write every expected project file listed above directly. Stdout may contain only brief progress; "
-            "it will not be used as artifact content."
-        )
+        output_kind = "项目文件"
+        output_rule = "直接写入上方列出的每个期望项目文件。stdout 只能含简短进度;不会作为产物内容。"
     return render_prompt(
         "工作包/worker_内容.j2",
         task_type=task_type,
@@ -191,7 +163,7 @@ def build_path_prompt(task_type: str, task_pack: Path, expected_outputs: List[Pa
     if len(expected_outputs) == 1:
         output_kind = "JSON" if expected_outputs[0].suffix.lower() == ".json" else "Markdown"
     else:
-        output_kind = "project files"
+        output_kind = "项目文件"
     return render_prompt(
         "工作包/worker_路径.j2",
         task_type=task_type,
@@ -205,7 +177,7 @@ def build_path_prompt(task_type: str, task_pack: Path, expected_outputs: List[Pa
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise SystemExit(f"missing required environment variable: {name}")
+        raise SystemExit(f"缺少必需的环境变量: {name}")
     return value
 
 
@@ -216,13 +188,13 @@ def expected_outputs_from_env() -> tuple[List[Path], bool]:
         try:
             values = json.loads(multi)
         except json.JSONDecodeError as exc:
-            raise SystemExit(f"invalid ND_EXPECTED_OUTPUTS JSON: {exc}") from exc
+            raise SystemExit(f"ND_EXPECTED_OUTPUTS JSON 无效: {exc}") from exc
         if not isinstance(values, list) or not all(isinstance(item, str) and item for item in values):
-            raise SystemExit("ND_EXPECTED_OUTPUTS must be a JSON list of paths")
+            raise SystemExit("ND_EXPECTED_OUTPUTS 必须是路径的 JSON 列表")
         return [Path(item) for item in values], False
     if single:
         return [Path(single)], True
-    raise SystemExit("missing required environment variable: ND_EXPECTED_OUTPUT or ND_EXPECTED_OUTPUTS")
+    raise SystemExit("缺少必需的环境变量: ND_EXPECTED_OUTPUT 或 ND_EXPECTED_OUTPUTS")
 
 
 def is_unsupported_node_option(option: str) -> bool:
@@ -241,7 +213,7 @@ def provider_env() -> dict[str, str]:
             else:
                 env.pop("NODE_OPTIONS", None)
             removed = ", ".join(option for option in options if option not in filtered)
-            print(f"ignored unsupported NODE_OPTIONS for worker CLI: {removed}", file=sys.stderr)
+            print(f"已忽略不支持的 worker CLI NODE_OPTIONS: {removed}", file=sys.stderr)
     return env
 
 
@@ -281,14 +253,14 @@ def _dump_provider_log_tail(log_path: str) -> None:
     tail = errors[-20:] if errors else lines[-40:]
     if not tail:
         return
-    print("---- provider log tail ----", file=sys.stderr)
+    print("---- provider 日志尾部 ----", file=sys.stderr)
     for ln in tail:
         print(ln, file=sys.stderr)
-    print("---- end provider log tail ----", file=sys.stderr)
+    print("---- provider 日志尾部结束 ----", file=sys.stderr)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run agy/codebuddy as a controlled task-package worker.")
+    parser = argparse.ArgumentParser(description="作为受控任务包 worker 运行 agy/codebuddy。")
     parser.add_argument(
         "--provider",
         choices=["auto", "agy", "codebuddy"],
@@ -302,7 +274,7 @@ def main() -> int:
     task_pack = Path(required_env("ND_TASK_PACK"))
     expected_outputs, env_capture_stdout = expected_outputs_from_env()
     if not task_pack.is_file():
-        print(f"task pack does not exist: {task_pack}", file=sys.stderr)
+        print(f"任务包不存在: {task_pack}", file=sys.stderr)
         return 1
 
     last_returncode = 1
@@ -326,7 +298,7 @@ def main() -> int:
                 continue
             attempted = True
             if args.provider == "auto":
-                print(f"selected provider: {provider}", file=sys.stderr)
+                print(f"已选择 provider: {provider}", file=sys.stderr)
             result = run_provider(provider, command, prompt, project_dir)
             last_returncode = result.returncode
             if result.returncode != 0:
@@ -342,7 +314,7 @@ def main() -> int:
             if capture_stdout:
                 content = (result.stdout or "").strip()
                 if not content:
-                    print(f"provider produced empty output: {provider}", file=sys.stderr)
+                    print(f"provider 输出为空: {provider}", file=sys.stderr)
                     if args.provider == "auto":
                         last_returncode = 1
                         continue
@@ -355,7 +327,7 @@ def main() -> int:
                 print(result.stdout, end="")
             missing = [path for path in expected_outputs if not path.is_file() or path.stat().st_size == 0]
             if missing:
-                print("provider did not write expected output file(s):", file=sys.stderr)
+                print("provider 未写入期望的输出文件:", file=sys.stderr)
                 for path in missing:
                     print(f"- {path}", file=sys.stderr)
                 if args.provider == "auto":
@@ -371,7 +343,7 @@ def main() -> int:
             pass
 
     if not attempted:
-        print("no supported provider CLI found; install agy/codebuddy or set ND_AGY_BIN or ND_CODEBUDDY_BIN", file=sys.stderr)
+        print("未找到支持的 provider CLI;请安装 agy/codebuddy 或设置 ND_AGY_BIN/ND_CODEBUDDY_BIN", file=sys.stderr)
     return last_returncode or 1
 
 

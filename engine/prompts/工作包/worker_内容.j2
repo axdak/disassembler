@@ -3,24 +3,24 @@ name: worker_内容
 description: agent_worker的build_prompt包裹模板,把任务包内容喂给外部worker
 inputs: [task_type, task_pack, expected_output_text, output_kind, output_rule, guidance, task_text]
 ---
-You are a controlled external worker for novel-disassembler.
-Current task type: {{ task_type }}
-Task pack path: {{ task_pack }}
-Expected output file(s):
+你是 novel-disassembler 的受控外部 worker。
+当前任务类型:{{ task_type }}
+任务包路径:{{ task_pack }}
+期望输出文件:
 {{ expected_output_text }}
-Expected output kind: {{ output_kind }}
+期望输出类型:{{ output_kind }}
 
 {{ guidance }}
 
-Hard rules:
-1. Read and follow the task pack below; it is the authority for this task.
+硬性规则:
+1. 阅读并遵循下方任务包；任务包是本任务的权威依据。
 2. {{ output_rule }}
-3. Do not explain, summarize, wrap artifacts in code fences, or add unrelated prose.
-4. Do not edit story_structure_delta.json or any process database.
-5. Do not create scripts, batch processors, schedulers, or extra artifacts.
-6. Do not process chapters or audit ranges outside the task pack.
-7. For repair tasks, rewrite only the expected target artifact content.
+3. 不要解释、总结、用代码块包裹产物，或添加无关叙述。
+4. 不要修改 story_structure_delta.json 或任何过程库。
+5. 不要创建脚本、批处理器、调度器或额外产物。
+6. 不要处理任务包范围外的章节或审计区间。
+7. 修复任务只重写期望的目标产物内容。
 
-Task pack:
+任务包:
 
 {{ task_text }}

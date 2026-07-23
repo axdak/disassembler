@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
+import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -72,41 +73,12 @@ def _split_frontmatter(text: str) -> "tuple[Dict[str, Any], str]":
 
 
 def _parse_simple_frontmatter(fm_text: str) -> Dict[str, Any]:
-    """手写解析 name/description/inputs 等简单字段，避免引入 pyyaml。
-
-    支持：
-      name: 章节分析
-      description: 一行描述
-      inputs: [chapter_seq, analysis_path]     # 行内列表
-      inputs:                                    # 块列表
-        - chapter_seq
-        - analysis_path
-    """
-    meta: Dict[str, Any] = {}
-    cur_key: "str | None" = None
-    for line in fm_text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if line.lstrip().startswith("- "):  # 块列表项
-            item = line.lstrip()[2:].strip()
-            if cur_key and isinstance(meta.get(cur_key), list):
-                meta[cur_key].append(item)
-            continue
-        if ":" not in line:
-            continue
-        key, _, val = line.partition(":")
-        key = key.strip()
-        val = val.strip()
-        cur_key = key
-        if val == "":
-            meta[key] = []  # 块列表，等待后续 - item
-        elif val.startswith("[") and val.endswith("]"):
-            inner = val[1:-1].strip()
-            meta[key] = [x.strip() for x in inner.split(",") if x.strip()] if inner else []
-        else:
-            meta[key] = val
-    return meta
+    """用 pyyaml 解析 frontmatter（支持完整 YAML 语法，比手写更稳健）。"""
+    try:
+        data = yaml.safe_load(fm_text)
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def get_prompt_meta(name: str) -> Dict[str, Any]:

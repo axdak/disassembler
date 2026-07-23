@@ -42,7 +42,7 @@ class EventBus:
             try:
                 ln(event)
             except Exception as exc:  # noqa: BLE001
-                print(f"[events] listener error: {type(exc).__name__}: {exc}", file=sys.stderr)
+                print(f"[events] 监听器错误: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     @staticmethod
     def to_dict(event: Event) -> dict:
