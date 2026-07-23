@@ -2,8 +2,8 @@
 
 把 prompts/ 下的 Jinja2 模板集中管理：
 
-- 每个模板顶部可带 YAML frontmatter（name/description/inputs），手写简易解析，
-  不依赖 pyyaml（requirements.txt 仅 jinja2 + json-repair）。
+- 每个模板顶部可带 YAML frontmatter（name/description/inputs），用 pyyaml 解析
+  （requirements.txt 含 jinja2 + json-repair + pyyaml）。
 - render_prompt 渲染前校验 frontmatter 声明的 inputs 是否齐全，缺变量立刻报
   KeyError，比让 StrictUndefined 在模板深处报错更易定位；模板正文里用到未传
   变量时 StrictUndefined 仍兜底报错。
