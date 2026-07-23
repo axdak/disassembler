@@ -9,7 +9,7 @@ def read_text(path: str) -> str:
 
 
 def test_autonomous_worker_prompt_requires_foreground_supervision():
-    prompt = read_text("prompts/autonomous_run.j2")
+    prompt = read_text("prompts/流水线/自主运行.j2")
 
     assert "主控Agent必须保持前台监督" in prompt
     assert "不得把 worker 任务后台启动后结束主会话" in prompt
@@ -32,7 +32,7 @@ def test_worker_docs_forbid_task_notification_background_mode():
     docs = "\n".join(
         [
             read_text("SKILL.md"),
-            read_text("prompts/autonomous_run.j2"),
+            read_text("prompts/流水线/自主运行.j2"),
             read_text("references/autonomous_loop.md"),
             read_text("references/commands_and_resources.md"),
         ]
@@ -53,7 +53,7 @@ def test_worker_docs_state_supervised_loop_default_and_continuous_escape_hatch()
     docs = "\n".join(
         [
             read_text("SKILL.md"),
-            read_text("prompts/autonomous_run.j2"),
+            read_text("prompts/流水线/自主运行.j2"),
             read_text("references/autonomous_loop.md"),
             read_text("references/commands_and_resources.md"),
         ]

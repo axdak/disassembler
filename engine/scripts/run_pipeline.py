@@ -1362,7 +1362,7 @@ def write_audit_pack(
     for mode in fallback_modes:
         candidate_full_story, candidate_index, candidate_details = mode_contexts[mode]
         candidate = render_prompt(
-            "audit.j2",
+            "流水线/周期审计.j2",
             start=start,
             end=end,
             correction_path=paths["correction"],
@@ -1751,7 +1751,7 @@ def prepare_chapter_analysis(project_dir: Path, chapter: Path, force: bool = Fal
     chapter_text = chapter.read_text(encoding="utf-8", errors="ignore")
     chapter_seq = seq_from_file(chapter)
     content = render_prompt(
-        "chapter_analysis.j2",
+        "流水线/章节分析.j2",
         chapter_seq=chapter_seq,
         analysis_path=p["analysis"],
         chapter_text=chapter_text,
@@ -1791,7 +1791,7 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False)
     summary = build_delta_story_context(story, project_dir, chapter_seq)
 
     content = render_prompt(
-        "delta_extract.j2",
+        "流水线/单章增量提取.j2",
         chapter_seq=chapter_seq,
         chapter_id=chapter_id,
         delta_path=p["delta"],
@@ -1835,7 +1835,7 @@ def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_path
                 "excerpt": rp.read_text(encoding="utf-8", errors="ignore")[:30000],
             })
     content = render_prompt(
-        "repair_chapter.j2",
+        "流水线/章节修复.j2",
         chapter_seq=seq_from_file(chapter),
         reason=reason,
         reports=reports,
@@ -1849,7 +1849,7 @@ def write_analysis_regenerate_task(project_dir: Path, chapter: Path, errors: Lis
     """Ask the agent to regenerate a shrunken analysis from source, never from the bad MD."""
     p = artifact_paths(project_dir, chapter)
     content = render_prompt(
-        "chapter_analysis_regenerate.j2",
+        "流水线/章节分析_重生成.j2",
         chapter_seq=seq_from_file(chapter),
         analysis_path=p["analysis"],
         chapter_text=chapter.read_text(encoding="utf-8", errors="ignore"),
@@ -2702,7 +2702,7 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
                                "excerpt": read_excerpt(cj, 8000)})
 
     content = render_prompt(
-        "final_draft.j2",
+        "流水线/最终整理.j2",
         run_pipeline_path=script_path("run_pipeline.py"),
         project_dir=project_dir,
         report_excerpt=report_excerpt,
@@ -2744,7 +2744,7 @@ def cmd_commit_final_draft(project_dir: Path) -> int:
         print(f"最终校验失败，见: {report}")
         repair = audit_dir / "repair_final.md"
         content = render_prompt(
-            "repair_final.j2",
+            "流水线/终稿修复.j2",
             report_excerpt=read_excerpt(report, 30000),
             run_pipeline_path=script_path("run_pipeline.py"),
             project_dir=project_dir,

@@ -136,14 +136,14 @@ def test_event_four_dimension_compound_tag_stays_in_tag_set():
 
 
 def test_delta_prompt_requires_event_four_dimension_compound_tag():
-    prompt = Path("prompts/delta_extract.j2").read_text(encoding="utf-8")
+    prompt = Path("prompts/流水线/单章增量提取.j2").read_text(encoding="utf-8")
     assert "剧情线主题+叙事功能+爽点/情绪点+冲突悬念类型" in prompt
     assert "每个事件" in prompt
     assert "不下沉" in prompt
 
 
 def test_delta_prompt_requires_rich_event_archive_values_with_strict_keys():
-    prompt = Path("prompts/delta_extract.j2").read_text(encoding="utf-8")
+    prompt = Path("prompts/流水线/单章增量提取.j2").read_text(encoding="utf-8")
     assert "机器字段和明确引用字段必须严格稳定" in prompt
     assert "普通档案字段优先使用稳定短键" in prompt
     assert "自然生成少量 key" in prompt

@@ -1,3 +1,8 @@
+---
+name: 单章增量提取
+description: 单章Delta JSON提取任务包,只输出本章增量结构
+inputs: [chapter_id, delta_path, summary, analysis_text, chapter_text]
+---
 本任务是“章节 Delta 提取”，不是重新创作完整故事结构。
 
 请根据本章原文、已完成章节分析和当前故事结构索引，只输出本章 Delta JSON，写入目标文件：

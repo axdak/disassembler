@@ -43,7 +43,7 @@ _JINJA_ENV = Environment(
 )
 
 # 匹配单独成行的 ``---``（frontmatter 开/闭界符，允许行尾空白）。
-_FM_DELIM = re.compile(r"^---\s*$", re.MULTILINE)
+_FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
 
 
 def _split_frontmatter(text: str) -> "tuple[Dict[str, Any], str]":
@@ -51,6 +51,7 @@ def _split_frontmatter(text: str) -> "tuple[Dict[str, Any], str]":
 
     无 frontmatter、或“界符之间解析不出任何字段”时返回 ``({}, text)``，
     后者保护“正文首行恰好是 markdown 分隔线 ``---``”的模板不被误剥离。
+    闭合界符后的首个换行被去掉，保证正文起点与无 frontmatter 时一致。
     """
     if not text.startswith("---"):
         return {}, text
@@ -60,6 +61,10 @@ def _split_frontmatter(text: str) -> "tuple[Dict[str, Any], str]":
         return {}, text
     fm_text = text[matches[0].end():matches[1].start()]
     body = text[matches[1].end():]
+    if body.startswith("\r\n"):
+        body = body[2:]
+    elif body.startswith("\n"):
+        body = body[1:]
     meta = _parse_simple_frontmatter(fm_text)
     if not meta:
         return {}, text
