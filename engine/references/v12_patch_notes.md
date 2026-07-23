@@ -93,4 +93,4 @@
 - 不变事项
   - 不引入新 schema。
   - 不写入 `故事结构_增量.json`，纯分析产物。
-  - 现有 `chapter_analysis.j2`、`visual_assets` 工作流保持不变。
+  - 现有 `流水线/章节分析.j2`、`visual_assets` 工作流保持不变。

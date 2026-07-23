@@ -36,7 +36,7 @@
 7. （必要时）补充缺失的关键事实。
 
 ## 审计输出
-不要直接重写完整故事JSON，只输出 `correction_delta.json`（补丁格式，参见 `prompts/audit.j2` 及 `schemas/audit_correction.schema.json`）。
+不要直接重写完整故事JSON，只输出 `correction_delta.json`（补丁格式，参见 `prompts/流水线/周期审计.j2` 及 `schemas/audit_correction.schema.json`）。
 
 其中 `新增元素` 和 `修改元素` 部分仍走：
 
