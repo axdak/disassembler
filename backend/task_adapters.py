@@ -58,6 +58,7 @@ from run_pipeline import (  # noqa: E402
     chapter_files,
     seq_from_file,
     run_worker,
+    run_multi_output_worker,
     scoped_analysis_pack,
     scoped_chapter_analysis_rerun,
     scoped_chapter_delta_rerun,
@@ -66,6 +67,9 @@ from run_pipeline import (  # noqa: E402
     scoped_chapter_visual_pack,
     snapshot_project_inputs,
     unresolved_audits,
+    write_analysis_worker_pack,
+    write_fullbook_partial_worker_pack,
+    write_fullbook_reduce_worker_pack,
 )
 from export_obsidian_vault import export_obsidian_markdown  # noqa: E402
 from migrate_chronology import run_migrate  # noqa: E402
@@ -105,6 +109,23 @@ def _int_param(params: dict, name: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _resolve_worker(params: dict, context: TaskContext) -> tuple[str, int, int, str]:
+    """Resolve worker command + tuning from params and the global worker_provider.
+
+    Returns (worker_command, timeout_seconds, retries, window). worker_command is
+    empty when no explicit command is given and provider is manual/unset; callers
+    raise if they require a worker.
+    """
+    command = _str_param(params, "worker_command", default="")
+    provider = _str_param(params, "worker_provider", default="") or context.worker_provider
+    if not command and provider and provider != "manual":
+        command = builtin_agent_worker_command(provider)
+    timeout = _int_param(params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
+    retries = _int_param(params, "worker_retries", DEFAULT_WORKER_RETRIES)
+    window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
+    return command, timeout, retries, window
 
 
 def _chapter_index_seq_range(project_dir: Path) -> tuple[int, int]:
@@ -192,6 +213,11 @@ class AnalysisAdapter:
             "max_pack_chars": _int_param(params, "max_pack_chars", 70000),
             "max_original_chars": _int_param(params, "max_original_chars", 6000),
             "max_analysis_chars": _int_param(params, "max_analysis_chars", 12000),
+            "worker_command": _str_param(params, "worker_command", default=""),
+            "worker_provider": _str_param(params, "worker_provider", default=""),
+            "worker_timeout_seconds": _int_param(params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS),
+            "worker_retries": _int_param(params, "worker_retries", DEFAULT_WORKER_RETRIES),
+            "worker_window": _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW),
         }
 
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
@@ -236,6 +262,7 @@ class AnalysisAdapter:
         manifest_path = _latest_manifest(project_dir, task) or Path(scoped["manifest_path"])
         manifest = load_json(manifest_path, {}) or {}
         packs = manifest.get("packs") or []
+        target_outputs = [project_dir / rel for rel in (manifest.get("target_outputs") or [])]
 
         artifacts = [{"name": "manifest", "path": str(manifest_path)}]
         for index, pack in enumerate(packs):
@@ -248,8 +275,67 @@ class AnalysisAdapter:
                         {"name": f"pack_ch{pack.get('seq', 0):03d}", "path": str(project_dir / rel)}
                     )
 
+        # Worker execution: produce the canonical target_outputs by running the
+        # task packs through an external worker. ``custom`` has no predefined
+        # outputs (gap-fill design §8) and keeps the pack-only behavior.
+        worker_command = parsed["worker_command"]
+        if target_outputs and not worker_command:
+            provider = parsed["worker_provider"] or context.worker_provider
+            if provider and provider != "manual":
+                worker_command = builtin_agent_worker_command(provider)
+        if target_outputs:
+            if not worker_command:
+                raise RuntimeError(
+                    "analysis 执行需要 worker：未配置 worker_command，且 worker_provider 为 "
+                    "manual 或未设置。请在设置中选择 worker provider（如 agy）后再运行分析任务。"
+                )
+            worker_timeout = parsed["worker_timeout_seconds"]
+            worker_retries = parsed["worker_retries"]
+            worker_window = parsed["worker_window"]
+            pack_count = len(packs)
+            if pack_count == 0:
+                raise RuntimeError(f"analysis manifest has no packs: {manifest_path}")
+            if pack_count == 1:
+                pack_rel = packs[0] if isinstance(packs[0], str) else packs[0].get("pack")
+                pack_path = project_dir / pack_rel
+                context.progress(80, "worker 执行分析任务包 (1/1)")
+                rc = run_multi_output_worker(
+                    worker_command, project_dir, "fullbook_analysis", pack_path, target_outputs,
+                    timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                )
+                if rc != 0:
+                    raise RuntimeError(f"analysis worker failed rc={rc}")
+            else:
+                partial_paths: list[Path] = []
+                for index, pack in enumerate(packs, 1):
+                    pack_rel = pack if isinstance(pack, str) else pack.get("pack")
+                    partial_path = manifest_path.parent / f"partial_result_{index:03d}.md"
+                    worker_pack = write_fullbook_partial_worker_pack(
+                        project_dir, manifest_path, pack_rel, index, pack_count, partial_path
+                    )
+                    context.progress(75, f"worker 执行分包 ({index}/{pack_count})")
+                    rc = run_worker(
+                        worker_command, project_dir, "fullbook_analysis", worker_pack, partial_path,
+                        timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                    )
+                    if rc != 0:
+                        raise RuntimeError(f"analysis pack {index} worker failed rc={rc}")
+                    partial_paths.append(partial_path)
+                reduce_pack = write_fullbook_reduce_worker_pack(
+                    project_dir, manifest_path, partial_paths, target_outputs
+                )
+                context.progress(90, "worker 汇总分批结果")
+                rc = run_multi_output_worker(
+                    worker_command, project_dir, "fullbook_analysis_reduce", reduce_pack, target_outputs,
+                    timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                )
+                if rc != 0:
+                    raise RuntimeError(f"analysis reduce worker failed rc={rc}")
+            for out in target_outputs:
+                artifacts.append({"name": out.name, "path": str(out)})
+
         revision = project_revisions(project_dir)
-        context.progress(100, "analysis task pack ready")
+        context.progress(100, "analysis complete")
         return _result_json(
             artifacts=artifacts,
             manifest=manifest,
@@ -296,6 +382,7 @@ class ChapterVisualAdapter:
         )
 
         revision = project_revisions(project_dir)
+        worker_command, worker_timeout, worker_retries, worker_window = _resolve_worker(params, context)
         artifacts: list[dict] = []
         try:
             if aggregate:
@@ -308,9 +395,25 @@ class ChapterVisualAdapter:
                     or Path(scoped["manifest_path"])
                 )
                 manifest = load_json(manifest_path, {}) or {}
-                target_outputs = manifest.get("target_outputs") or []
+                target_outputs = [project_dir / rel for rel in (manifest.get("target_outputs") or [])]
+                if not worker_command:
+                    raise RuntimeError(
+                        "chapter_visual 执行需要 worker：未配置 worker_command，且 worker_provider 为 "
+                        "manual 或未设置。请在设置中选择 worker provider（如 agy）后再运行。"
+                    )
+                if target_outputs:
+                    task_pack = write_analysis_worker_pack(project_dir, manifest_path, manifest)
+                    context.progress(60, "worker 执行视觉资产汇总")
+                    rc = run_multi_output_worker(
+                        worker_command, project_dir, "visual_assets_aggregate", task_pack, target_outputs,
+                        timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                    )
+                    if rc != 0:
+                        raise RuntimeError(f"visual_assets aggregate worker failed rc={rc}")
                 artifacts.append({"name": "manifest", "path": str(manifest_path)})
-                context.progress(100, "aggregate pack ready")
+                for out in target_outputs:
+                    artifacts.append({"name": out.name, "path": str(out)})
+                context.progress(100, "aggregate complete")
                 return _result_json(
                     artifacts=artifacts,
                     manifest=manifest,
@@ -319,7 +422,7 @@ class ChapterVisualAdapter:
                     revision=revision,
                     task="visual_assets",
                     mode="aggregate",
-                    target_outputs=target_outputs,
+                    target_outputs=manifest.get("target_outputs") or [],
                     seqs=seqs,
                     force_aggregate=force_aggregate,
                 )
@@ -341,14 +444,31 @@ class ChapterVisualAdapter:
             )
             manifest = load_json(manifest_path, {}) or {}
             packs = manifest.get("packs") or []
+            if not worker_command:
+                raise RuntimeError(
+                    "chapter_visual 执行需要 worker：未配置 worker_command，且 worker_provider 为 "
+                    "manual 或未设置。请在设置中选择 worker provider（如 agy）后再运行。"
+                )
+            artifacts.append({"name": "manifest", "path": str(manifest_path)})
             for record in packs:
+                seq = int(record.get("seq", 0))
                 rel = record.get("pack")
                 if rel:
-                    artifacts.append(
-                        {"name": f"pack_ch{record.get('seq', 0):03d}", "path": str(project_dir / rel)}
-                    )
-            artifacts.append({"name": "manifest", "path": str(manifest_path)})
-            context.progress(100, "per-chapter packs ready")
+                    artifacts.append({"name": f"pack_ch{seq:03d}", "path": str(project_dir / rel)})
+                expected_outputs = [project_dir / rel for rel in (record.get("outputs") or [])]
+                if not expected_outputs:
+                    continue
+                task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
+                context.progress(80, f"worker 执行第{seq:03d}章视觉资产")
+                rc = run_multi_output_worker(
+                    worker_command, project_dir, "visual_assets", task_pack, expected_outputs, seq,
+                    timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                )
+                if rc != 0:
+                    raise RuntimeError(f"visual_assets ch{seq:03d} worker failed rc={rc}")
+                for out in expected_outputs:
+                    artifacts.append({"name": out.name, "path": str(out)})
+            context.progress(100, "per-chapter complete")
             return _result_json(
                 artifacts=artifacts,
                 manifest=manifest,
@@ -391,6 +511,7 @@ class ChapterStructureAdapter:
             if isinstance(prepared_input, dict) and prepared_input.get("snapshot_dir")
             else snapshot_project_inputs(project_dir)
         )
+        worker_command, worker_timeout, worker_retries, worker_window = _resolve_worker(params, context)
         try:
             context.progress(10, "generating chapter_structure per-chapter packs")
             scoped = scoped_chapter_structure_pack(
@@ -409,15 +530,32 @@ class ChapterStructureAdapter:
             )
             manifest = load_json(manifest_path, {}) or {}
             packs = manifest.get("packs") or []
+            if not worker_command:
+                raise RuntimeError(
+                    "chapter_structure 执行需要 worker：未配置 worker_command，且 worker_provider 为 "
+                    "manual 或未设置。请在设置中选择 worker provider（如 agy）后再运行。"
+                )
             artifacts = [{"name": "manifest", "path": str(manifest_path)}]
             for record in packs:
+                seq = int(record.get("seq", 0))
                 rel = record.get("pack")
                 if rel:
-                    artifacts.append(
-                        {"name": f"pack_ch{record.get('seq', 0):03d}", "path": str(project_dir / rel)}
-                    )
+                    artifacts.append({"name": f"pack_ch{seq:03d}", "path": str(project_dir / rel)})
+                expected_outputs = [project_dir / rel for rel in (record.get("outputs") or [])]
+                if not expected_outputs:
+                    continue
+                task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
+                context.progress(80, f"worker 执行第{seq:03d}章章节结构")
+                rc = run_multi_output_worker(
+                    worker_command, project_dir, "chapter_structure", task_pack, expected_outputs, seq,
+                    timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                )
+                if rc != 0:
+                    raise RuntimeError(f"chapter_structure ch{seq:03d} worker failed rc={rc}")
+                for out in expected_outputs:
+                    artifacts.append({"name": out.name, "path": str(out)})
             revision = project_revisions(project_dir)
-            context.progress(100, "per-chapter packs ready")
+            context.progress(100, "per-chapter complete")
             return _result_json(
                 artifacts=artifacts,
                 manifest=manifest,

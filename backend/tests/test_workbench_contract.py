@@ -55,6 +55,35 @@ def test_analysis_legacy_include_original_alias_still_accepted():
     assert parsed["include_original"] == "summary"
 
 
+def test_analysis_worker_params_passthrough():
+    parsed = AnalysisAdapter._parse_params({
+        "worker_command": "agy --foo",
+        "worker_provider": "codebuddy",
+        "worker_timeout_seconds": 120,
+        "worker_retries": 3,
+        "worker_window": "powershell",
+    })
+    assert parsed["worker_command"] == "agy --foo"
+    assert parsed["worker_provider"] == "codebuddy"
+    assert parsed["worker_timeout_seconds"] == 120
+    assert parsed["worker_retries"] == 3
+    assert parsed["worker_window"] == "powershell"
+
+
+def test_analysis_worker_params_default_when_absent():
+    from run_pipeline import (
+        DEFAULT_WORKER_RETRIES,
+        DEFAULT_WORKER_TIMEOUT_SECONDS,
+        DEFAULT_WORKER_WINDOW,
+    )
+    parsed = AnalysisAdapter._parse_params({})
+    assert parsed["worker_command"] == ""
+    assert parsed["worker_provider"] == ""
+    assert parsed["worker_timeout_seconds"] == DEFAULT_WORKER_TIMEOUT_SECONDS
+    assert parsed["worker_retries"] == DEFAULT_WORKER_RETRIES
+    assert parsed["worker_window"] == DEFAULT_WORKER_WINDOW
+
+
 # --- Export (spec §3.5/§8) ----------------------------------------------------
 
 def test_export_translate_kinds_maps_spec_kinds():

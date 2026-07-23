@@ -167,7 +167,37 @@ def project(tmp_path: Path) -> Path:
 
 # --- AnalysisAdapter ------------------------------------------------------
 
-def test_analysis_adapter_passes_task_chapters_targets_question_original_and_force(project):
+def _install_fake_workers(monkeypatch, calls=None):
+    """Replace run_worker/run_multi_output_worker with fakes that write placeholder
+    artifacts, so AnalysisAdapter can be exercised end-to-end without a real LLM.
+    Returns the call log (list of tuples) so tests can assert the execution shape.
+    """
+    calls = [] if calls is None else calls
+
+    def fake_run_worker(command, project_dir, task_type, task_pack, expected_output,
+                        chapter_seq=0, timeout=0, retries=0, worker_window="hidden"):
+        calls.append(("run_worker", task_type, str(task_pack), str(expected_output)))
+        out = Path(expected_output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"# 假分批结果 {task_type}\n", encoding="utf-8")
+        return 0
+
+    def fake_run_multi(command, project_dir, task_type, task_pack, expected_outputs,
+                       chapter_seq=0, timeout=0, retries=0, worker_window="hidden"):
+        calls.append(("run_multi", task_type, str(task_pack), [str(p) for p in expected_outputs]))
+        for p in expected_outputs:
+            p = Path(p)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(f"# 假产出 {task_type} {p.name}\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr("task_adapters.run_worker", fake_run_worker)
+    monkeypatch.setattr("task_adapters.run_multi_output_worker", fake_run_multi)
+    return calls
+
+
+def test_analysis_adapter_passes_task_chapters_targets_question_original_and_force(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
     adapter = AnalysisAdapter()
     params = {
         "task": "summary",
@@ -203,13 +233,17 @@ def test_analysis_adapter_passes_task_chapters_targets_question_original_and_for
     for art in result["artifacts"]:
         assert Path(art["path"]).is_file()
 
+    # The canonical target output was produced by the (faked) worker.
+    assert (project / "全书分析" / "剧情结构" / "章节梗概汇总.md").is_file()
+
     # Revision is captured.
     assert "chapter" in result["revision"]
     assert "process" in result["revision"]
     assert "final" in result["revision"]
 
 
-def test_analysis_adapter_range_chapters(project):
+def test_analysis_adapter_range_chapters(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
     adapter = AnalysisAdapter()
     params = {"task": "summary", "chapters": "1-2", "include_original": "none"}
     ctx = _make_context(project, params)
@@ -218,7 +252,8 @@ def test_analysis_adapter_range_chapters(project):
     assert result["manifest"]["chapters"] == [1, 2]
 
 
-def test_analysis_adapter_discrete_chapters(project):
+def test_analysis_adapter_discrete_chapters(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
     adapter = AnalysisAdapter()
     params = {"task": "summary", "chapters": "1,3", "include_original": "none"}
     ctx = _make_context(project, params)
@@ -227,7 +262,8 @@ def test_analysis_adapter_discrete_chapters(project):
     assert result["manifest"]["chapters"] == [1, 3]
 
 
-def test_analysis_adapter_original_text_policy_full(project):
+def test_analysis_adapter_original_text_policy_full(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
     adapter = AnalysisAdapter()
     params = {"task": "summary", "chapters": "all", "include_original": "full"}
     ctx = _make_context(project, params)
@@ -236,9 +272,97 @@ def test_analysis_adapter_original_text_policy_full(project):
     assert result["include_original"] == "full"
 
 
+def test_analysis_adapter_single_pack_runs_worker_directly(project, monkeypatch):
+    """单包：直接 run_multi_output_worker 产 target_outputs，不走 partial/reduce。"""
+    calls = _install_fake_workers(monkeypatch)
+    adapter = AnalysisAdapter()
+    ctx = _make_context(project, {"task": "summary", "chapters": "all", "include_original": "none"})
+    result = adapter.run(ctx, adapter.prepare(ctx))
+
+    assert result["manifest"]["pack_count"] == 1
+    assert [c for c in calls if c[0] == "run_worker"] == []
+    multi = [c for c in calls if c[0] == "run_multi"]
+    assert len(multi) == 1
+    assert multi[0][1] == "fullbook_analysis"
+    target = project / "全书分析" / "剧情结构" / "章节梗概汇总.md"
+    assert target.is_file()
+    assert any(a["path"] == str(target) for a in result["artifacts"])
+
+
+def test_analysis_adapter_multi_pack_runs_partials_then_reduce(project, monkeypatch):
+    """多包：逐包 run_worker 产 partial，再 run_multi_output_worker reduce。"""
+    calls = _install_fake_workers(monkeypatch)
+    adapter = AnalysisAdapter()
+    # 极小 max_pack_chars 强制 3 章切多包。
+    params = {"task": "summary", "chapters": "all", "include_original": "none",
+              "max_pack_chars": 50}
+    ctx = _make_context(project, params)
+    result = adapter.run(ctx, adapter.prepare(ctx))
+
+    pack_count = result["manifest"]["pack_count"]
+    assert pack_count > 1
+    worker_calls = [c for c in calls if c[0] == "run_worker"]
+    reduce_calls = [c for c in calls if c[0] == "run_multi"]
+    assert len(worker_calls) == pack_count
+    assert all(c[1] == "fullbook_analysis" for c in worker_calls)
+    assert len(reduce_calls) == 1
+    assert reduce_calls[0][1] == "fullbook_analysis_reduce"
+
+    pack_dir = Path(result["manifest_path"]).parent
+    for i in range(1, pack_count + 1):
+        assert (pack_dir / f"partial_result_{i:03d}.md").is_file()
+        assert (pack_dir / f"worker_pack_{i:03d}.md").is_file()
+    assert (pack_dir / "worker_pack_reduce.md").is_file()
+    assert (project / "全书分析" / "剧情结构" / "章节梗概汇总.md").is_file()
+
+
+def test_analysis_adapter_without_worker_raises(project, monkeypatch):
+    """有 target_outputs 但无 worker（provider=manual 且无 worker_command）-> RuntimeError。"""
+    _install_fake_workers(monkeypatch)
+    adapter = AnalysisAdapter()
+    params = {"task": "summary", "chapters": "all", "include_original": "none",
+              "worker_provider": "manual"}
+    ctx = _make_context(project, params)
+    with pytest.raises(RuntimeError, match="worker"):
+        adapter.run(ctx, adapter.prepare(ctx))
+
+
+def test_analysis_adapter_custom_skips_worker(project, monkeypatch):
+    """custom 无 target_outputs -> 不调 worker，不 raise，保留只生成包的行为。"""
+    calls = _install_fake_workers(monkeypatch)
+    adapter = AnalysisAdapter()
+    params = {"task": "custom", "chapters": "all", "include_original": "none",
+              "question": "分析主角成长线是否断裂"}
+    ctx = _make_context(project, params)
+    result = adapter.run(ctx, adapter.prepare(ctx))
+
+    assert calls == []
+    assert result["task"] == "custom"
+    assert Path(result["manifest_path"]).is_file()
+
+
+def test_analysis_adapter_structure_task_single_pack_no_reduce(project, monkeypatch):
+    """结构类任务（plot）单包直出：一次 run_multi_output_worker，不调 run_worker（无 partial/reduce）。"""
+    calls = _install_fake_workers(monkeypatch)
+    adapter = AnalysisAdapter()
+    ctx = _make_context(project, {"task": "plot", "chapters": "all", "include_original": "none"})
+    result = adapter.run(ctx, adapter.prepare(ctx))
+
+    assert result["manifest"]["pack_count"] == 1
+    assert [c for c in calls if c[0] == "run_worker"] == []
+    multi = [c for c in calls if c[0] == "run_multi"]
+    assert len(multi) == 1
+    assert multi[0][1] == "fullbook_analysis"
+    # plot 三件产出落盘
+    for rel in ("全书分析/剧情结构/剧情线索.md", "全书分析/剧情结构/伏笔追踪.md", "全书分析/剧情结构/冲突图谱.md"):
+        assert (project / rel).is_file()
+
+
+
 # --- ChapterVisualAdapter -------------------------------------------------
 
-def test_chapter_visual_adapter_touches_only_requested_seqs(project):
+def test_chapter_visual_adapter_touches_only_requested_seqs(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
     adapter = ChapterVisualAdapter()
     params = {"seqs": [1, 3], "include_original": "none"}
     ctx = _make_context(project, params)
@@ -255,9 +379,10 @@ def test_chapter_visual_adapter_touches_only_requested_seqs(project):
     assert names == ["pack_ch001.md", "pack_ch003.md"]
 
 
-def test_chapter_visual_adapter_per_chapter_outputs_match_engine_helper(project):
+def test_chapter_visual_adapter_per_chapter_outputs_match_engine_helper(project, monkeypatch):
     from run_pipeline import visual_assets_per_chapter_relpaths
 
+    _install_fake_workers(monkeypatch)
     adapter = ChapterVisualAdapter()
     params = {"seqs": [1], "include_original": "none"}
     ctx = _make_context(project, params)
@@ -267,9 +392,10 @@ def test_chapter_visual_adapter_per_chapter_outputs_match_engine_helper(project)
     assert record["outputs"] == visual_assets_per_chapter_relpaths(1)
 
 
-def test_chapter_visual_adapter_aggregate_outputs_match_engine_helper(project):
+def test_chapter_visual_adapter_aggregate_outputs_match_engine_helper(project, monkeypatch):
     from analysis_context_pack import TASKS
 
+    _install_fake_workers(monkeypatch)
     # The aggregate pack requires per-chapter visual asset files to exist.
     for seq in (1, 2, 3):
         d = project / "全书分析" / "视觉资产" / "分章" / f"ch{seq:03d}"
@@ -294,9 +420,56 @@ def test_chapter_visual_adapter_aggregate_outputs_match_engine_helper(project):
     assert Path(result["manifest_path"]).is_file()
 
 
+def test_chapter_visual_adapter_per_chapter_runs_worker_and_writes_outputs(project, monkeypatch):
+    calls = _install_fake_workers(monkeypatch)
+    from run_pipeline import visual_assets_per_chapter_relpaths
+
+    adapter = ChapterVisualAdapter()
+    ctx = _make_context(project, {"seqs": [1, 2], "include_original": "none"})
+    result = adapter.run(ctx, adapter.prepare(ctx))
+
+    multi = [c for c in calls if c[0] == "run_multi"]
+    assert len(multi) == 2
+    assert all(c[1] == "visual_assets" for c in multi)
+    for seq in (1, 2):
+        for rel in visual_assets_per_chapter_relpaths(seq):
+            assert (project / rel).is_file()
+
+
+def test_chapter_visual_adapter_aggregate_runs_worker(project, monkeypatch):
+    calls = _install_fake_workers(monkeypatch)
+    from analysis_context_pack import TASKS
+
+    for seq in (1, 2, 3):
+        d = project / "全书分析" / "视觉资产" / "分章" / f"ch{seq:03d}"
+        d.mkdir(parents=True, exist_ok=True)
+        for name in ("视觉资产清单.md", "关键场景分镜表.md", "AI绘图提示词素材.md",
+                     "角色外观一致性表.md", "场景氛围表.md"):
+            (d / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    adapter = ChapterVisualAdapter()
+    ctx = _make_context(project, {"seqs": [1, 2, 3], "aggregate": True, "include_original": "none"})
+    adapter.run(ctx, adapter.prepare(ctx))
+
+    multi = [c for c in calls if c[0] == "run_multi"]
+    assert len(multi) == 1
+    assert multi[0][1] == "visual_assets_aggregate"
+    for rel in TASKS["visual_assets"]["outputs"]:
+        assert (project / rel).is_file()
+
+
+def test_chapter_visual_adapter_without_worker_raises(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
+    adapter = ChapterVisualAdapter()
+    ctx = _make_context(project, {"seqs": [1], "include_original": "none", "worker_provider": "manual"})
+    with pytest.raises(RuntimeError, match="worker"):
+        adapter.run(ctx, adapter.prepare(ctx))
+
+
 # --- ChapterStructureAdapter ----------------------------------------------
 
-def test_chapter_structure_adapter_touches_only_requested_seqs(project):
+def test_chapter_structure_adapter_touches_only_requested_seqs(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
     adapter = ChapterStructureAdapter()
     params = {"seqs": [2], "include_original": "none"}
     ctx = _make_context(project, params)
@@ -308,9 +481,10 @@ def test_chapter_structure_adapter_touches_only_requested_seqs(project):
     assert touched == [2]
 
 
-def test_chapter_structure_adapter_per_chapter_outputs_match_engine_helper(project):
+def test_chapter_structure_adapter_per_chapter_outputs_match_engine_helper(project, monkeypatch):
     from run_pipeline import chapter_structure_per_chapter_relpaths
 
+    _install_fake_workers(monkeypatch)
     adapter = ChapterStructureAdapter()
     params = {"seqs": [1, 2], "include_original": "none"}
     ctx = _make_context(project, params)
@@ -319,6 +493,30 @@ def test_chapter_structure_adapter_per_chapter_outputs_match_engine_helper(proje
     for record in result["manifest"]["packs"]:
         seq = record["seq"]
         assert record["outputs"] == chapter_structure_per_chapter_relpaths(seq)
+
+
+def test_chapter_structure_adapter_runs_worker_and_writes_outputs(project, monkeypatch):
+    calls = _install_fake_workers(monkeypatch)
+    from run_pipeline import chapter_structure_per_chapter_relpaths
+
+    adapter = ChapterStructureAdapter()
+    ctx = _make_context(project, {"seqs": [1, 2], "include_original": "none"})
+    adapter.run(ctx, adapter.prepare(ctx))
+
+    multi = [c for c in calls if c[0] == "run_multi"]
+    assert len(multi) == 2
+    assert all(c[1] == "chapter_structure" for c in multi)
+    for seq in (1, 2):
+        for rel in chapter_structure_per_chapter_relpaths(seq):
+            assert (project / rel).is_file()
+
+
+def test_chapter_structure_adapter_without_worker_raises(project, monkeypatch):
+    _install_fake_workers(monkeypatch)
+    adapter = ChapterStructureAdapter()
+    ctx = _make_context(project, {"seqs": [1], "include_original": "none", "worker_provider": "manual"})
+    with pytest.raises(RuntimeError, match="worker"):
+        adapter.run(ctx, adapter.prepare(ctx))
 
 
 # --- ChapterAnalysisRerunAdapter (writer) ---------------------------------

@@ -111,7 +111,7 @@ export function AnalysisWorkbenchTab({
         <label htmlFor="aw-orig">原文策略</label>
         <select id="aw-orig" aria-label="原文策略" value={originalText} onChange={(e) => setOriginalText(e.target.value)}>
           <option value="none">none</option>
-          <option value="summary">summary</option>
+          <option value="sample">sample</option>
           <option value="full">full</option>
         </select>
         <label htmlFor="aw-force">强制重跑</label>
