@@ -15,6 +15,7 @@ export default defineConfig({
     root: 'src/renderer',
     build: { rollupOptions: { input: { index: resolve(__dirname, 'src/renderer/index.html') } } },
     plugins: [react()],
-    resolve: { alias: { '@renderer': resolve(__dirname, 'src/renderer/src') } }
+    resolve: { alias: { '@renderer': resolve(__dirname, 'src/renderer/src') } },
+    server: { host: '127.0.0.1', port: 5173, strictPort: true }
   }
 })

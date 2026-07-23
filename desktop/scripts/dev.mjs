@@ -10,12 +10,35 @@
 // On non-Windows, just run electron-vite dev directly. CI / typecheck / build
 // use `npm run dev:direct` (always electron-vite dev) or the unchanged
 // `build`/`typecheck:*` scripts.
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
 
 const isWin = process.platform === 'win32'
 const passthrough = process.argv.slice(2)
 
+// Must match renderer.server.port in electron.vite.config.ts (strictPort).
+const DEV_PORT = 5173
+
+// Kill whatever is holding DEV_PORT so `strictPort` doesn't abort the
+// launch. 5173 is this project's strictPort-exclusive port, so any holder
+// is treated as stale and killed -- including processes that aren't this
+// project's own dev.
+function freePortIfStaleDev() {
+  if (!isWin) return
+  let pid
+  try {
+    const out = execSync(
+      `powershell -NoProfile -Command "(Get-NetTCPConnection -LocalPort ${DEV_PORT} -State Listen -ErrorAction SilentlyContinue).OwningProcess"`,
+      { encoding: 'utf8' }
+    )
+    pid = parseInt(out.trim(), 10)
+  } catch { return }
+  if (!pid || Number.isNaN(pid)) return
+  process.stderr.write(`[dev] killing stale process ${pid} on port ${DEV_PORT}\n`)
+  try { execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' }) } catch { /* ignore */ }
+}
+
 function runVite() {
+  freePortIfStaleDev()
   const child = spawn('electron-vite', ['dev', ...passthrough], {
     stdio: 'inherit',
     shell: true,
