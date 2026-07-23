@@ -2970,6 +2970,72 @@ def write_analysis_worker_pack(project_dir: Path, manifest_path: Path, record: D
     return out
 
 
+def write_fullbook_partial_worker_pack(
+    project_dir: Path,
+    manifest_path: Path,
+    pack_rel: str,
+    index: int,
+    total: int,
+    partial_path: Path,
+) -> Path:
+    """包装全书 analysis 的单个分包为 partial 执行的 worker pack。
+
+    全书 analysis 多包模式下，每个 pack_NNN.md 的“目标输出文件”段列的是最终
+    target_outputs（如 章节梗概汇总.md），但本阶段只要求 worker 产出本包的分批
+    结果 partial_result_NNN.md，最终汇总由 reduce 阶段完成。若不覆盖，worker 会在
+    “task pack 是权威”和“ND_EXPECTED_OUTPUT 指向 partial”之间产生歧义，可能直接
+    写最终目标文件而漏掉其余分包内容。本函数在原 pack 前加一段覆盖说明，明确告诉
+    worker 只写 partial_path。
+    """
+    pack_path = project_dir / pack_rel
+    if not pack_path.is_file():
+        raise FileNotFoundError(f"analysis pack not found: {pack_path}")
+    header = (
+        f"# 分批分析任务（第 {index}/{total} 包）\n\n"
+        f"本任务包是全书分析的**第 {index}/{total} 包**，只覆盖部分章节。"
+        f"请只产出**本包的分批结果**，写入：\n\n{partial_path}\n\n"
+        f"**不要**写最终目标文件（任务包内“目标输出文件”段列出的路径），"
+        f"那是 reduce 阶段的工作。reduce 会合并所有分包结果后再写最终目标文件。\n\n"
+        f"## 原任务包内容\n\n"
+    )
+    content = pack_path.read_text(encoding="utf-8", errors="ignore")
+    out = manifest_path.parent / f"worker_pack_{index:03d}.md"
+    out.write_text(header + content, encoding="utf-8")
+    return out
+
+
+def write_fullbook_reduce_worker_pack(
+    project_dir: Path,
+    manifest_path: Path,
+    partial_paths: List[Path],
+    target_outputs: List[Path],
+) -> Path:
+    """拼接 reduce_prompt + 所有 partial_result 为 reduce 阶段的 worker pack。
+
+    reduce 阶段把各分包的分批结果合并为最终报告，写入 target_outputs。worker pack
+    开头列出所有目标文件，随后附 reduce_prompt.md 契约和各 partial_result 内容。
+    """
+    manifest = load_json(manifest_path, {}) or {}
+    reduce_rel = manifest.get("reduce_prompt")
+    target_list = "\n".join(f"- {p}" for p in target_outputs)
+    parts: List[str] = [
+        "# Reduce 汇总任务\n\n",
+        "下面是 reduce_prompt 契约和各分包的分批结果。请合并为**最终报告**，"
+        f"分别写入以下目标文件：\n\n{target_list}\n\n",
+        "某项无内容时写“本书无对应内容”而非省略文件；不要凭空新增分批结果里"
+        "没有依据的内容；冲突结论标“待确认”。\n\n",
+    ]
+    if reduce_rel:
+        rp = project_dir / reduce_rel
+        if rp.is_file():
+            parts.append(f"## reduce_prompt\n\n{rp.read_text(encoding='utf-8', errors='ignore')}\n\n")
+    for i, p in enumerate(partial_paths, 1):
+        parts.append(f"## 分批结果 {i:03d}\n\n{p.read_text(encoding='utf-8', errors='ignore')}\n\n")
+    out = manifest_path.parent / "worker_pack_reduce.md"
+    out.write_text("".join(parts), encoding="utf-8")
+    return out
+
+
 def run_analysis_context_pack_for_auto(args: argparse.Namespace, task: str, seq: int = 0, aggregate: bool = False) -> int:
     project_dir = Path(args.project_dir)
     cmd = [

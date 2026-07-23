@@ -155,6 +155,15 @@ NARRATIVE_STRUCTURE_BACKGROUND_SPECS = [
     ("全书分析/剧情结构/剧情线交汇矩阵.md", "剧情线交汇矩阵"),
 ]
 
+# 结构类全书分析维度：结论靠故事结构元素 + 全书级中间产物回指，不需要每章完整分析MD。
+# 这些任务的 build_pack 不逐章堆砌章节材料，改用 build_structure_context 提供全书级素材 + 指引；
+# main 里也不按章分包（单包全书），pack_count=1，不走 partial/reduce。
+# 原文类（summary/style/detailed_outline/visual_assets）保持每章 build_chapter_block + 分包 + reduce。
+STRUCTURE_TASKS = frozenset({
+    "characters", "plot", "worldview", "settings", "plotlines",
+    "outline", "narrative_structure", "report",
+})
+
 
 def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[str, Any]], max_chars: int = 12000) -> str:
     """收集 narrative_structure 全书任务所需的上游材料。
@@ -196,6 +205,53 @@ def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[
             lines.append(f"【未生成 `{rel}`；narrative_structure 的对齐质量会受影响。】")
         lines.append("")
 
+    return "\n".join(lines)
+
+
+def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[str, Any]]) -> str:
+    """结构类全书分析的上下文：全书级中间产物 + 指引，不逐章堆砌章节分析MD。
+
+    结构类维度（STRUCTURE_TASKS）的结论靠故事结构元素和全书级中间产物回指，
+    不需要每章 1.2 万字分析MD。本函数按 task 收集相关全书级产物，并指引 worker
+    按需读 故事结构_增量.json 取元素详情。上游产物缺失时显式标注，不静默吞掉。
+    """
+    lines: List[str] = ["## 全书级分析材料", ""]
+
+    if task == "narrative_structure":
+        # narrative_structure 用专属 background（分章章节结构 + 章节梗概汇总 + 全书大纲 + 剧情线）
+        lines.append(build_narrative_structure_background(project_dir, chapters))
+        lines.append("")
+    else:
+        # 其他结构类：章节梗概汇总（每章约 500 字，全书级骨架）
+        summary_path = project_dir / "全书分析" / "剧情结构" / "章节梗概汇总.md"
+        lines.append("### 章节梗概汇总")
+        if summary_path.is_file() and summary_path.stat().st_size > 0:
+            lines.append("```markdown")
+            lines.append(read_text(summary_path, 50000))
+            lines.append("```")
+        else:
+            lines.append("【未生成 `章节梗概汇总.md`；建议先运行 `--task summary` 生成。本任务将主要依赖故事结构JSON摘要。】")
+        lines.append("")
+
+        if task == "report":
+            # report 综合所有前置全书分析产物（已生成的才收入）
+            for task_key, info in TASKS.items():
+                if task_key in {"report", "custom", "visual_assets", "chapter_structure"}:
+                    continue
+                for rel in info.get("outputs", []):
+                    path = project_dir / rel
+                    if path.is_file() and path.stat().st_size > 0:
+                        lines.append(f"### {info['name']}：{rel}")
+                        lines.append("```markdown")
+                        lines.append(read_text(path, 20000))
+                        lines.append("```")
+                        lines.append("")
+
+    lines.append("### 上下文指引")
+    lines.append("- 当前故事结构摘要已在上方列出（角色集/事件集/地点集/线索集/阵营集/物品集/其他事项集的元素与分组）。")
+    lines.append("- 如需元素详情（关系/介绍/详情/时间/涉及章节等），可读取项目根目录的 `故事结构_增量.json`。")
+    lines.append("- 所有结论必须回指章节号、原文片段或 `类型:名称` 元素；不确定写“待确认”。")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -827,13 +883,15 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
 
     lines.append(output_contract(task))
     lines.append("")
-    if task == "narrative_structure" and per_chapter_seq is None:
-        lines.append(build_narrative_structure_background(project_dir, chapters))
+    if task in STRUCTURE_TASKS and per_chapter_seq is None:
+        # 结构类全书分析：全书级素材 + 指引，不逐章堆砌章节分析MD/原文
+        lines.append(build_structure_context(project_dir, task, chapters))
         lines.append("")
-    lines.append("## 章节材料")
-    for ch in chapters:
-        lines.append(build_chapter_block(project_dir, ch, task, include_original, max_original_chars, max_analysis_chars))
-        lines.append("")
+    else:
+        lines.append("## 章节材料")
+        for ch in chapters:
+            lines.append(build_chapter_block(project_dir, ch, task, include_original, max_original_chars, max_analysis_chars))
+            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -895,15 +953,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    batches = split_batches(
-        chapters,
-        project_dir,
-        args.task,
-        args.include_original,
-        args.max_pack_chars,
-        args.max_original_chars,
-        args.max_analysis_chars,
-    )
+    if args.task in STRUCTURE_TASKS:
+        # 结构类全书分析：单包全书，不按章分包（无每章材料，靠全书级素材）
+        batches = [chapters]
+    else:
+        batches = split_batches(
+            chapters,
+            project_dir,
+            args.task,
+            args.include_original,
+            args.max_pack_chars,
+            args.max_original_chars,
+            args.max_analysis_chars,
+        )
 
     pack_files = []
     for i, batch in enumerate(batches, 1):

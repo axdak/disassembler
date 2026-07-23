@@ -285,3 +285,84 @@ def test_narrative_structure_per_chapter_does_not_inject_background(tmp_path):
     chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
     pack = build_pack(project, "narrative_structure", chapters, [], "", "sample", 6000, 12000, 1, 1, per_chapter_seq=1)
     assert "## 全书背景资料" not in pack
+
+
+def test_structure_task_pack_uses_global_material_not_per_chapter(tmp_path):
+    """结构类全书任务包用全书级材料，不堆砌每章章节分析MD。"""
+    from analysis_context_pack import build_pack
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "全书分析/剧情结构").mkdir(parents=True)
+    (project / "全书分析/剧情结构/章节梗概汇总.md").write_text("| 章节 | 梗概 |\n| 001 | 序章 |\n", encoding="utf-8")
+    (project / "原文拆解/第001章_序章.md").write_text("# 序章\n原文", encoding="utf-8")
+    (project / "章节处理/第001章_序章.md").write_text("# 序章\n分析MD内容", encoding="utf-8")
+
+    chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
+    pack = build_pack(project, "plot", chapters, [], "", "sample", 6000, 12000, 1, 1)
+    assert "## 全书级分析材料" in pack
+    assert "## 章节材料" not in pack
+    # 不应包含每章分析MD内容（结构类不逐章堆砌）
+    assert "分析MD内容" not in pack
+    assert "章节梗概汇总" in pack
+    assert "上下文指引" in pack
+
+
+def test_source_text_task_pack_still_includes_per_chapter_material(tmp_path):
+    """原文类任务包仍逐章堆砌章节材料。"""
+    from analysis_context_pack import build_pack
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "原文拆解/第001章_序章.md").write_text("# 序章\n原文", encoding="utf-8")
+    (project / "章节处理/第001章_序章.md").write_text("# 序章\n分析MD内容", encoding="utf-8")
+
+    chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
+    pack = build_pack(project, "summary", chapters, [], "", "sample", 6000, 12000, 1, 1)
+    assert "## 章节材料" in pack
+    assert "分析MD内容" in pack
+
+
+def test_report_pack_collects_existing_upstream_artifacts(tmp_path):
+    """report 任务包收集已生成的前置全书分析产物。"""
+    from analysis_context_pack import build_pack
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "全书分析/剧情结构").mkdir(parents=True)
+    (project / "全书分析/世界观").mkdir(parents=True)
+    (project / "全书分析/剧情结构/章节梗概汇总.md").write_text("| 001 | 序章 |\n", encoding="utf-8")
+    (project / "全书分析/世界观/世界观档案.md").write_text("# 世界观\n内容", encoding="utf-8")
+    (project / "原文拆解/第001章_序章.md").write_text("# 序章\n", encoding="utf-8")
+    (project / "章节处理/第001章_序章.md").write_text("# 序章\n", encoding="utf-8")
+
+    chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
+    pack = build_pack(project, "report", chapters, [], "", "sample", 6000, 12000, 1, 1)
+    assert "## 全书级分析材料" in pack
+    assert "世界观档案.md" in pack
+    assert "## 章节材料" not in pack
+
+
+def test_structure_task_main_generates_single_pack(tmp_path):
+    """结构类全书任务 main 生成单包（pack_count=1），不按章分包。"""
+    from analysis_context_pack import main as cli_main
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "原文拆解/_索引.json").write_text(
+        '{"chapters":[{"seq":1,"filename":"第001章_序章.md","title":"序章"},'
+        '{"seq":2,"filename":"第002章_相遇.md","title":"相遇"}]}',
+        encoding="utf-8",
+    )
+    for fn in ("第001章_序章.md", "第002章_相遇.md"):
+        (project / "原文拆解" / fn).write_text(f"# {fn}\n原文", encoding="utf-8")
+        (project / "章节处理" / fn).write_text(f"# {fn}\n分析", encoding="utf-8")
+
+    rc = cli_main([str(project), "--task", "plot", "--chapters", "all", "--include-original", "none"])
+    assert rc == 0
+    pack_root = project / "全书分析" / "_任务包"
+    runs = list(pack_root.glob("*_plot"))
+    assert len(runs) == 1, runs
+    manifest = json.loads((runs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pack_count"] == 1
+    assert manifest["chapters"] == [1, 2]
