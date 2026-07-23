@@ -316,7 +316,7 @@ def test_legacy_run_and_workbench_writer_exclude_each_other_without_losing_queue
         assert run_manager.cancel(project["id"]) is True
         wait_for(lambda: db.get_task(task["id"])["status"] == "running")
         wait_for(lambda: task["id"] in gates)
-        with pytest.raises(RuntimeError, match="writer active"):
+        with pytest.raises(RuntimeError, match="writer 活跃中"):
             run_manager.start(project["id"], RunConfig())
 
         gates[task["id"]].set()
@@ -347,7 +347,7 @@ def test_chapter_analysis_rerun_blocks_legacy_automatic_run(tmp_path):
     try:
         task = manager.create(project["id"], "chapter_analysis_rerun", {})
         wait_for(lambda: db.get_task(task["id"])["status"] == "running")
-        with pytest.raises(RuntimeError, match="writer active"):
+        with pytest.raises(RuntimeError, match="writer 活跃中"):
             run_manager.start(project["id"], RunConfig())
     finally:
         for gate in gates.values():
@@ -808,5 +808,5 @@ def test_shutdown_cancels_active_work_and_stops_admission(manager_env):
 
     assert db.get_task(task["id"])["status"] == "cancelled"
     assert writer_factory.instances[0].cancel_called.is_set()
-    with pytest.raises(RuntimeError, match="shut down"):
+    with pytest.raises(RuntimeError, match="已关闭"):
         manager.create(p1["id"], "governance", {})

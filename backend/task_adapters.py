@@ -155,7 +155,7 @@ def _parse_governance_chapters(project_dir: Path, chapters: str) -> tuple[int, i
     if chapters in ("", "all"):
         start, end = _chapter_index_seq_range(project_dir)
         if end < start:
-            raise ValueError("governance 'all' requires chapters in the project index")
+            raise ValueError("governance 'all' 需要项目索引中存在章节")
         return start, end
     if chapters == "recent":
         unresolved = unresolved_audits(Path(project_dir))
@@ -166,14 +166,14 @@ def _parse_governance_chapters(project_dir: Path, chapters: str) -> tuple[int, i
                 return int(start), int(end)
         start, end = _chapter_index_seq_range(project_dir)
         if end < start:
-            raise ValueError("governance 'recent' has no unaudited chapters and no index")
+            raise ValueError("governance 'recent' 没有未审计的章节且无索引")
         return start, end
     m = re.match(r"^(\d+)\s*-\s*(\d+)$", chapters)
     if not m:
-        raise ValueError(f"governance 'chapters' must be all/recent/N-M, got: {chapters!r}")
+        raise ValueError(f"governance 'chapters' 必须为 all/recent/N-M，实际为: {chapters!r}")
     start, end = int(m.group(1)), int(m.group(2))
     if end < start:
-        raise ValueError(f"governance 'chapters' requires start <= end: {chapters!r}")
+        raise ValueError(f"governance 'chapters' 要求 start <= end: {chapters!r}")
     return start, end
 
 
@@ -294,7 +294,7 @@ class AnalysisAdapter:
             worker_window = parsed["worker_window"]
             pack_count = len(packs)
             if pack_count == 0:
-                raise RuntimeError(f"analysis manifest has no packs: {manifest_path}")
+                raise RuntimeError(f"analysis manifest 没有 packs: {manifest_path}")
             if pack_count == 1:
                 pack_rel = packs[0] if isinstance(packs[0], str) else packs[0].get("pack")
                 pack_path = project_dir / pack_rel
@@ -304,7 +304,7 @@ class AnalysisAdapter:
                     timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                 )
                 if rc != 0:
-                    raise RuntimeError(f"analysis worker failed rc={rc}")
+                    raise RuntimeError(f"analysis worker 失败 rc={rc}")
             else:
                 partial_paths: list[Path] = []
                 for index, pack in enumerate(packs, 1):
@@ -319,7 +319,7 @@ class AnalysisAdapter:
                         timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                     )
                     if rc != 0:
-                        raise RuntimeError(f"analysis pack {index} worker failed rc={rc}")
+                        raise RuntimeError(f"analysis pack {index} worker 失败 rc={rc}")
                     partial_paths.append(partial_path)
                 reduce_pack = write_fullbook_reduce_worker_pack(
                     project_dir, manifest_path, partial_paths, target_outputs
@@ -330,7 +330,7 @@ class AnalysisAdapter:
                     timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                 )
                 if rc != 0:
-                    raise RuntimeError(f"analysis reduce worker failed rc={rc}")
+                    raise RuntimeError(f"analysis reduce worker 失败 rc={rc}")
             for out in target_outputs:
                 artifacts.append({"name": out.name, "path": str(out)})
 
@@ -365,7 +365,7 @@ class ChapterVisualAdapter:
         params = context.params or {}
         seqs = params.get("seqs") or []
         if not seqs:
-            raise ValueError("chapter_visual requires a non-empty 'seqs' list")
+            raise ValueError("chapter_visual 需要非空 'seqs' 列表")
         seqs = [int(s) for s in seqs]
         aggregate = _bool_param(params, "aggregate", default=False)
         include_original = _str_param(params, "include_original", "original", default="sample")
@@ -409,7 +409,7 @@ class ChapterVisualAdapter:
                         timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                     )
                     if rc != 0:
-                        raise RuntimeError(f"visual_assets aggregate worker failed rc={rc}")
+                        raise RuntimeError(f"visual_assets aggregate worker 失败 rc={rc}")
                 artifacts.append({"name": "manifest", "path": str(manifest_path)})
                 for out in target_outputs:
                     artifacts.append({"name": out.name, "path": str(out)})
@@ -465,7 +465,7 @@ class ChapterVisualAdapter:
                     timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                 )
                 if rc != 0:
-                    raise RuntimeError(f"visual_assets ch{seq:03d} worker failed rc={rc}")
+                    raise RuntimeError(f"visual_assets ch{seq:03d} worker 失败 rc={rc}")
                 for out in expected_outputs:
                     artifacts.append({"name": out.name, "path": str(out)})
             context.progress(100, "per-chapter complete")
@@ -498,7 +498,7 @@ class ChapterStructureAdapter:
         params = context.params or {}
         seqs = params.get("seqs") or []
         if not seqs:
-            raise ValueError("chapter_structure requires a non-empty 'seqs' list")
+            raise ValueError("chapter_structure 需要非空 'seqs' 列表")
         seqs = [int(s) for s in seqs]
         include_original = _str_param(params, "include_original", "original", default="sample")
         max_pack_chars = _int_param(params, "max_pack_chars", 70000)
@@ -551,7 +551,7 @@ class ChapterStructureAdapter:
                     timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                 )
                 if rc != 0:
-                    raise RuntimeError(f"chapter_structure ch{seq:03d} worker failed rc={rc}")
+                    raise RuntimeError(f"chapter_structure ch{seq:03d} worker 失败 rc={rc}")
                 for out in expected_outputs:
                     artifacts.append({"name": out.name, "path": str(out)})
             revision = project_revisions(project_dir)
@@ -583,7 +583,7 @@ class ChapterAnalysisRerunAdapter:
         params = context.params or {}
         seqs = params.get("seqs") or []
         if not seqs:
-            raise ValueError("chapter_analysis_rerun requires a non-empty 'seqs' list")
+            raise ValueError("chapter_analysis_rerun 需要非空 'seqs' 列表")
         seqs = [int(s) for s in seqs]
         force = _bool_param(params, "force", default=False)
         project_dir = Path(context.project_path)
@@ -619,7 +619,7 @@ class ChapterDeltaRerunAdapter:
         params = context.params or {}
         seqs = params.get("seqs") or []
         if not seqs:
-            raise ValueError("chapter_delta_rerun requires a non-empty 'seqs' list")
+            raise ValueError("chapter_delta_rerun 需要非空 'seqs' 列表")
         seqs = [int(s) for s in seqs]
         force = _bool_param(params, "force", default=False)
         project_dir = Path(context.project_path)
@@ -715,7 +715,7 @@ class ExportAdapter:
         else:
             candidate = project_dir / "故事结构.json"
         if not candidate.is_file():
-            raise FileNotFoundError(f"story structure file not found: {candidate}")
+            raise FileNotFoundError(f"story structure 文件未找到: {candidate}")
         return candidate
 
     @staticmethod
@@ -860,7 +860,7 @@ class GovernanceTaskAdapter:
         end = int(params.get("end", params.get("seq_end", 0)))
         if end < start:
             raise ValueError(
-                "governance requires 'chapters' (all/recent/N-M) or explicit 'start'<='end'"
+                "governance 需要 'chapters' (all/recent/N-M) 或显式的 'start'<='end'"
             )
         return start, end
 
@@ -906,7 +906,7 @@ class GovernanceTaskAdapter:
             force=force, max_context_chars=max_context_chars,
         )
         if rc != 0:
-            raise RuntimeError(f"audit pack preparation failed rc={rc}")
+            raise RuntimeError(f"audit pack 准备失败 rc={rc}")
 
         paths = audit_paths(project_dir, start, end)
         correction_path = paths["correction"]
@@ -922,7 +922,7 @@ class GovernanceTaskAdapter:
                     worker_command = builtin_agent_worker_command(provider)
             if not worker_command:
                 raise RuntimeError(
-                    f"governance correction missing and no worker_command provided: {correction_path}"
+                    f"governance correction 缺失且未提供 worker_command: {correction_path}"
                 )
             context.progress(30, "running audit correction worker")
             rc = run_worker(
@@ -931,13 +931,13 @@ class GovernanceTaskAdapter:
                 timeout=worker_timeout, retries=0, worker_window=worker_window,
             )
             if rc != 0:
-                raise RuntimeError(f"audit correction worker failed rc={rc}")
+                raise RuntimeError(f"audit correction worker 失败 rc={rc}")
 
         context.progress(60, "committing governance patch")
         rc = commit_governance(project_dir, str(correction_path))
         if rc != 0:
             # commit_governance has already restored the before snapshot.
-            raise RuntimeError(f"governance commit failed rc={rc}")
+            raise RuntimeError(f"governance commit 失败 rc={rc}")
 
         status = audit_status(project_dir, start, end)
         before = status.get("before", "") or ""
@@ -984,7 +984,7 @@ class NormalizeAdapter:
         project_dir = Path(context.project_path)
         story_path = project_dir / "故事结构_增量.json"
         if not story_path.is_file():
-            raise RuntimeError("故事结构_增量.json not found")
+            raise RuntimeError("故事结构_增量.json 未找到")
         data = json.loads(story_path.read_text(encoding="utf-8"))
         context.progress(40, "normalizing story schema")
         normalized, logs = normalize_structure(data, quarantine_invalid_refs=False)
@@ -1011,7 +1011,7 @@ class MigrateChronologyAdapter:
         context.progress(30, "migrating chronology")
         rc = run_migrate(project_dir, dry_run=dry_run)
         if rc != 0:
-            raise RuntimeError(f"chronology migration failed rc={rc}")
+            raise RuntimeError(f"chronology migration 失败 rc={rc}")
         report = project_dir / "质量治理" / "规范化" / "chronology_migration.txt"
         return _result_json(
             artifacts=[str(report)] if report.is_file() else [],
@@ -1060,10 +1060,10 @@ class RecoverStoryAdapter:
         project_dir = Path(context.project_path)
         snapshot_seq = _int_param(params, "snapshot_seq", 0)
         if snapshot_seq <= 0:
-            raise ValueError("recover_story requires 'snapshot_seq'")
+            raise ValueError("recover_story 需要 'snapshot_seq'")
         available = {s["snapshot_seq"] for s in list_recover_snapshots(project_dir)}
         if snapshot_seq not in available:
-            raise RuntimeError(f"snapshot seq {snapshot_seq} not found")
+            raise RuntimeError(f"snapshot seq {snapshot_seq} 未找到")
         before = project_dir / "故事结构_增量.json"
         before_bytes = before.read_bytes() if before.is_file() else b""
         context.progress(20, f"recovering to snapshot seq={snapshot_seq}")
@@ -1071,7 +1071,7 @@ class RecoverStoryAdapter:
         if rc != 0:
             if before_bytes:
                 before.write_bytes(before_bytes)
-            raise RuntimeError(f"recover_story failed rc={rc}")
+            raise RuntimeError(f"recover_story 失败 rc={rc}")
         context.progress(90, "recovery complete")
         return _result_json(
             artifacts=[str(before)],
@@ -1106,13 +1106,13 @@ class AppendChaptersTaskAdapter:
         params = context.params or {}
         plan = params.get("plan")
         if not isinstance(plan, dict):
-            raise ValueError("append_chapters requires a 'plan' (preview first)")
+            raise ValueError("append_chapters 需要 'plan'（先预览）")
         if plan.get("conflict"):
             raise ValueError(
-                f"append_chapters plan has a prefix conflict: {plan['conflict'].get('message', '')}"
+                f"append_chapters plan 存在前缀冲突: {plan['conflict'].get('message', '')}"
             )
         if not plan.get("appended"):
-            raise ValueError("append_chapters plan has no new chapters to append")
+            raise ValueError("append_chapters plan 没有新章节可追加")
 
         project_dir = Path(context.project_path)
 
@@ -1189,7 +1189,7 @@ class FinalizeAdapter:
         context.progress(10, "final pack")
         rc = cmd_final_pack(project_dir)
         if rc != 0:
-            raise RuntimeError(f"final_pack failed rc={rc}")
+            raise RuntimeError(f"final_pack 失败 rc={rc}")
         if worker_command:
             context.progress(30, "final draft worker")
             rc = run_worker(
@@ -1199,7 +1199,7 @@ class FinalizeAdapter:
                 worker_window=worker_window,
             )
             if rc != 0:
-                raise RuntimeError(f"final_draft worker failed rc={rc}")
+                raise RuntimeError(f"final_draft worker 失败 rc={rc}")
 
         context.progress(60, "commit final draft")
         for _ in range(4):
@@ -1208,11 +1208,11 @@ class FinalizeAdapter:
                 break
             if not repair.is_file():
                 raise RuntimeError(
-                    f"commit_final_draft failed rc={rc} (no repair task)"
+                    f"commit_final_draft 失败 rc={rc}（无 repair 任务）"
                 )
             if not worker_command:
                 raise RuntimeError(
-                    f"commit_final_draft failed rc={rc} and no worker_command"
+                    f"commit_final_draft 失败 rc={rc} 且无 worker_command"
                 )
             wrc = run_worker(
                 worker_command, project_dir, "repair_final",
@@ -1221,18 +1221,18 @@ class FinalizeAdapter:
                 worker_window=worker_window,
             )
             if wrc != 0:
-                raise RuntimeError("repair_final worker failed")
+                raise RuntimeError("repair_final worker 失败")
         else:
-            raise RuntimeError("commit_final_draft did not converge")
+            raise RuntimeError("commit_final_draft 未收敛")
 
         context.progress(80, "validate final")
         rc = cmd_validate_final(project_dir)
         if rc != 0:
-            raise RuntimeError(f"validate_final failed rc={rc}")
+            raise RuntimeError(f"validate_final 失败 rc={rc}")
         context.progress(95, "finalize")
         rc = cmd_finalize(project_dir)
         if rc != 0:
-            raise RuntimeError(f"finalize failed rc={rc}")
+            raise RuntimeError(f"finalize 失败 rc={rc}")
         final = project_dir / "故事结构.json"
         context.progress(100, "finalize complete")
         return _result_json(

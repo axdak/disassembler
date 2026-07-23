@@ -92,7 +92,7 @@ def test_list_recover_snapshots_is_readonly_and_reports_seq(project):
 def test_recover_story_adapter_rejects_missing_snapshot(project):
     adapter = RecoverStoryAdapter()
     ctx = _make_context(project, {"snapshot_seq": 999})
-    with pytest.raises(RuntimeError, match="snapshot seq 999 not found"):
+    with pytest.raises(RuntimeError, match="snapshot seq 999 未找到"):
         adapter.run(ctx)
 
 

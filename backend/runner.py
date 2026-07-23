@@ -76,14 +76,14 @@ class RunManager:
 
     def start(self, project_id: int, run_config: RunConfig) -> int:
         if self.is_running(project_id):
-            raise RuntimeError(f"project {project_id} already running")
+            raise RuntimeError(f"项目 {project_id} 已在运行")
         writer_owner = object()
         if not self.writer_coordinator.try_acquire(project_id, writer_owner):
-            raise RuntimeError(f"project {project_id} writer active")
+            raise RuntimeError(f"项目 {project_id} writer 活跃中")
         project = self.db.get_project(project_id)
         if not project:
             self.writer_coordinator.release(project_id, writer_owner)
-            raise KeyError(f"project {project_id} not found")
+            raise KeyError(f"项目 {project_id} 未找到")
         run_id = None
         try:
             config = runconfig_to_config(run_config)

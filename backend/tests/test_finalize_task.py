@@ -133,7 +133,7 @@ def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path)
     (empty 介绍.标题/描述) so the repair loop is required. With
     ``worker_provider="manual"`` and no explicit ``worker_command``, the
     adapter's auto-resolve is suppressed (no worker available), so the run
-    must raise RuntimeError citing "commit_final_draft failed ... and no
+    must raise RuntimeError citing "commit_final_draft 失败 ... 且无
     worker_command" - the exact path MaintenanceTab would hit in production
     without the auto-resolve fix.
     """
@@ -143,5 +143,5 @@ def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path)
     with pytest.raises(RuntimeError) as excinfo:
         adapter.run(ctx)
     msg = str(excinfo.value)
-    assert "commit_final_draft failed" in msg
-    assert "no worker_command" in msg
+    assert "commit_final_draft 失败" in msg
+    assert "无 worker_command" in msg

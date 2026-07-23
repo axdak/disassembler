@@ -253,7 +253,7 @@ class Database:
                     retry_of: Any = _UNSET,
                     started_at: Any = _UNSET, ended_at: Any = _UNSET) -> Optional[dict]:
         if status is not None and status not in TASK_STATUSES:
-            raise ValueError(f"invalid task status: {status}")
+            raise ValueError(f"无效的任务状态: {status}")
         fields, values = [], []
         if status is not None:
             fields.append("status=?")

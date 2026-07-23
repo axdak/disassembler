@@ -147,14 +147,14 @@ class WorkbenchTaskManager:
 
     def create(self, project_id: int, task_type: str, params: dict) -> dict:
         if self._shutdown.is_set():
-            raise RuntimeError("workbench manager is shut down")
+            raise RuntimeError("workbench manager 已关闭")
         project = self.db.get_project(project_id)
         if not project:
-            raise KeyError(f"project {project_id} not found")
+            raise KeyError(f"项目 {project_id} 未找到")
         if task_type not in self.adapters:
-            raise ValueError(f"no adapter registered for task type: {task_type}")
+            raise ValueError(f"没有为任务类型注册适配器: {task_type}")
         if not isinstance(params, dict):
-            raise ValueError("task params must be an object")
+            raise ValueError("task params 必须是对象")
         task = self.db.create_task(
             project_id, task_type, dict(params), project_revisions(Path(project["path"]))
         )
@@ -174,7 +174,7 @@ class WorkbenchTaskManager:
         with self._lock:
             task = self.db.get_task(task_id)
             if not task:
-                raise KeyError(f"task {task_id} not found")
+                raise KeyError(f"任务 {task_id} 未找到")
             if task["status"] in TERMINAL_TASK_STATUSES:
                 return self._serialize(task)
             self.db.request_task_cancel(task_id)
@@ -199,15 +199,15 @@ class WorkbenchTaskManager:
 
     def retry(self, task_id: int) -> dict:
         if self._shutdown.is_set():
-            raise RuntimeError("workbench manager is shut down")
+            raise RuntimeError("workbench manager 已关闭")
         original = self.db.get_task(task_id)
         if not original:
-            raise KeyError(f"task {task_id} not found")
+            raise KeyError(f"任务 {task_id} 未找到")
         if original["status"] not in TERMINAL_TASK_STATUSES:
-            raise ValueError("only terminal tasks can be retried")
+            raise ValueError("仅终态任务可重试")
         project = self.db.get_project(original["project_id"])
         if not project:
-            raise KeyError(f"project {original['project_id']} not found")
+            raise KeyError(f"项目 {original['project_id']} 未找到")
         task = self.db.create_task(
             original["project_id"],
             original["task_type"],
@@ -367,7 +367,7 @@ class WorkbenchTaskManager:
         try:
             project = self.db.get_project(task["project_id"])
             if not project:
-                raise KeyError(f"project {task['project_id']} not found")
+                raise KeyError(f"项目 {task['project_id']} 未找到")
             context = TaskContext(
                 task_id=task["id"],
                 project_id=task["project_id"],
@@ -389,7 +389,7 @@ class WorkbenchTaskManager:
             else:
                 result = adapter.run(context)
             if not isinstance(result, dict):
-                raise TypeError("task adapter result must be a dict")
+                raise TypeError("task adapter result 必须是 dict")
             if cancellation_event.is_set() or self.db.get_task(task["id"])["cancel_requested"]:
                 saved = self.db.update_task(
                     task["id"], status="cancelled", result=result, ended_at=_now_iso()
