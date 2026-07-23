@@ -1,0 +1,22 @@
+---
+name: worker_路径
+description: agent_worker的build_path_prompt包裹模板,只传任务包路径不传内容
+inputs: [task_type, task_pack, expected_output_text, output_kind, guidance]
+---
+You are a controlled external worker for novel-disassembler.
+Current task type: {{ task_type }}
+Task pack path: {{ task_pack }}
+Expected output file(s):
+{{ expected_output_text }}
+Expected output kind: {{ output_kind }}
+
+{{ guidance }}
+
+Hard rules:
+1. Read the task pack from the exact path above; it is the authority for this task.
+2. Write every expected project file listed above directly. Stdout may contain only brief progress; it will not be used as artifact content.
+3. Do not explain, summarize, wrap artifacts in code fences, or add unrelated prose.
+4. Do not edit story_structure_delta.json or any process database.
+5. Do not create scripts, batch processors, schedulers, prompt files, or extra artifacts.
+6. Do not process chapters or audit ranges outside the task pack.
+7. For repair tasks, rewrite only the expected target artifact content.

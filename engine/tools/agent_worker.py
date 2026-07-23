@@ -18,6 +18,9 @@ import tempfile
 from pathlib import Path
 from typing import List
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from prompt_loader import render_prompt
+
 
 PROVIDER_ORDER = ["agy", "codebuddy"]
 UNSUPPORTED_NODE_OPTIONS = ("--use-system-ca",)
@@ -171,28 +174,16 @@ def build_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path], 
             "Write every expected project file listed above directly. Stdout may contain only brief progress; "
             "it will not be used as artifact content."
         )
-    return f"""You are a controlled external worker for novel-disassembler.
-Current task type: {task_type}
-Task pack path: {task_pack}
-Expected output file(s):
-{expected_output_text}
-Expected output kind: {output_kind}
-
-{task_guidance(task_type)}
-
-Hard rules:
-1. Read and follow the task pack below; it is the authority for this task.
-2. {output_rule}
-3. Do not explain, summarize, wrap artifacts in code fences, or add unrelated prose.
-4. Do not edit story_structure_delta.json or any process database.
-5. Do not create scripts, batch processors, schedulers, or extra artifacts.
-6. Do not process chapters or audit ranges outside the task pack.
-7. For repair tasks, rewrite only the expected target artifact content.
-
-Task pack:
-
-{task_text}
-"""
+    return render_prompt(
+        "工作包/worker_内容.j2",
+        task_type=task_type,
+        task_pack=task_pack,
+        expected_output_text=expected_output_text,
+        output_kind=output_kind,
+        output_rule=output_rule,
+        guidance=task_guidance(task_type),
+        task_text=task_text,
+    )
 
 
 def build_path_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path]) -> str:
@@ -201,24 +192,14 @@ def build_path_prompt(task_type: str, task_pack: Path, expected_outputs: List[Pa
         output_kind = "JSON" if expected_outputs[0].suffix.lower() == ".json" else "Markdown"
     else:
         output_kind = "project files"
-    return f"""You are a controlled external worker for novel-disassembler.
-Current task type: {task_type}
-Task pack path: {task_pack}
-Expected output file(s):
-{expected_output_text}
-Expected output kind: {output_kind}
-
-{task_guidance(task_type)}
-
-Hard rules:
-1. Read the task pack from the exact path above; it is the authority for this task.
-2. Write every expected project file listed above directly. Stdout may contain only brief progress; it will not be used as artifact content.
-3. Do not explain, summarize, wrap artifacts in code fences, or add unrelated prose.
-4. Do not edit story_structure_delta.json or any process database.
-5. Do not create scripts, batch processors, schedulers, prompt files, or extra artifacts.
-6. Do not process chapters or audit ranges outside the task pack.
-7. For repair tasks, rewrite only the expected target artifact content.
-"""
+    return render_prompt(
+        "工作包/worker_路径.j2",
+        task_type=task_type,
+        task_pack=task_pack,
+        expected_output_text=expected_output_text,
+        output_kind=output_kind,
+        guidance=task_guidance(task_type),
+    )
 
 
 def required_env(name: str) -> str:
