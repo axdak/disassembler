@@ -132,7 +132,7 @@ STRUCTURAL_REF_FIELDS = {
     "其他事项集": [],
 }
 
-TAXONOMY_PATH = Path(__file__).resolve().parents[1] / "references" / "narrative_taxonomy.json"
+TAXONOMY_PATH = Path(__file__).resolve().parents[1] / "schemas" / "narrative_taxonomy.json"
 with TAXONOMY_PATH.open("r", encoding="utf-8") as f:
     NARRATIVE_TAXONOMY: Dict[str, List[str]] = json.load(f)
 

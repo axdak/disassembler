@@ -169,7 +169,7 @@ STRUCTURE_TASKS = frozenset({
 def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[str, Any]], max_chars: int = 12000) -> str:
     """收集 narrative_structure 全书任务所需的上游材料。
 
-    优先级（与 `references/analysis_narrative_structure.md` 一致）：
+    优先级：
     分章 章节结构.md > 章节梗概汇总 > 全书大纲 > 剧情线总表 > 剧情线交汇矩阵
 
     上游产物缺失时显式标注「未生成」，不静默吞掉。

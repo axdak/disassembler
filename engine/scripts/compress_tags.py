@@ -33,7 +33,7 @@ from story_schema_rules import (
 )
 
 
-DEFAULT_LIMITS_PATH = Path(__file__).resolve().parent.parent / "references" / "tag_limits.json"
+DEFAULT_LIMITS_PATH = Path(__file__).resolve().parent.parent / "schemas" / "tag_limits.json"
 FALLBACK_LIMIT = 8
 
 
@@ -218,7 +218,7 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--delta", help="处理单章 Delta JSON")
     group.add_argument("--structure", help="处理过程库或最终故事结构 JSON")
-    parser.add_argument("--limits", help="覆盖 references/tag_limits.json")
+    parser.add_argument("--limits", help="覆盖 schemas/tag_limits.json")
     parser.add_argument("--report", help="写入改写明细到该 JSON 文件")
     args = parser.parse_args()
 

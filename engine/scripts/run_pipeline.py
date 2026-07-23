@@ -1161,7 +1161,7 @@ def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, sta
     return res
 
 
-# Delta 提取器故事上下文分级阈值，见 references/delta_extraction.md
+# Delta 提取器故事上下文分级阈值
 # 「增量JSON膨胀应对」表。按故事 JSON 字节数选择输入策略，避免随章节累积
 # 把整本故事塞给 Delta 提取器。
 DELTA_FULL_STORY_KB = 80
@@ -1267,7 +1267,7 @@ def _main_factions_detail(data: dict, protos: List[dict]) -> str:
 
 
 def build_delta_story_context(story: Path, project_dir: Path, chapter_seq: int) -> str:
-    """按 references/delta_extraction.md 的分级策略构造 Delta 提取器的故事上下文。
+    """按分级策略构造 Delta 提取器的故事上下文。
 
     | 故事 JSON 大小 | 输入策略 |
     | < 80KB         | 完整故事 JSON |
@@ -1340,7 +1340,7 @@ def write_audit_pack(
             "delta_text": read_audit_evidence(p["delta"]),
         })
 
-    taxonomy_path = Path(__file__).resolve().parent.parent / "references" / "narrative_taxonomy.json"
+    taxonomy_path = Path(__file__).resolve().parent.parent / "schemas" / "narrative_taxonomy.json"
     taxonomy_json = taxonomy_path.read_text(encoding="utf-8", errors="ignore") if taxonomy_path.is_file() else ""
     previous_correction = get_previous_correction(project_dir, start)
     current_evidence_chars = sum(
