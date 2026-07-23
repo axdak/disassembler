@@ -35,7 +35,7 @@ from story_schema_rules import COLLECTION_KEYS
 from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from prompt_loader import render_prompt
 
 
 def _ensure_utf8_console() -> None:
@@ -54,22 +54,6 @@ def _ensure_utf8_console() -> None:
 
 
 _ensure_utf8_console()
-
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-_JINJA_ENV = Environment(
-    loader=FileSystemLoader(str(PROMPTS_DIR)),
-    undefined=StrictUndefined,
-    keep_trailing_newline=True,
-)
-
-
-def render_prompt(name: str, **context: Any) -> str:
-    """渲染 prompts/<name>.j2 任务包模板。
-
-    所有任务包都从 prompts/ 单一来源生成，避免脚本和模板漂移。
-    缺变量时 StrictUndefined 立刻报错，不静默渲染成空。
-    """
-    return _JINJA_ENV.get_template(name).render(**context)
 
 REQUIRED_DIRS = [
     "原文", "原文拆解", "章节处理", "章节处理/_任务包", "章节处理/_修复任务",
