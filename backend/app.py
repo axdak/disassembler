@@ -121,9 +121,12 @@ def create_app(
             adapter.manager = app.state.workbench
 
     def resolve_run_config(override: Optional[RunConfig]) -> RunConfig:
-        # 存档设置作为默认值，调用方覆盖（前端通常传空 config，需靠这里注入设置）。
+        # 存档设置作为默认值，调用方显式传入的字段覆盖（前端通常传空 config，需靠这里注入设置）。
         merged: dict = {**app.state.db.all_settings()}
-        merged.update((override or RunStart().config).model_dump())
+        # 只用调用方显式设置的字段覆盖；空 config(全默认实例)经 exclude_unset 后为空 dict，
+        # 不会把 settings 里的 chapter_mode/analysis_concurrency 等回退成 RunConfig 默认值。
+        override_cfg = override or RunStart().config
+        merged.update(override_cfg.model_dump(exclude_unset=True))
         return RunConfig(**{k: v for k, v in merged.items() if k in RunConfig.model_fields})
 
     def require_token(request: Request) -> None:

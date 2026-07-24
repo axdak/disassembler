@@ -91,6 +91,29 @@ def test_run_lifecycle_and_events(client, auth, tmp_path):
     assert "run_status" in types
 
 
+def test_run_config_merges_settings(client, auth, tmp_path):
+    # 前端通常传空 config，settings 必须作为默认值注入，且不被 RunConfig 默认值覆盖。
+    client.put("/settings", json={"settings": {
+        "chapter_mode": "interleaved",
+        "analysis_concurrency": 5,
+    }}, headers=auth)
+    pid = client.post("/projects", json={"path": str(tmp_path / "proj")}, headers=auth).json()["id"]
+
+    # 空 config：应使用 settings 的 interleaved/5
+    rid = client.post(f"/projects/{pid}/run", json={"config": {}}, headers=auth).json()["run_id"]
+    _wait_done(client, pid, auth)
+    cfg = client.app.state.db.get_run(rid)["config"]
+    assert cfg["chapter_mode"] == "interleaved"
+    assert cfg["analysis_concurrency"] == 5
+
+    # 显式字段覆盖 settings，未覆盖字段仍沿用 settings
+    rid2 = client.post(f"/projects/{pid}/run", json={"config": {"chapter_mode": "two_phase"}}, headers=auth).json()["run_id"]
+    _wait_done(client, pid, auth)
+    cfg2 = client.app.state.db.get_run(rid2)["config"]
+    assert cfg2["chapter_mode"] == "two_phase"
+    assert cfg2["analysis_concurrency"] == 5
+
+
 def test_run_rejects_when_already_running(client, auth, tmp_path):
     FakeOrchestrator.mode = "cancel"
     try:
