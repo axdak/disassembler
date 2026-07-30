@@ -63,8 +63,10 @@ def provider_command(provider: str, project_dir: Path, timeout: str) -> List[str
             "-p",
             "--output-format",
             "text",
+            # bypassPermissions: 非交互(-p)模式下必须真正绕过权限检查,worker 才能用 Write 落盘产物。
+            # dontAsk 仅表示"不弹窗",询问不了时会直接拒绝 Write/Bash,导致模型准备好内容却写不进文件。
             "--permission-mode",
-            "dontAsk",
+            "bypassPermissions",
             "--add-dir",
             str(project_dir),
         ]
