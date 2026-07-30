@@ -173,13 +173,31 @@ def _per_chapter_paths(project_dir: Path, chapter: dict, kind: str) -> list[Path
     seq = chapter.get("seq")
     if not isinstance(seq, int):
         return []
-    # 扁平化产物文件名含章节标题，从 chapter 字典取标题段。
-    name = _title_slug(chapter)
-    if kind == "visual":
-        return [project_dir / rel for rel in visual_assets_per_chapter_relpaths(seq, name)]
     if kind == "structure":
-        return [project_dir / rel for rel in chapter_structure_per_chapter_relpaths(seq, name)]
+        # 按 seq 前缀 glob 找实际文件（标题无关、抗重命名，与管线状态检查一致）；
+        # 命中则返回实际路径，未命中则用章节字典标题显示期望位置。
+        base = project_dir / "全书分析" / "故事结构" / "分章"
+        matches = [p for p in base.glob(f"ch{seq:03d}_*_章节结构.md") if p.is_file()] if base.is_dir() else []
+        if matches:
+            return matches
+        return [project_dir / rel for rel in chapter_structure_per_chapter_relpaths(seq, _title_slug(chapter))]
+    if kind == "visual":
+        # glob 命中的文件反推标题，构造 5 个期望路径（与磁盘一致、抗重命名）；
+        # _files_present 据此判定五件套是否齐全。无文件则用章节字典标题显示期望位置。
+        base = project_dir / "全书分析" / "视觉资产" / "分章"
+        matches = [p for p in base.glob(f"ch{seq:03d}_*.md") if p.is_file()] if base.is_dir() else []
+        name = _title_slug_from_matches(matches, seq) if matches else _title_slug(chapter)
+        return [project_dir / rel for rel in visual_assets_per_chapter_relpaths(seq, name)]
     return []
+
+
+def _title_slug_from_matches(matches: list[Path], seq: int) -> str:
+    """从 glob 命中的扁平产物文件名反推标题段：去 ch{seq:03d}_ 前缀和 _{维度}.md 后缀。"""
+    stem = matches[0].stem  # 如 ch076_标题_视觉资产清单
+    prefix = f"ch{seq:03d}_"
+    if stem.startswith(prefix):
+        stem = stem[len(prefix):]
+    return stem.rsplit("_", 1)[0] if "_" in stem else stem
 
 
 def _export_paths(project_dir: Path, source: str) -> list[Path]:

@@ -347,7 +347,9 @@ def create_app(
                 "filename": fn,
                 "title": ch.get("title", ""),
                 "has_analysis": bool(fn) and (chdir / fn).is_file(),
-                "has_delta": bool(stem) and (chdir / "Delta" / f"{stem}.json").is_file(),
+                "has_delta": bool(stem) and (
+                    (chdir / "Delta" / f"{stem}.json").is_file() or (chdir / f"{stem}.json").is_file()
+                ),
                 "analysis": cards.get("analysis").model_dump() if cards.get("analysis") else None,
                 "delta": cards.get("delta").model_dump() if cards.get("delta") else None,
                 "visual": cards.get("visual").model_dump() if cards.get("visual") else None,

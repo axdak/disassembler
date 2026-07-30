@@ -650,6 +650,32 @@ def repair_llm_json(path: Path, report_path: Path, backup: bool = False) -> int:
 def init_dirs(project_dir: Path) -> None:
     for d in REQUIRED_DIRS:
         (project_dir / d).mkdir(parents=True, exist_ok=True)
+    _ensure_delta_layout(project_dir)
+
+
+def _ensure_delta_layout(project_dir: Path) -> None:
+    """自愈：把 章节处理/ 根目录残留的 delta JSON 移入 Delta/ 子目录。
+
+    防止从旧备份恢复后，新代码只在 Delta/ 找 delta 而判定"无 delta"（系统失忆、
+    可能从第1章重跑烧钱）。幂等：已迁移或新项目无操作。
+    """
+    src_dir = project_dir / "章节处理"
+    if not src_dir.is_dir():
+        return
+    dst_dir = src_dir / "Delta"
+    moved = 0
+    for p in src_dir.glob("第*章_*.json"):
+        if not p.is_file():
+            continue
+        target = dst_dir / p.name
+        if target.is_file():
+            p.unlink(missing_ok=True)  # Delta/ 已有同名，删根目录残留
+        else:
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            p.rename(target)
+        moved += 1
+    if moved:
+        print(f"已自愈：{moved} 个 delta JSON 从 章节处理/ 根目录移入 Delta/。")
 
 
 def find_multi_unit_artifacts(project_dir: Path) -> List[Path]:
@@ -846,10 +872,14 @@ def latest_snapshot_seq(project_dir: Path) -> Optional[int]:
 
 def max_available_delta_seq(project_dir: Path) -> int:
     seqs = []
-    for path in (project_dir / "章节处理" / "Delta").glob("第*章_*.json"):
-        m = re.match(r"第(\d+)章", path.name)
-        if m:
-            seqs.append(int(m.group(1)))
+    # 兼容扫描 Delta/（新）与 章节处理/ 根目录（旧备份未迁移），任一处有 delta 都算
+    for d in (project_dir / "章节处理" / "Delta", project_dir / "章节处理"):
+        if not d.is_dir():
+            continue
+        for path in d.glob("第*章_*.json"):
+            m = re.match(r"第(\d+)章", path.name)
+            if m:
+                seqs.append(int(m.group(1)))
     return max(seqs) if seqs else 0
 
 
