@@ -3107,23 +3107,36 @@ def load_latest_pack_record(project_dir: Path, suffix: str, seq: int = 0) -> Tup
 
 
 def _cleanup_stale_per_chapter_packs(project_dir: Path, task: str) -> None:
-    """清理该 task 的旧 per-chapter 任务包目录，避免中断续跑时反复生成导致目录无限堆积。
+    """清理该 task 未用过（无对应产物）的 per-chapter 任务包目录，保留已用过的供追溯。
 
-    pack 目录只是 worker 的临时输入（产物 章节结构.md / 视觉资产MD 写在 全书分析/<维度>/分章/ 下，
-    不在这里），续跑会重新生成新一批 pack。保留旧目录只会累积（实测一个项目可积攒数百个）。
-    因此在每次续跑生成新 pack 前清掉该 task 的全部旧 per-chapter 目录，只留本次生成的。
+    pack 目录是 worker 的临时输入（产物写在 全书分析/<维度>/分章/ 下，不在这里）。
+    - 未用过：本目录所有 pack_chNNN 都没产出对应产物（中断/失败留下的）-> 删除，避免堆积。
+    - 已用过：至少一个 pack_chNNN 已产出产物 -> 保留，便于追溯"这份产物由哪个任务包生成"。
+    这样既防止失败重跑导致的目录无限堆积，又保留成功产物的任务包供审计。
     """
     root = task_package_root(project_dir)
     if not root.is_dir():
         return
     suffix = f"{task}_per_chapter"
     removed = 0
+    kept = 0
     for path in root.glob(f"*_{suffix}"):
-        if path.is_dir():
+        if not path.is_dir():
+            continue
+        # 目录里任一 pack_chNNN 的产物已存在即视为"用过"，保留
+        used = False
+        for pack in path.glob("pack_ch*.md"):
+            m = re.match(r"pack_ch(\d+)\.md", pack.name)
+            if m and chapter_has_per_chapter_analysis(project_dir, task, int(m.group(1))):
+                used = True
+                break
+        if used:
+            kept += 1
+        else:
             shutil.rmtree(path, ignore_errors=True)
             removed += 1
-    if removed:
-        print(f"已清理 {removed} 个旧的 {suffix} 任务包目录。")
+    if removed or kept:
+        print(f"任务包目录：清理 {removed} 个未用过的，保留 {kept} 个已产出产物的（可追溯）。")
 
 
 def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
