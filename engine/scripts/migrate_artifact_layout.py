@@ -18,21 +18,17 @@ filename 去掉 第NNN章_ 前缀、清洗非法字符）。
 from __future__ import annotations
 
 import argparse
-import html
 import re
 import sys
 from pathlib import Path
 from typing import Dict, Optional
 
+from chapter_naming import title_slug_from_filename
+
 
 def _title_slug(filename: str) -> str:
-    """与 analysis_context_pack._title_slug 一致的标题段提取。"""
-    stem = filename[:-3] if filename.endswith(".md") else Path(filename).stem
-    m = re.match(r"^第\d+章[_\-\s]*(.*)$", stem)
-    title = (m.group(1) if m else stem).strip()
-    title = html.unescape(title)  # 章节 filename 可能含 HTML 实体，转回可读字符
-    title = re.sub(r'[\\/:*?"<>|]', "_", title).strip()
-    return title or "无标题"
+    """标题段提取（薄包装，逻辑见 chapter_naming.title_slug_from_filename）。"""
+    return title_slug_from_filename(filename)
 
 
 def load_seq_title_map(project_dir: Path) -> Dict[int, str]:

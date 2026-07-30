@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import html
 import json
 import os
 import re
@@ -37,6 +36,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from story_schema_rules import COLLECTION_KEYS, SUPPLEMENTARY_TAGS_DETAIL_KEY, parse_supplementary_tags
 from prompt_loader import render_prompt
+from chapter_naming import title_slug_from_filename
 
 TYPE_TO_COLLECTION = {
     "角色": "角色集",
@@ -140,17 +140,8 @@ VISUAL_ASSETS_PER_CHAPTER_FILES = [
 
 
 def _title_slug(ch: Dict[str, Any]) -> str:
-    """从章节字典提取用于文件名的标题段：filename 去掉 第NNN章_ 前缀，清洗非法字符。
-
-    扁平化后产物文件名形如 ch076_<标题>_章节结构.md，标题取自章节文件名（已是合法文件名）。
-    """
-    filename = ch.get("filename") or ""
-    stem = filename[:-3] if filename.endswith(".md") else Path(filename).stem
-    m = re.match(r"^第\d+章[_\-\s]*(.*)$", stem)
-    title = (m.group(1) if m else stem).strip()
-    title = html.unescape(title)  # 章节 filename 可能含 HTML 实体（如 &#039;），转回可读字符
-    title = re.sub(r'[\\/:*?"<>|]', "_", title).strip()
-    return title or "无标题"
+    """从章节字典提取标题段（薄包装，逻辑见 chapter_naming.title_slug_from_filename）。"""
+    return title_slug_from_filename(ch.get("filename") or "")
 
 
 def visual_assets_per_chapter_outputs(seq: int, name: str = "") -> List[str]:

@@ -17,9 +17,7 @@ Card states are exactly: ``missing``, ``latest``, ``stale``, ``queued``,
 """
 from __future__ import annotations
 
-import html
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -41,6 +39,7 @@ from run_pipeline import (  # noqa: E402
     chapter_structure_per_chapter_relpaths,
     visual_assets_per_chapter_relpaths,
 )
+from chapter_naming import title_slug_from_filename  # noqa: E402
 from revisions import project_revisions  # noqa: E402
 
 # Whole-book analysis dimensions whose outputs depend on the process story
@@ -151,14 +150,8 @@ def _whole_book_paths(project_dir: Path, dimension: str) -> list[Path]:
 
 
 def _title_slug(chapter: dict) -> str:
-    """从章节 filename 提取标题段（与 engine analysis_context_pack._title_slug 一致）。"""
-    filename = chapter.get("filename") or ""
-    stem = filename[:-3] if filename.endswith(".md") else Path(filename).stem
-    m = re.match(r"^第\d+章[_\-\s]*(.*)$", stem)
-    title = (m.group(1) if m else stem).strip()
-    title = html.unescape(title)  # 章节 filename 可能含 HTML 实体，转回可读字符
-    title = re.sub(r'[\\/:*?"<>|]', "_", title).strip()
-    return title or "无标题"
+    """从章节 filename 提取标题段（薄包装，逻辑见 chapter_naming.title_slug_from_filename）。"""
+    return title_slug_from_filename(chapter.get("filename") or "")
 
 
 def _per_chapter_paths(project_dir: Path, chapter: dict, kind: str) -> list[Path]:
