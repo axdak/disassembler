@@ -6,7 +6,7 @@
 历史 Delta 若缺提取理由会在重放/重校验时失败。本脚本给这类元素补一个**占位**
 提取理由（非语义伪造），标记待人工补全，使旧 Delta 通过机械校验。
 
-仅作用于 章节处理/第NNN章_*.json（Delta 文件）；不读取原文、不生成剧情语义。
+仅作用于 章节处理/Delta/第NNN章_*.json（Delta 文件）；不读取原文、不生成剧情语义。
 不修改 故事结构_增量.json（事件 提取理由 已在合并时落盘，过程库不再回填）。
 
 用法：
@@ -77,9 +77,9 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="实际回填并备份；缺省仅预览")
     args = ap.parse_args()
     project_dir = Path(args.project_dir).resolve()
-    chapter_dir = project_dir / "章节处理"
+    chapter_dir = project_dir / "章节处理" / "Delta"
     if not chapter_dir.is_dir():
-        print(f"找不到 章节处理 目录: {chapter_dir}")
+        print(f"找不到 章节处理/Delta 目录: {chapter_dir}")
         return 1
 
     targets = sorted(p for p in chapter_dir.iterdir() if p.is_file() and DELTA_RE.match(p.name))

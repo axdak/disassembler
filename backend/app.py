@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -56,6 +57,43 @@ def _safe_project_path(project_dir: Path, rel: str) -> Optional[Path]:
     if target != base and base not in target.parents:
         return None
     return target
+
+
+# worker 日志文件名规范：{task_type}[_ch{seq:03d}]_{YYYYMMDD_HHMMSS}.txt
+_LOG_NAME_RE = re.compile(r"^(.+?)(?:_ch(\d{3}))?_(\d{8}_\d{6})\.txt$")
+
+# 全书分析任务名（orchestrator.FULLBOOK_TASKS 的镜像，避免跨模块耦合）
+_FULLBOOK_TASK_TYPES = {
+    "summary", "characters", "plot", "worldview", "settings", "plotlines",
+    "outline", "detailed_outline", "narrative_structure", "report",
+}
+
+
+def _parse_log_name(name: str) -> tuple[str, int]:
+    """解析 worker 日志文件名 -> (task_type, seq)。无法识别时 task_type 为空、seq 为 0。"""
+    m = _LOG_NAME_RE.match(name)
+    if not m:
+        return "", 0
+    return m.group(1), int(m.group(2) or 0)
+
+
+def _stage_for_task_type(task_type: str) -> str:
+    """worker 任务类型 -> 流水线阶段（中文，用于日志按阶段分组）。"""
+    if task_type in ("analysis", "analysis_regenerate"):
+        return "章节分析"
+    if task_type in ("delta", "repair_chapter"):
+        return "章节Delta"
+    if task_type == "chapter_structure":
+        return "章节结构"
+    if task_type in ("visual_assets", "visual_assets_aggregate"):
+        return "视觉资产"
+    if task_type in ("final_draft", "repair_final"):
+        return "最终整理"
+    if task_type == "audit_correction":
+        return "治理"
+    if task_type.endswith("_reduce") or task_type in _FULLBOOK_TASK_TYPES:
+        return "全书分析"
+    return "其他"
 
 
 def create_app(
@@ -309,7 +347,7 @@ def create_app(
                 "filename": fn,
                 "title": ch.get("title", ""),
                 "has_analysis": bool(fn) and (chdir / fn).is_file(),
-                "has_delta": bool(stem) and (chdir / f"{stem}.json").is_file(),
+                "has_delta": bool(stem) and (chdir / "Delta" / f"{stem}.json").is_file(),
                 "analysis": cards.get("analysis").model_dump() if cards.get("analysis") else None,
                 "delta": cards.get("delta").model_dump() if cards.get("delta") else None,
                 "visual": cards.get("visual").model_dump() if cards.get("visual") else None,
@@ -406,7 +444,15 @@ def create_app(
         out = []
         for f in sorted(ldir.glob("*.txt"), reverse=True):
             st = f.stat()
-            out.append({"name": f.name, "size": st.st_size, "mtime": int(st.st_mtime)})
+            task_type, seq = _parse_log_name(f.name)
+            out.append({
+                "name": f.name,
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "task_type": task_type,
+                "seq": seq,
+                "stage": _stage_for_task_type(task_type),
+            })
         return out
 
     @app.get("/projects/{pid}/logs/{name}", dependencies=[Depends(require_token)])

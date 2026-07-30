@@ -68,8 +68,8 @@ def test_recover_from_snapshot_replays_later_deltas():
 
         write_json(project / "故事结构版本" / "story_after_ch001.json", empty_story())
         (project / "故事结构_增量.json").write_text('{"损坏": [', encoding="utf-8")
-        write_json(project / "章节处理" / "第002章_测试.json", delta(2, "乙"))
-        write_json(project / "章节处理" / "第003章_测试.json", delta(3, "丙"))
+        write_json(project / "章节处理" / "Delta" / "第002章_测试.json", delta(2, "乙"))
+        write_json(project / "章节处理" / "Delta" / "第003章_测试.json", delta(3, "丙"))
 
         rc = recover_story_from_snapshot(project, snapshot_seq=1, to_seq=3)
         assert rc == 0

@@ -28,6 +28,42 @@ function Timeline({ current, completed }: { current: string | null; completed: s
   )
 }
 
+// 事件流：按 stage 过滤、type 着色，替代原来一整块 <pre> 纯文本，便于看清阶段与状态。
+function EventStream({ events }: { events: StageEvent[] }) {
+  const [filter, setFilter] = useState('全部')
+  const stages = ['全部', ...Array.from(new Set(events.map((e) => e.stage || '全局')))]
+  const visible = filter === '全部' ? events : events.filter((e) => (e.stage || '全局') === filter)
+  const colorFor = (type: string) => {
+    if (/done$/.test(type)) return '#2e7d32'                 // 完成：绿
+    if (/(fail|block|error)/.test(type)) return '#c62828'    // 失败/阻塞：红
+    if (/start$/.test(type)) return '#1565c0'                // 开始：蓝
+    if (/(progress|handoff)/.test(type)) return '#616161'    // 进度/交接：灰
+    return '#333'
+  }
+  return (
+    <>
+      <div style={{ marginBottom: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {stages.map((s) => (
+          <button key={s} onClick={() => setFilter(s)} style={{ fontSize: 11, fontWeight: filter === s ? 700 : 400, padding: '1px 6px' }}>{s}</button>
+        ))}
+      </div>
+      <div style={{ background: '#f5f5f5', padding: 8, maxHeight: 320, overflow: 'auto', fontSize: 12 }}>
+        {visible.length === 0 ? (
+          <span style={{ color: '#888' }}>无事件</span>
+        ) : (
+          visible.map((e) => (
+            <div key={e.id} style={{ padding: '1px 0' }}>
+              <span style={{ color: colorFor(e.type), fontWeight: 600 }}>[{e.type}]</span>{' '}
+              <span style={{ color: '#555' }}>{e.stage || ''}</span>{' '}
+              <span>{e.detail || ''}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  )
+}
+
 export function OverviewTab({
   projectId,
   status,
@@ -163,9 +199,7 @@ export function OverviewTab({
       )}
 
       <h4 style={{ margin: '12px 0 4px' }}>事件流</h4>
-      <pre style={{ background: '#f5f5f5', padding: 8, maxHeight: 320, overflow: 'auto', fontSize: 12, margin: 0 }}>
-        {events.slice(-120).map((e) => `[${e.type}] ${e.stage || ''} ${e.detail || ''}`).join('\n')}
-      </pre>
+      <EventStream events={events.slice(-120)} />
     </div>
   )
 }

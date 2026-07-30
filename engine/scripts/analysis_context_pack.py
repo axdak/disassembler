@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
 import json
 import os
 import re
@@ -110,7 +111,7 @@ TASKS: Dict[str, Dict[str, Any]] = {
     },
     "chapter_structure": {
         "name": "章节结构定位（分章独立产物）",
-        "outputs": ["全书分析/故事结构/分章/ch{NNN}/章节结构.md"],
+        "outputs": ["全书分析/故事结构/分章/ch{NNN}_<标题>_章节结构.md"],
         "goal": "对每章独立产出 三幕式节拍定位 + 七要素本章信号 + 力学/工程学/骨架本章信号；不跨章归纳，不写入故事结构 JSON。",
     },
     "narrative_structure": {
@@ -138,15 +139,56 @@ VISUAL_ASSETS_PER_CHAPTER_FILES = [
 ]
 
 
-def visual_assets_per_chapter_outputs(seq: int) -> List[str]:
-    """单章视觉资产五个产物的相对路径。"""
-    base = f"全书分析/视觉资产/分章/ch{seq:03d}"
-    return [f"{base}/{name}" for name in VISUAL_ASSETS_PER_CHAPTER_FILES]
+def _title_slug(ch: Dict[str, Any]) -> str:
+    """从章节字典提取用于文件名的标题段：filename 去掉 第NNN章_ 前缀，清洗非法字符。
+
+    扁平化后产物文件名形如 ch076_<标题>_章节结构.md，标题取自章节文件名（已是合法文件名）。
+    """
+    filename = ch.get("filename") or ""
+    stem = filename[:-3] if filename.endswith(".md") else Path(filename).stem
+    m = re.match(r"^第\d+章[_\-\s]*(.*)$", stem)
+    title = (m.group(1) if m else stem).strip()
+    title = html.unescape(title)  # 章节 filename 可能含 HTML 实体（如 &#039;），转回可读字符
+    title = re.sub(r'[\\/:*?"<>|]', "_", title).strip()
+    return title or "无标题"
 
 
-def chapter_structure_per_chapter_outputs(seq: int) -> List[str]:
-    """单章故事结构产物的相对路径，与视觉资产分章对齐。"""
-    return [f"全书分析/故事结构/分章/ch{seq:03d}/章节结构.md"]
+def visual_assets_per_chapter_outputs(seq: int, name: str = "") -> List[str]:
+    """单章视觉资产五个产物的相对路径（扁平：ch{seq:03d}_{标题}_{维度}.md）。"""
+    prefix = f"全书分析/视觉资产/分章/ch{seq:03d}_{name}" if name else f"全书分析/视觉资产/分章/ch{seq:03d}"
+    return [f"{prefix}_{fname}" for fname in VISUAL_ASSETS_PER_CHAPTER_FILES]
+
+
+def chapter_structure_per_chapter_outputs(seq: int, name: str = "") -> List[str]:
+    """单章故事结构产物的相对路径（扁平：ch{seq:03d}_{标题}_章节结构.md）。"""
+    if name:
+        return [f"全书分析/故事结构/分章/ch{seq:03d}_{name}_章节结构.md"]
+    return [f"全书分析/故事结构/分章/ch{seq:03d}_章节结构.md"]
+
+
+def _existing_chapter_structure_path(project_dir: Path, seq: int) -> Optional[Path]:
+    """按 seq 前缀 glob 查找已存在的章节结构产物（标题无关，抗章节重命名）。"""
+    base = project_dir / "全书分析" / "故事结构" / "分章"
+    if not base.is_dir():
+        return None
+    for p in base.glob(f"ch{seq:03d}_*_章节结构.md"):
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
+
+
+def _existing_visual_paths(project_dir: Path, seq: int) -> List[Path]:
+    """按 seq 前缀 glob 查找已存在的视觉资产产物（标题无关）。"""
+    base = project_dir / "全书分析" / "视觉资产" / "分章"
+    if not base.is_dir():
+        return []
+    return [p for p in base.glob(f"ch{seq:03d}_*.md") if p.is_file() and p.stat().st_size > 0]
+
+
+def _visual_complete(project_dir: Path, seq: int) -> bool:
+    """单章视觉资产五件套是否齐全且非空。"""
+    found = {p.name.rsplit("_", 1)[-1][:-3] for p in _existing_visual_paths(project_dir, seq)}
+    return all(stem in found for stem in (f[:-3] for f in VISUAL_ASSETS_PER_CHAPTER_FILES))
 
 
 NARRATIVE_STRUCTURE_BACKGROUND_SPECS = [
@@ -181,9 +223,8 @@ def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[
     found_any = False
     for ch in chapters:
         seq = int(ch["seq"])
-        rel = chapter_structure_per_chapter_outputs(seq)[0]
-        path = project_dir / rel
-        if path.is_file() and path.stat().st_size > 0:
+        path = _existing_chapter_structure_path(project_dir, seq)
+        if path is not None:
             found_any = True
             lines.append(f"#### 第{seq:03d}章 章节结构.md")
             lines.append("```markdown")
@@ -461,7 +502,7 @@ def build_chapter_block(project_dir: Path, ch: Dict[str, Any], task: str, includ
     split_path = project_dir / "原文拆解" / filename
     analysis_path = project_dir / "章节处理" / filename
     base = filename[:-3] if filename.endswith(".md") else Path(filename).stem
-    delta_path = project_dir / "章节处理" / f"{base}.json"
+    delta_path = project_dir / "章节处理" / "Delta" / f"{base}.json"
 
     lines = []
     lines.append(f"### 第{ch['seq']:03d}章｜{ch.get('title') or ch.get('source_title') or base}")
@@ -524,14 +565,14 @@ def reduce_contract(task: str) -> str:
     return render_prompt("汇总/通用汇总.j2", task=task)
 
 
-def reduce_contract_visual_per_chapter(seq: int) -> str:
-    outs = visual_assets_per_chapter_outputs(seq)
+def reduce_contract_visual_per_chapter(seq: int, name: str = "") -> str:
+    outs = visual_assets_per_chapter_outputs(seq, name)
     bullet = "\n".join(f"- {p}" for p in outs)
     return render_prompt("汇总/视觉资产_单章.j2", seq=seq, bullet=bullet)
 
 
-def reduce_contract_chapter_structure_per_chapter(seq: int) -> str:
-    target = chapter_structure_per_chapter_outputs(seq)[0]
+def reduce_contract_chapter_structure_per_chapter(seq: int, name: str = "") -> str:
+    target = chapter_structure_per_chapter_outputs(seq, name)[0]
     return render_prompt("汇总/章节结构_单章.j2", seq=seq, target=target)
 
 
@@ -599,7 +640,9 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
             "visual_assets": visual_assets_per_chapter_outputs,
             "chapter_structure": chapter_structure_per_chapter_outputs,
         }.get(task)
-        out_list = per_chapter_outputs(per_chapter_seq) if per_chapter_outputs else []
+        # 扁平化产物文件名含章节标题，从单章 chapters[0] 取标题段。
+        name = _title_slug(chapters[0]) if chapters else ""
+        out_list = per_chapter_outputs(per_chapter_seq, name) if per_chapter_outputs else []
         for out in out_list:
             lines.append(f"- {out}")
     else:
@@ -775,11 +818,11 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
     pack_records: List[Dict[str, Any]] = []
     for ch in chapters:
         seq = int(ch["seq"])
-        # 跳过已有完整分章产物的章节（断点续传）
-        existing = [project_dir / rel for rel in visual_assets_per_chapter_outputs(seq)]
-        if all(p.is_file() and p.stat().st_size > 0 for p in existing):
+        # 跳过已有完整分章产物的章节（断点续传；按 seq 前缀 glob，标题无关）
+        if _visual_complete(project_dir, seq):
             print(f"跳过第{seq:03d}章：分章视觉资产已存在。")
             continue
+        name = _title_slug(ch)
         pack_content = build_pack(
             project_dir,
             "visual_assets",
@@ -796,12 +839,12 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
         pack_path = out_root / f"pack_ch{seq:03d}.md"
         pack_path.write_text(pack_content, encoding="utf-8")
         reduce_path = out_root / f"reduce_prompt_ch{seq:03d}.md"
-        reduce_path.write_text(reduce_contract_visual_per_chapter(seq), encoding="utf-8")
+        reduce_path.write_text(reduce_contract_visual_per_chapter(seq, name), encoding="utf-8")
         pack_records.append({
             "seq": seq,
             "pack": str(pack_path.relative_to(project_dir)),
             "reduce_prompt": str(reduce_path.relative_to(project_dir)),
-            "outputs": visual_assets_per_chapter_outputs(seq),
+            "outputs": visual_assets_per_chapter_outputs(seq, name),
         })
 
     manifest = {
@@ -813,7 +856,7 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
         "pack_count": len(pack_records),
         "packs": pack_records,
         "recommended_workflow": [
-            "对每个 pack_chNNN.md：读取并按 reduce_prompt_chNNN.md 的契约直接写出 全书分析/视觉资产/分章/chNNN/ 下的 5 个 MD",
+            "对每个 pack_chNNN.md：读取并按 reduce_prompt_chNNN.md 的契约直接写出 全书分析/视觉资产/分章/ 下 chNNN_<标题>_*.md 五个 MD",
             "完成所有章节后，可运行 `analysis-pack --task visual_assets --aggregate` 生成顶层汇总",
         ],
     }
@@ -837,10 +880,11 @@ def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse
     pack_records: List[Dict[str, Any]] = []
     for ch in chapters:
         seq = int(ch["seq"])
-        existing = [project_dir / rel for rel in chapter_structure_per_chapter_outputs(seq)]
-        if all(p.is_file() and p.stat().st_size > 0 for p in existing):
+        # 跳过已有产物的章节（断点续传；按 seq 前缀 glob，标题无关）
+        if _existing_chapter_structure_path(project_dir, seq) is not None:
             print(f"跳过第{seq:03d}章：章节结构.md 已存在。")
             continue
+        name = _title_slug(ch)
         pack_content = build_pack(
             project_dir,
             "chapter_structure",
@@ -857,12 +901,12 @@ def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse
         pack_path = out_root / f"pack_ch{seq:03d}.md"
         pack_path.write_text(pack_content, encoding="utf-8")
         reduce_path = out_root / f"reduce_prompt_ch{seq:03d}.md"
-        reduce_path.write_text(reduce_contract_chapter_structure_per_chapter(seq), encoding="utf-8")
+        reduce_path.write_text(reduce_contract_chapter_structure_per_chapter(seq, name), encoding="utf-8")
         pack_records.append({
             "seq": seq,
             "pack": str(pack_path.relative_to(project_dir)),
             "reduce_prompt": str(reduce_path.relative_to(project_dir)),
-            "outputs": chapter_structure_per_chapter_outputs(seq),
+            "outputs": chapter_structure_per_chapter_outputs(seq, name),
         })
 
     manifest = {
@@ -874,7 +918,7 @@ def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse
         "pack_count": len(pack_records),
         "packs": pack_records,
         "recommended_workflow": [
-            "对每个 pack_chNNN.md：读取并按 reduce_prompt_chNNN.md 的契约直接写出 全书分析/故事结构/分章/chNNN/章节结构.md",
+            "对每个 pack_chNNN.md：读取并按 reduce_prompt_chNNN.md 的契约直接写出 全书分析/故事结构/分章/chNNN_<标题>_章节结构.md",
             "完成所有章节后，可执行 `--task narrative_structure` 做全书级汇总",
         ],
     }
@@ -900,8 +944,8 @@ def _build_visual_aggregate_pack(project_dir: Path, args: argparse.Namespace, in
     missing: List[int] = []
     non_preface_seq = [int(ch["seq"]) for ch in index if not ch.get("is_preface")]
     for seq in non_preface_seq:
-        outs = [project_dir / rel for rel in visual_assets_per_chapter_outputs(seq)]
-        if all(p.is_file() and p.stat().st_size > 0 for p in outs):
+        # 按 seq 前缀 glob 判断五件套是否齐全（标题无关）
+        if _visual_complete(project_dir, seq):
             available.append(seq)
         else:
             missing.append(seq)
@@ -917,8 +961,8 @@ def _build_visual_aggregate_pack(project_dir: Path, args: argparse.Namespace, in
     inventory_lines = ["# 视觉资产分章产物清单", ""]
     for seq in available:
         inventory_lines.append(f"## 第{seq:03d}章")
-        for rel in visual_assets_per_chapter_outputs(seq):
-            inventory_lines.append(f"- {rel}")
+        for p in _existing_visual_paths(project_dir, seq):
+            inventory_lines.append(f"- {p.relative_to(project_dir)}")
         inventory_lines.append("")
     if missing:
         inventory_lines.append("## 尚未生成分章产物的章节（aggregate 时将被跳过）")

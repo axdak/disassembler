@@ -25,6 +25,7 @@ from revisions import project_revisions  # noqa: E402
 from artifact_status import (  # noqa: E402  -- RED: module absent until Step 3
     ArtifactStatusResponse,
     ChapterCardStatus,
+    _title_slug,
     collect_artifact_status,
 )
 
@@ -81,11 +82,12 @@ def _seed_per_chapter_artifacts(project: Path, chapter: dict) -> None:
     seq = chapter["seq"]
     fn = chapter["filename"]
     stem = Path(fn).stem
+    name = _title_slug(chapter)
     _touch_md(project / "章节处理" / fn)  # analysis MD
-    _touch(project / "章节处理" / f"{stem}.json")  # delta JSON
-    for rel in visual_assets_per_chapter_relpaths(seq):
+    _touch(project / "章节处理" / "Delta" / f"{stem}.json")  # delta JSON
+    for rel in visual_assets_per_chapter_relpaths(seq, name):
         _touch_md(project / rel)
-    for rel in chapter_structure_per_chapter_relpaths(seq):
+    for rel in chapter_structure_per_chapter_relpaths(seq, name):
         _touch_md(project / rel)
 
 
@@ -150,13 +152,14 @@ def test_card_paths_come_from_engine_manifests(tmp_path):
     ]
     # per-chapter card paths equal engine per-chapter relpaths
     ch = resp.chapters[0]
+    name = _title_slug(_chapter(1))
     assert ch.cards["analysis"].paths == [str(project / "章节处理" / "第001章_章.md")]
-    assert ch.cards["delta"].paths == [str(project / "章节处理" / "第001章_章.json")]
+    assert ch.cards["delta"].paths == [str(project / "章节处理" / "Delta" / "第001章_章.json")]
     assert ch.cards["visual"].paths == [
-        str(project / rel) for rel in visual_assets_per_chapter_relpaths(1)
+        str(project / rel) for rel in visual_assets_per_chapter_relpaths(1, name)
     ]
     assert ch.cards["structure"].paths == [
-        str(project / rel) for rel in chapter_structure_per_chapter_relpaths(1)
+        str(project / rel) for rel in chapter_structure_per_chapter_relpaths(1, name)
     ]
 
 

@@ -389,7 +389,7 @@ def test_chapter_visual_adapter_per_chapter_outputs_match_engine_helper(project,
     result = adapter.run(ctx, adapter.prepare(ctx))
 
     record = result["manifest"]["packs"][0]
-    assert record["outputs"] == visual_assets_per_chapter_relpaths(1)
+    assert record["outputs"] == visual_assets_per_chapter_relpaths(1, "序章")
 
 
 def test_chapter_visual_adapter_aggregate_outputs_match_engine_helper(project, monkeypatch):
@@ -397,8 +397,9 @@ def test_chapter_visual_adapter_aggregate_outputs_match_engine_helper(project, m
 
     _install_fake_workers(monkeypatch)
     # The aggregate pack requires per-chapter visual asset files to exist.
+    titles = {1: "序章", 2: "相遇", 3: "冲突"}
     for seq in (1, 2, 3):
-        d = project / "全书分析" / "视觉资产" / "分章" / f"ch{seq:03d}"
+        d = project / "全书分析" / "视觉资产" / "分章"
         d.mkdir(parents=True, exist_ok=True)
         for name in (
             "视觉资产清单.md",
@@ -407,7 +408,7 @@ def test_chapter_visual_adapter_aggregate_outputs_match_engine_helper(project, m
             "角色外观一致性表.md",
             "场景氛围表.md",
         ):
-            (d / name).write_text(f"# {name}\n内容\n", encoding="utf-8")
+            (d / f"ch{seq:03d}_{titles[seq]}_{name}").write_text(f"# {name}\n内容\n", encoding="utf-8")
 
     adapter = ChapterVisualAdapter()
     params = {"seqs": [1, 2, 3], "aggregate": True, "include_original": "none"}
@@ -431,8 +432,9 @@ def test_chapter_visual_adapter_per_chapter_runs_worker_and_writes_outputs(proje
     multi = [c for c in calls if c[0] == "run_multi"]
     assert len(multi) == 2
     assert all(c[1] == "visual_assets" for c in multi)
+    titles = {1: "序章", 2: "相遇", 3: "冲突"}
     for seq in (1, 2):
-        for rel in visual_assets_per_chapter_relpaths(seq):
+        for rel in visual_assets_per_chapter_relpaths(seq, titles[seq]):
             assert (project / rel).is_file()
 
 
@@ -440,12 +442,13 @@ def test_chapter_visual_adapter_aggregate_runs_worker(project, monkeypatch):
     calls = _install_fake_workers(monkeypatch)
     from analysis_context_pack import TASKS
 
+    titles = {1: "序章", 2: "相遇", 3: "冲突"}
     for seq in (1, 2, 3):
-        d = project / "全书分析" / "视觉资产" / "分章" / f"ch{seq:03d}"
+        d = project / "全书分析" / "视觉资产" / "分章"
         d.mkdir(parents=True, exist_ok=True)
         for name in ("视觉资产清单.md", "关键场景分镜表.md", "AI绘图提示词素材.md",
                      "角色外观一致性表.md", "场景氛围表.md"):
-            (d / name).write_text(f"# {name}\n", encoding="utf-8")
+            (d / f"ch{seq:03d}_{titles[seq]}_{name}").write_text(f"# {name}\n", encoding="utf-8")
 
     adapter = ChapterVisualAdapter()
     ctx = _make_context(project, {"seqs": [1, 2, 3], "aggregate": True, "include_original": "none"})
@@ -492,7 +495,7 @@ def test_chapter_structure_adapter_per_chapter_outputs_match_engine_helper(proje
 
     for record in result["manifest"]["packs"]:
         seq = record["seq"]
-        assert record["outputs"] == chapter_structure_per_chapter_relpaths(seq)
+        assert record["outputs"] == chapter_structure_per_chapter_relpaths(seq, {1: "序章", 2: "相遇", 3: "冲突"}[seq])
 
 
 def test_chapter_structure_adapter_runs_worker_and_writes_outputs(project, monkeypatch):
@@ -506,8 +509,9 @@ def test_chapter_structure_adapter_runs_worker_and_writes_outputs(project, monke
     multi = [c for c in calls if c[0] == "run_multi"]
     assert len(multi) == 2
     assert all(c[1] == "chapter_structure" for c in multi)
+    titles = {1: "序章", 2: "相遇", 3: "冲突"}
     for seq in (1, 2):
-        for rel in chapter_structure_per_chapter_relpaths(seq):
+        for rel in chapter_structure_per_chapter_relpaths(seq, titles[seq]):
             assert (project / rel).is_file()
 
 

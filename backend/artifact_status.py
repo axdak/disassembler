@@ -17,7 +17,9 @@ Card states are exactly: ``missing``, ``latest``, ``stale``, ``queued``,
 """
 from __future__ import annotations
 
+import html
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -148,6 +150,17 @@ def _whole_book_paths(project_dir: Path, dimension: str) -> list[Path]:
     return [project_dir / rel for rel in ANALYSIS_OUTPUTS.get(dimension, [])]
 
 
+def _title_slug(chapter: dict) -> str:
+    """从章节 filename 提取标题段（与 engine analysis_context_pack._title_slug 一致）。"""
+    filename = chapter.get("filename") or ""
+    stem = filename[:-3] if filename.endswith(".md") else Path(filename).stem
+    m = re.match(r"^第\d+章[_\-\s]*(.*)$", stem)
+    title = (m.group(1) if m else stem).strip()
+    title = html.unescape(title)  # 章节 filename 可能含 HTML 实体，转回可读字符
+    title = re.sub(r'[\\/:*?"<>|]', "_", title).strip()
+    return title or "无标题"
+
+
 def _per_chapter_paths(project_dir: Path, chapter: dict, kind: str) -> list[Path]:
     filename = chapter.get("filename", "")
     if kind in ("analysis", "delta"):
@@ -157,16 +170,15 @@ def _per_chapter_paths(project_dir: Path, chapter: dict, kind: str) -> list[Path
         source = project_dir / "原文拆解" / filename
         paths = artifact_paths(project_dir, source)
         return [paths["analysis"]] if kind == "analysis" else [paths["delta"]]
+    seq = chapter.get("seq")
+    if not isinstance(seq, int):
+        return []
+    # 扁平化产物文件名含章节标题，从 chapter 字典取标题段。
+    name = _title_slug(chapter)
     if kind == "visual":
-        seq = chapter.get("seq")
-        if not isinstance(seq, int):
-            return []
-        return [project_dir / rel for rel in visual_assets_per_chapter_relpaths(seq)]
+        return [project_dir / rel for rel in visual_assets_per_chapter_relpaths(seq, name)]
     if kind == "structure":
-        seq = chapter.get("seq")
-        if not isinstance(seq, int):
-            return []
-        return [project_dir / rel for rel in chapter_structure_per_chapter_relpaths(seq)]
+        return [project_dir / rel for rel in chapter_structure_per_chapter_relpaths(seq, name)]
     return []
 
 

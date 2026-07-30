@@ -51,6 +51,7 @@ def project(tmp_path: Path) -> Path:
     p = tmp_path / "novel"
     (p / "原文拆解").mkdir(parents=True)
     (p / "章节处理").mkdir(parents=True)
+    (p / "章节处理" / "Delta").mkdir(parents=True, exist_ok=True)
     _write_json(p / "原文拆解" / "_索引.json", {"chapters": [
         {"seq": 1, "filename": "第001章_测试.md", "title": "测试"}
     ]})
@@ -62,7 +63,7 @@ def project(tmp_path: Path) -> Path:
 
 
 def test_repair_adapter_fixes_broken_delta(project):
-    delta = project / "章节处理" / "第001章_测试.json"
+    delta = project / "章节处理" / "Delta" / "第001章_测试.json"
     delta.write_text(BROKEN_DELTA, encoding="utf-8")
     original_bytes = delta.read_bytes()
 
@@ -85,7 +86,7 @@ def test_repair_adapter_fixes_broken_delta(project):
 
 
 def test_repair_adapter_skips_valid_delta(project):
-    delta = project / "章节处理" / "第001章_测试.json"
+    delta = project / "章节处理" / "Delta" / "第001章_测试.json"
     _write_json(delta, VALID_DELTA)
     original_text = delta.read_text(encoding="utf-8")
 

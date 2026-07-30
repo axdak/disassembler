@@ -166,12 +166,12 @@ from analysis_context_pack import chapter_structure_per_chapter_outputs
 
 def test_chapter_structure_per_chapter_outputs_path():
     outs = chapter_structure_per_chapter_outputs(7)
-    assert outs == ["全书分析/故事结构/分章/ch007/章节结构.md"]
+    assert outs == ["全书分析/故事结构/分章/ch007_章节结构.md"]
 
 
 def test_chapter_structure_per_chapter_outputs_zero_padding():
     outs = chapter_structure_per_chapter_outputs(123)
-    assert outs == ["全书分析/故事结构/分章/ch123/章节结构.md"]
+    assert outs == ["全书分析/故事结构/分章/ch123_章节结构.md"]
 
 
 from analysis_context_pack import reduce_contract_chapter_structure_per_chapter
@@ -179,7 +179,7 @@ from analysis_context_pack import reduce_contract_chapter_structure_per_chapter
 
 def test_reduce_contract_chapter_structure_mentions_target_file():
     text = reduce_contract_chapter_structure_per_chapter(42)
-    assert "全书分析/故事结构/分章/ch042/章节结构.md" in text
+    assert "全书分析/故事结构/分章/ch042_章节结构.md" in text
     # 五小节顺序必须出现
     for header in ["三幕式定位", "故事七要素", "故事力学", "故事工程学", "小说骨架"]:
         assert header in text
@@ -220,7 +220,7 @@ def test_chapter_structure_per_chapter_dispatch_creates_manifest(tmp_path, capsy
     assert manifest["mode"] == "per_chapter"
     assert len(manifest["packs"]) == 1
     assert manifest["packs"][0]["seq"] == 1
-    assert "全书分析/故事结构/分章/ch001/章节结构.md" in manifest["packs"][0]["outputs"]
+    assert "全书分析/故事结构/分章/ch001_序章_章节结构.md" in manifest["packs"][0]["outputs"]
 
 
 def test_chapter_structure_without_per_chapter_is_rejected(tmp_path, capsys):
@@ -248,10 +248,10 @@ def test_narrative_structure_pack_includes_background_section(tmp_path):
     (project / "原文拆解").mkdir(parents=True)
     (project / "章节处理").mkdir(parents=True)
     (project / "全书分析/剧情结构").mkdir(parents=True)
-    (project / "全书分析/故事结构/分章/ch001").mkdir(parents=True)
+    (project / "全书分析/故事结构/分章").mkdir(parents=True)
 
-    # 一份分章 章节结构.md
-    (project / "全书分析/故事结构/分章/ch001/章节结构.md").write_text(
+    # 一份分章 章节结构.md（扁平：ch001_<标题>_章节结构.md）
+    (project / "全书分析/故事结构/分章/ch001_序章_章节结构.md").write_text(
         "# 第001章 故事结构定位\n\n## 1. 三幕式定位\n第一幕（建置）。\n",
         encoding="utf-8",
     )

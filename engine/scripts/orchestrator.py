@@ -61,6 +61,7 @@ class Config:
     stagnant_limit: int = 3
     max_repair_rounds: int = 3
     analysis_concurrency: int = 1  # 分析阶段并行度（delta 仍串行）
+    per_chapter_concurrency: int = 2  # 分章任务（章节结构/视觉资产）并行度；1=逐章串行（兼容旧行为）
     chapter_mode: str = "two_phase"  # two_phase | interleaved
     fullbook_tasks: tuple = FULLBOOK_TASKS
     export_source: str = "final"
@@ -222,6 +223,7 @@ class Orchestrator:
             worker_retries=self.config.worker_retries,
             worker_window=self.config.worker_window,
             worker_loop=self.config.worker_loop,
+            per_chapter_concurrency=self.config.per_chapter_concurrency,
         )
 
     def _worker_command(self) -> str:

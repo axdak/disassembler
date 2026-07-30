@@ -52,6 +52,7 @@ class RunConfig(BaseModel):
     stagnant_limit: int = 3
     max_repair_rounds: int = 3
     analysis_concurrency: int = 1
+    per_chapter_concurrency: int = 2  # 分章任务（章节结构/视觉资产）并行度；1=逐章串行
     chapter_mode: str = "two_phase"
     fullbook_tasks: list[str] = DEFAULT_FULLBOOK_TASKS
     export_source: str = "final"

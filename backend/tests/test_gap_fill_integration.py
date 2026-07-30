@@ -368,7 +368,7 @@ def test_repair_real_engine_fixes_broken_delta_and_goes_done(tmp_path):
         index = json.loads((out_dir / "_索引.json").read_text(encoding="utf-8"))
         chapter_record = index["chapters"][0]
         chapter_path = out_dir / chapter_record["filename"]
-        delta_path = project_path / "章节处理" / f"{chapter_path.stem}.json"
+        delta_path = project_path / "章节处理" / "Delta" / f"{chapter_path.stem}.json"
         delta_path.parent.mkdir(parents=True, exist_ok=True)
         delta_path.write_text('{"章节": "第001章", "新增元素": ', encoding="utf-8")  # truncated
         # Confirm it does not parse before the repair.

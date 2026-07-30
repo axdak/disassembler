@@ -116,7 +116,7 @@ def _write_completed_chapter(project: Path, seq: int) -> Path:
     (project / "章节处理" / chapter.name).write_text(
         _VALID_ANALYSIS_TEMPLATE.format(seq=seq), encoding="utf-8"
     )
-    _write_json(project / "章节处理" / f"{base}.json", _empty_delta(seq))
+    _write_json(project / "章节处理" / "Delta" / f"{base}.json", _empty_delta(seq))
     for rel in [
         f"质量治理/delta校验/{base}.json",
         f"质量治理/章节校验/{base}.json",

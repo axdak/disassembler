@@ -185,9 +185,9 @@ def test_scoped_chapter_visual_pack_touches_only_requested_seqs(project):
 def test_scoped_chapter_visual_pack_outputs_match_engine_helper(project):
     result = scoped_chapter_visual_pack(project, seqs=[1], include_original="none")
     record = result["manifest"]["packs"][0]
-    assert record["outputs"] == visual_assets_per_chapter_outputs(1)
+    assert record["outputs"] == visual_assets_per_chapter_outputs(1, "序章")
     assert record["outputs"] == [
-        f"全书分析/视觉资产/分章/ch001/{name}"
+        f"全书分析/视觉资产/分章/ch001_序章_{name}"
         for name in (
             "视觉资产清单.md",
             "关键场景分镜表.md",
@@ -200,8 +200,9 @@ def test_scoped_chapter_visual_pack_outputs_match_engine_helper(project):
 
 def test_scoped_chapter_visual_aggregate_outputs_match_engine_helper(project):
     # The aggregate pack requires per-chapter visual asset files to exist.
+    titles = {1: "序章", 2: "相遇", 3: "冲突"}
     for seq in (1, 2, 3):
-        d = project / "全书分析" / "视觉资产" / "分章" / f"ch{seq:03d}"
+        d = project / "全书分析" / "视觉资产" / "分章"
         d.mkdir(parents=True, exist_ok=True)
         for name in (
             "视觉资产清单.md",
@@ -210,7 +211,7 @@ def test_scoped_chapter_visual_aggregate_outputs_match_engine_helper(project):
             "角色外观一致性表.md",
             "场景氛围表.md",
         ):
-            (d / name).write_text(f"# {name}\n内容\n", encoding="utf-8")
+            (d / f"ch{seq:03d}_{titles[seq]}_{name}").write_text(f"# {name}\n内容\n", encoding="utf-8")
     result = scoped_chapter_visual_aggregate(project)
     assert result["task"] == "visual_assets"
     assert result["mode"] == "aggregate"
@@ -230,10 +231,11 @@ def test_scoped_chapter_structure_pack_touches_only_requested_seqs(project):
 
 def test_scoped_chapter_structure_pack_outputs_match_engine_helper(project):
     result = scoped_chapter_structure_pack(project, seqs=[1, 2], include_original="none")
+    titles = {1: "序章", 2: "相遇", 3: "冲突"}
     for record in result["manifest"]["packs"]:
         seq = record["seq"]
-        assert record["outputs"] == chapter_structure_per_chapter_outputs(seq)
-        assert record["outputs"] == [f"全书分析/故事结构/分章/ch{seq:03d}/章节结构.md"]
+        assert record["outputs"] == chapter_structure_per_chapter_outputs(seq, titles[seq])
+        assert record["outputs"] == [f"全书分析/故事结构/分章/ch{seq:03d}_{titles[seq]}_章节结构.md"]
 
 
 # --- scoped_chapter_analysis_rerun / delta_rerun --------------------------

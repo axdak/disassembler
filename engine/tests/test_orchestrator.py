@@ -326,7 +326,7 @@ def test_chapter_structure_real_wiring_with_fake_worker(tmp_path):
     orch = Orchestrator(project, config=cfg)
     rc = orch._stage_chapter_structure()
     assert rc == 0
-    assert (project / "全书分析" / "故事结构" / "分章" / "ch001" / "章节结构.md").is_file()
+    assert (project / "全书分析" / "故事结构" / "分章" / "ch001_test_章节结构.md").is_file()
 
 
 def test_signature_stage_aware_final_pack(tmp_path):

@@ -66,7 +66,7 @@ def test_cmd_run_interleaved(tmp_path, monkeypatch):
     assert rc == 0
     for i in range(3):
         assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.md").is_file()
-        assert (project / "章节处理" / f"第{i+1:03d}章_c{i}.json").is_file()
+        assert (project / "章节处理" / "Delta" / f"第{i+1:03d}章_c{i}.json").is_file()
 
 
 def test_stream_shell_command_cancel(tmp_path):

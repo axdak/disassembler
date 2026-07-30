@@ -80,7 +80,7 @@ def test_visual_assets_auto_worker_route_runs_per_chapter_and_aggregate(tmp_path
     rc = cmd_visual_assets_auto(auto_args(project, worker))
 
     assert rc == 0
-    assert (project / "\u5168\u4e66\u5206\u6790/\u89c6\u89c9\u8d44\u4ea7/\u5206\u7ae0/ch001/\u89c6\u89c9\u8d44\u4ea7\u6e05\u5355.md").is_file()
+    assert (project / "\u5168\u4e66\u5206\u6790/\u89c6\u89c9\u8d44\u4ea7/\u5206\u7ae0/ch001_test_\u89c6\u89c9\u8d44\u4ea7\u6e05\u5355.md").is_file()
     assert (project / "\u5168\u4e66\u5206\u6790/\u89c6\u89c9\u8d44\u4ea7/\u89c6\u89c9\u8d44\u4ea7\u6e05\u5355.md").is_file()
 
 
@@ -93,7 +93,7 @@ def test_chapter_structure_auto_worker_route_runs_to_completion(tmp_path):
     rc = cmd_chapter_structure_auto(auto_args(project, worker))
 
     assert rc == 0
-    assert (project / "\u5168\u4e66\u5206\u6790/\u6545\u4e8b\u7ed3\u6784/\u5206\u7ae0/ch001/\u7ae0\u8282\u7ed3\u6784.md").is_file()
+    assert (project / "\u5168\u4e66\u5206\u6790/\u6545\u4e8b\u7ed3\u6784/\u5206\u7ae0/ch001_test_\u7ae0\u8282\u7ed3\u6784.md").is_file()
 
 
 def test_visual_assets_auto_serial_route_hands_off_without_calling_provider(tmp_path):
@@ -106,4 +106,4 @@ def test_visual_assets_auto_serial_route_hands_off_without_calling_provider(tmp_
     rc = cmd_visual_assets_auto(args)
 
     assert rc == 2
-    assert not (project / "\u5168\u4e66\u5206\u6790/\u89c6\u89c9\u8d44\u4ea7/\u5206\u7ae0/ch001/\u89c6\u89c9\u8d44\u4ea7\u6e05\u5355.md").exists()
+    assert not (project / "\u5168\u4e66\u5206\u6790/\u89c6\u89c9\u8d44\u4ea7/\u5206\u7ae0/ch001_test_\u89c6\u89c9\u8d44\u4ea7\u6e05\u5355.md").exists()

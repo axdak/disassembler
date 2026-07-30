@@ -56,7 +56,7 @@ def _ensure_utf8_console() -> None:
 _ensure_utf8_console()
 
 REQUIRED_DIRS = [
-    "原文", "原文拆解", "章节处理", "章节处理/_任务包", "章节处理/_修复任务",
+    "原文", "原文拆解", "章节处理", "章节处理/_任务包", "章节处理/_修复任务", "章节处理/Delta",
     "质量治理/delta校验", "质量治理/章节校验", "质量治理/规范化", "质量治理/周期审计", "质量治理/按需治理", "质量治理/最终审计",
     "故事结构版本", "结构变更日志",
     "全书分析/_任务包", "全书分析/剧情结构", "全书分析/人物分析", "全书分析/风格分析", "全书分析/世界观", "全书分析/视觉资产", "全书分析/故事结构", "全书分析/迭代版本", "全书分析/局部分析",
@@ -364,10 +364,13 @@ def run_cmd(
     return returncode
 
 
-def worker_log_path(project_dir: Path, task_type: str) -> Path:
+def worker_log_path(project_dir: Path, task_type: str, seq: int = 0) -> Path:
+    # seq 非零时文件名带 _ch{seq:03d}：分章任务并行时避免同秒同 task_type 的日志互相覆盖，
+    # 同时让日志文件名自带章号，便于按阶段/章分类展示。
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_type)
-    return project_dir / "质量治理" / "worker日志" / f"{safe_task}_{ts}.txt"
+    suffix = f"_ch{seq:03d}" if seq else ""
+    return project_dir / "质量治理" / "worker日志" / f"{safe_task}{suffix}_{ts}.txt"
 
 
 def effective_run_mode(
@@ -433,7 +436,7 @@ def run_worker(
             "ND_CHAPTER_SEQ": str(chapter_seq or ""),
             "ND_WORKER_ATTEMPT": str(attempt),
         })
-        log_path = worker_log_path(project_dir, task_type)
+        log_path = worker_log_path(project_dir, task_type, chapter_seq)
         print(f"worker start: task={task_type} attempt={attempt}/{attempts} log={log_path}")
         if worker_window in ("powershell", "powershell-keep"):
             if worker_window == "powershell-keep":
@@ -590,7 +593,7 @@ def run_multi_output_worker(
             "ND_CHAPTER_SEQ": str(chapter_seq or ""),
             "ND_WORKER_ATTEMPT": str(attempt),
         })
-        log_path = worker_log_path(project_dir, task_type)
+        log_path = worker_log_path(project_dir, task_type, chapter_seq)
         print(f"worker start: task={task_type} attempt={attempt}/{attempts} log={log_path}")
         if worker_window in ("powershell", "powershell-keep"):
             if worker_window == "powershell-keep":
@@ -650,12 +653,19 @@ def init_dirs(project_dir: Path) -> None:
 
 
 def find_multi_unit_artifacts(project_dir: Path) -> List[Path]:
-    """查找把多个拆分单元合并成一个产物的非法章节处理文件。"""
+    """查找把多个拆分单元合并成一个产物的非法章节处理文件。
+
+    分析MD在 章节处理/ 根目录、Delta JSON在 章节处理/Delta/，两处都要查。
+    """
     chapter_dir = project_dir / "章节处理"
     if not chapter_dir.is_dir():
         return []
+    candidates = list(chapter_dir.iterdir())
+    delta_dir = chapter_dir / "Delta"
+    if delta_dir.is_dir():
+        candidates.extend(delta_dir.iterdir())
     return sorted(
-        p for p in chapter_dir.iterdir()
+        p for p in candidates
         if p.is_file() and MULTI_UNIT_ARTIFACT_RE.match(p.name)
     )
 
@@ -780,7 +790,7 @@ def artifact_paths(project_dir: Path, chapter: Path) -> Dict[str, Path]:
     return {
         "chapter": chapter,
         "analysis": project_dir / "章节处理" / chapter.name,
-        "delta": project_dir / "章节处理" / f"{base}.json",
+        "delta": project_dir / "章节处理" / "Delta" / f"{base}.json",
         "delta_report": project_dir / "质量治理" / "delta校验" / f"{base}.json",
         "chapter_report": project_dir / "质量治理" / "章节校验" / f"{base}.json",
         "before": project_dir / "故事结构版本" / f"story_before_ch{seq:03d}.json",
@@ -836,7 +846,7 @@ def latest_snapshot_seq(project_dir: Path) -> Optional[int]:
 
 def max_available_delta_seq(project_dir: Path) -> int:
     seqs = []
-    for path in (project_dir / "章节处理").glob("第*章_*.json"):
+    for path in (project_dir / "章节处理" / "Delta").glob("第*章_*.json"):
         m = re.match(r"第(\d+)章", path.name)
         if m:
             seqs.append(int(m.group(1)))
@@ -2861,24 +2871,26 @@ def cmd_analysis_pack(args: argparse.Namespace) -> int:
     return run_cmd(cmd)
 
 
-def visual_assets_per_chapter_relpaths(seq: int) -> List[str]:
-    """与 analysis_context_pack.visual_assets_per_chapter_outputs 保持同步的相对路径。"""
-    base = f"全书分析/视觉资产/分章/ch{seq:03d}"
-    return [
-        f"{base}/视觉资产清单.md",
-        f"{base}/关键场景分镜表.md",
-        f"{base}/AI绘图提示词素材.md",
-        f"{base}/角色外观一致性表.md",
-        f"{base}/场景氛围表.md",
-    ]
+# 视觉资产分章五件套文件名主干（与 analysis_context_pack.VISUAL_ASSETS_PER_CHAPTER_FILES 同步）
+VISUAL_PER_CHAPTER_STEMS = ["视觉资产清单", "关键场景分镜表", "AI绘图提示词素材", "角色外观一致性表", "场景氛围表"]
+
+
+def visual_assets_per_chapter_relpaths(seq: int, name: str = "") -> List[str]:
+    """与 analysis_context_pack.visual_assets_per_chapter_outputs 保持同步的相对路径（扁平：ch{seq:03d}_{标题}_{维度}.md）。"""
+    prefix = f"全书分析/视觉资产/分章/ch{seq:03d}_{name}" if name else f"全书分析/视觉资产/分章/ch{seq:03d}"
+    return [f"{prefix}_{stem}.md" for stem in VISUAL_PER_CHAPTER_STEMS]
 
 
 def chapter_has_per_chapter_visual(project_dir: Path, seq: int) -> bool:
-    for rel in visual_assets_per_chapter_relpaths(seq):
-        path = project_dir / rel
-        if not (path.is_file() and path.stat().st_size > 0):
-            return False
-    return True
+    """单章视觉资产五件套是否齐全且非空（按 seq 前缀 glob，标题无关，抗章节重命名）。"""
+    base = project_dir / "全书分析" / "视觉资产" / "分章"
+    if not base.is_dir():
+        return False
+    found = set()
+    for p in base.glob(f"ch{seq:03d}_*.md"):
+        if p.is_file() and p.stat().st_size > 0:
+            found.add(p.name.rsplit("_", 1)[-1][:-3])
+    return all(stem in found for stem in VISUAL_PER_CHAPTER_STEMS)
 
 
 def chapters_eligible_for_visual(project_dir: Path) -> List[int]:
@@ -2892,25 +2904,34 @@ def chapters_eligible_for_visual(project_dir: Path) -> List[int]:
     return result
 
 
-def chapter_structure_per_chapter_relpaths(seq: int) -> List[str]:
-    base = f"全书分析/故事结构/分章/ch{seq:03d}"
-    return [f"{base}/章节结构.md"]
+def chapter_structure_per_chapter_relpaths(seq: int, name: str = "") -> List[str]:
+    """与 analysis_context_pack.chapter_structure_per_chapter_outputs 保持同步的相对路径（扁平）。"""
+    if name:
+        return [f"全书分析/故事结构/分章/ch{seq:03d}_{name}_章节结构.md"]
+    return [f"全书分析/故事结构/分章/ch{seq:03d}_章节结构.md"]
 
 
-def per_chapter_analysis_relpaths(task: str, seq: int) -> List[str]:
+def per_chapter_analysis_relpaths(task: str, seq: int, name: str = "") -> List[str]:
     if task == "visual_assets":
-        return visual_assets_per_chapter_relpaths(seq)
+        return visual_assets_per_chapter_relpaths(seq, name)
     if task == "chapter_structure":
-        return chapter_structure_per_chapter_relpaths(seq)
+        return chapter_structure_per_chapter_relpaths(seq, name)
     raise ValueError(f"unsupported per-chapter analysis task: {task}")
 
 
 def chapter_has_per_chapter_analysis(project_dir: Path, task: str, seq: int) -> bool:
-    for rel in per_chapter_analysis_relpaths(task, seq):
-        path = project_dir / rel
-        if not (path.is_file() and path.stat().st_size > 0):
+    """单章分章产物是否齐全且非空（按 seq 前缀 glob，标题无关，抗章节重命名）。"""
+    if task == "visual_assets":
+        return chapter_has_per_chapter_visual(project_dir, seq)
+    if task == "chapter_structure":
+        base = project_dir / "全书分析" / "故事结构" / "分章"
+        if not base.is_dir():
             return False
-    return True
+        for p in base.glob(f"ch{seq:03d}_*_章节结构.md"):
+            if p.is_file() and p.stat().st_size > 0:
+                return True
+        return False
+    raise ValueError(f"unsupported per-chapter analysis task: {task}")
 
 
 def resolve_analysis_worker_command(worker_command: str, worker_provider: str, run_mode: str) -> Tuple[str, str]:
@@ -3055,6 +3076,26 @@ def load_latest_pack_record(project_dir: Path, suffix: str, seq: int = 0) -> Tup
     return manifest_path, manifest
 
 
+def _cleanup_stale_per_chapter_packs(project_dir: Path, task: str) -> None:
+    """清理该 task 的旧 per-chapter 任务包目录，避免中断续跑时反复生成导致目录无限堆积。
+
+    pack 目录只是 worker 的临时输入（产物 章节结构.md / 视觉资产MD 写在 全书分析/<维度>/分章/ 下，
+    不在这里），续跑会重新生成新一批 pack。保留旧目录只会累积（实测一个项目可积攒数百个）。
+    因此在每次续跑生成新 pack 前清掉该 task 的全部旧 per-chapter 目录，只留本次生成的。
+    """
+    root = task_package_root(project_dir)
+    if not root.is_dir():
+        return
+    suffix = f"{task}_per_chapter"
+    removed = 0
+    for path in root.glob(f"*_{suffix}"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    if removed:
+        print(f"已清理 {removed} 个旧的 {suffix} 任务包目录。")
+
+
 def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
     project_dir = Path(args.project_dir)
     init_dirs(project_dir)
@@ -3071,37 +3112,80 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
         return 1
 
     suffix = f"{task}_per_chapter"
+    concurrency = max(1, getattr(args, "per_chapter_concurrency", 1))
+    # supervised 模式为主控 agent 逐章交接，不并行；无 worker 命令时走 handoff 串行。
+    use_parallel = (
+        concurrency > 1
+        and bool(worker_command)
+        and getattr(args, "worker_loop", DEFAULT_WORKER_LOOP) != "supervised"
+    )
+    # 续跑前清理该 task 的旧 per-chapter 任务包目录，避免中断再继续时 pack 目录无限堆积。
+    _cleanup_stale_per_chapter_packs(project_dir, task)
     while True:
         pending = [seq for seq in eligible if not chapter_has_per_chapter_analysis(project_dir, task, seq)]
         if not pending:
             break
-        next_seq = pending[0]
-        rc = run_analysis_context_pack_for_auto(args, task, seq=next_seq)
-        if rc != 0:
-            return rc
-        manifest_path, record = load_latest_pack_record(project_dir, suffix, next_seq)
-        expected_outputs = [project_dir / rel for rel in record.get("outputs", [])]
-        task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
-        remaining = len(pending) - 1
-        print(f"generated {task} task pack for ch{next_seq:03d}; remaining chapters: {remaining}")
-        if not worker_command:
-            print("handoff: complete the task pack, write expected artifact(s), then rerun the same command.")
-            return 2
-        rc = run_multi_output_worker(
-            worker_command,
-            project_dir,
-            task,
-            task_pack,
-            expected_outputs,
-            next_seq,
-            timeout=getattr(args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS),
-            retries=getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES),
-            worker_window=getattr(args, "worker_window", DEFAULT_WORKER_WINDOW),
-        )
-        if rc != 0:
-            return rc
-        if worker_supervision_checkpoint(getattr(args, "worker_loop", DEFAULT_WORKER_LOOP), f"{task} artifacts written for ch{next_seq:03d}", rerun_command):
-            return 2
+
+        if use_parallel:
+            # 并行：先串行生成所有 pending 章的任务包（analysis_context_pack 每次新建带时间戳目录，
+            # 串行生成可规避 latest_analysis_manifest 的 glob-竞态），再并行跑 worker。
+            # worker 调用线程安全（独立子进程），各章产物按 ch{seq:03d} 隔离，日志带 seq 防覆盖。
+            jobs = []  # (seq, task_pack, expected_outputs)
+            for next_seq in pending:
+                rc = run_analysis_context_pack_for_auto(args, task, seq=next_seq)
+                if rc != 0:
+                    return rc
+                manifest_path, record = load_latest_pack_record(project_dir, suffix, next_seq)
+                expected_outputs = [project_dir / rel for rel in record.get("outputs", [])]
+                task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
+                jobs.append((next_seq, task_pack, expected_outputs))
+            print(f"{task} 并行: {len(jobs)} 章, concurrency={concurrency}")
+            from concurrent.futures import ThreadPoolExecutor
+            wk_timeout = getattr(args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
+            wk_retries = getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES)
+            wk_window = getattr(args, "worker_window", DEFAULT_WORKER_WINDOW)
+
+            def _do_one(job):
+                seq_j, task_pack_j, expected_j = job
+                return run_multi_output_worker(
+                    worker_command, project_dir, task, task_pack_j, expected_j, seq_j,
+                    timeout=wk_timeout, retries=wk_retries, worker_window=wk_window,
+                )
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                rcs = list(ex.map(_do_one, jobs))
+            failed = [r for r in rcs if r != 0]
+            if failed:
+                return failed[0]
+            # continuous 模式下 worker_supervision_checkpoint 为 no-op，无 rc=2 handoff；
+            # 本轮全成功后重新检查 pending，若某章产物仍缺失（worker 未写出）下轮重试。
+        else:
+            next_seq = pending[0]
+            rc = run_analysis_context_pack_for_auto(args, task, seq=next_seq)
+            if rc != 0:
+                return rc
+            manifest_path, record = load_latest_pack_record(project_dir, suffix, next_seq)
+            expected_outputs = [project_dir / rel for rel in record.get("outputs", [])]
+            task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
+            remaining = len(pending) - 1
+            print(f"generated {task} task pack for ch{next_seq:03d}; remaining chapters: {remaining}")
+            if not worker_command:
+                print("handoff: complete the task pack, write expected artifact(s), then rerun the same command.")
+                return 2
+            rc = run_multi_output_worker(
+                worker_command,
+                project_dir,
+                task,
+                task_pack,
+                expected_outputs,
+                next_seq,
+                timeout=getattr(args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS),
+                retries=getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES),
+                worker_window=getattr(args, "worker_window", DEFAULT_WORKER_WINDOW),
+            )
+            if rc != 0:
+                return rc
+            if worker_supervision_checkpoint(getattr(args, "worker_loop", DEFAULT_WORKER_LOOP), f"{task} artifacts written for ch{next_seq:03d}", rerun_command):
+                return 2
 
     if task != "visual_assets":
         print(f"all per-chapter {task} artifacts are complete.")
@@ -3268,6 +3352,14 @@ def _copy_stable_inputs(src_project: Path, dst_project: Path) -> None:
         for p in src_chap.iterdir():
             if p.is_file() and p.suffix in (".md", ".json"):
                 shutil.copy2(p, dst_chap / p.name)
+        # Delta JSON 现位于 Delta/ 子目录，单独复制
+        src_delta = src_chap / "Delta"
+        if src_delta.is_dir():
+            dst_delta = dst_chap / "Delta"
+            dst_delta.mkdir(parents=True, exist_ok=True)
+            for p in src_delta.iterdir():
+                if p.is_file() and p.suffix == ".json":
+                    shutil.copy2(p, dst_delta / p.name)
 
     for name in ("故事结构_增量.json", "故事结构.json"):
         src = src_project / name
@@ -3645,8 +3737,8 @@ def main() -> int:
     p_pack.add_argument("--max-original-chars", type=int, default=6000)
     p_pack.add_argument("--max-analysis-chars", type=int, default=12000)
     p_pack.add_argument("--out-dir", default="")
-    p_pack.add_argument("--per-chapter", action="store_true", help="每章一份独立任务包（visual_assets / chapter_structure），产物写入对应的 全书分析/<维度>/分章/chNNN/ 目录")
-    p_pack.add_argument("--aggregate", action="store_true", help="（仅 visual_assets）生成顶层汇总任务包，从 分章/chNNN/ 合并顶层五件套")
+    p_pack.add_argument("--per-chapter", action="store_true", help="每章一份独立任务包（visual_assets / chapter_structure），产物扁平写入 全书分析/<维度>/分章/ 下 chNNN_<标题>_*.md")
+    p_pack.add_argument("--aggregate", action="store_true", help="（仅 visual_assets）生成顶层汇总任务包，从 分章/ 合并顶层五件套")
 
     p_status = sub.add_parser("analysis-status", help="查看全书/局部分析状态")
     p_status.add_argument("project_dir")

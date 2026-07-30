@@ -94,7 +94,7 @@ def write_completed_chapter(project, seq):
     base = chapter.stem
     (project / "章节处理").mkdir(parents=True, exist_ok=True)
     (project / "章节处理" / chapter.name).write_text(valid_analysis(seq), encoding="utf-8")
-    write_json(project / "章节处理" / f"{base}.json", empty_delta(seq))
+    write_json(project / "章节处理" / "Delta" / f"{base}.json", empty_delta(seq))
     for rel in [
         f"质量治理/delta校验/{base}.json",
         f"质量治理/章节校验/{base}.json",
@@ -249,10 +249,10 @@ def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():
             write_completed_chapter(project, seq)
         write_chapter_source(project, 5)
         (project / "章节处理" / "第005章_测试.md").write_text(valid_analysis(5), encoding="utf-8")
-        write_json(project / "章节处理" / "第005章_测试.json", empty_delta(5))
+        write_json(project / "章节处理" / "Delta" / "第005章_测试.json", empty_delta(5))
         write_chapter_source(project, 6)
         (project / "章节处理" / "第006章_测试.md").write_text(valid_analysis(6), encoding="utf-8")
-        write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
+        write_json(project / "章节处理" / "Delta" / "第006章_测试.json", empty_delta(6))
         rc = cmd_run(project)
         assert rc == 2
         status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
@@ -289,10 +289,10 @@ def test_run_with_audit_worker_commits_periodic_audit_and_continues():
             write_completed_chapter(project, seq)
         write_chapter_source(project, 5)
         (project / "章节处理" / "第005章_测试.md").write_text(valid_analysis(5), encoding="utf-8")
-        write_json(project / "章节处理" / "第005章_测试.json", empty_delta(5))
+        write_json(project / "章节处理" / "Delta" / "第005章_测试.json", empty_delta(5))
         write_chapter_source(project, 6)
         (project / "章节处理" / "第006章_测试.md").write_text(valid_analysis(6), encoding="utf-8")
-        write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
+        write_json(project / "章节处理" / "Delta" / "第006章_测试.json", empty_delta(6))
         worker = root / "audit_worker.py"
         worker.write_text(
             """
@@ -343,10 +343,10 @@ def test_run_auto_splits_periodic_audit_and_continues_after_child_patches():
         ch5 = write_chapter_source(project, 5)
         ch5.write_text("# 第005章\n" + ("当前周期证据" * 1200), encoding="utf-8")
         (project / "章节处理" / "第005章_测试.md").write_text(valid_analysis(5), encoding="utf-8")
-        write_json(project / "章节处理" / "第005章_测试.json", empty_delta(5))
+        write_json(project / "章节处理" / "Delta" / "第005章_测试.json", empty_delta(5))
         write_chapter_source(project, 6)
         (project / "章节处理" / "第006章_测试.md").write_text(valid_analysis(6), encoding="utf-8")
-        write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
+        write_json(project / "章节处理" / "Delta" / "第006章_测试.json", empty_delta(6))
 
         worker = root / "split_audit_worker.py"
         worker.write_text(
@@ -524,6 +524,7 @@ def test_chapter_delta_repairs_llm_json_before_validation():
         chapter = write_chapter_source(project, 1)
         base = chapter.stem
         (project / "章节处理").mkdir(parents=True, exist_ok=True)
+        (project / "章节处理" / "Delta").mkdir(parents=True, exist_ok=True)
         (project / "章节处理" / chapter.name).write_text(valid_analysis(1), encoding="utf-8")
         malformed_delta = """```json
 {
@@ -539,12 +540,12 @@ def test_chapter_delta_repairs_llm_json_before_validation():
 }
 ```
 """
-        (project / "章节处理" / f"{base}.json").write_text(malformed_delta, encoding="utf-8")
+        (project / "章节处理" / "Delta" / f"{base}.json").write_text(malformed_delta, encoding="utf-8")
 
         rc = cmd_run(project)
 
         assert rc == 0
-        repaired = json.loads((project / "章节处理" / f"{base}.json").read_text(encoding="utf-8"))
+        repaired = json.loads((project / "章节处理" / "Delta" / f"{base}.json").read_text(encoding="utf-8"))
         assert repaired["章节"] == "第001章"
         assert list((project / "质量治理" / "delta校验").glob("repair_json_ch001.json"))
 

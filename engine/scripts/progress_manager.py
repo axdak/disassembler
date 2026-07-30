@@ -101,7 +101,7 @@ def expected_quality_paths(project_dir, chapter_md):
         diff_path = os.path.join(project_dir, "结构变更日志", f"diff_ch{seq:03d}.json")
     return {
         "analysis_md": os.path.join(project_dir, "章节处理", chapter_md),
-        "delta_json": os.path.join(project_dir, "章节处理", f"{base}.json"),
+        "delta_json": os.path.join(project_dir, "章节处理", "Delta", f"{base}.json"),
         "delta_validation": os.path.join(project_dir, "质量治理", "delta校验", f"{base}.json"),
         "chapter_validation": os.path.join(project_dir, "质量治理", "章节校验", f"{base}.json"),
         "snapshot_before": snapshot_before,
@@ -208,7 +208,7 @@ def init_project(project_dir, source_file):
     """初始化项目进度文件"""
     os.makedirs(project_dir, exist_ok=True)
     for subdir in [
-        "原文", "原文拆解", "章节处理",
+        "原文", "原文拆解", "章节处理", "章节处理/Delta",
         "质量治理/delta校验", "质量治理/章节校验", "质量治理/周期审计", "质量治理/按需治理", "质量治理/最终审计",
         "故事结构版本", "结构变更日志",
         "全书分析/_任务包", "全书分析/剧情结构", "全书分析/人物分析", "全书分析/风格分析", "全书分析/迭代版本", "全书分析/局部分析",

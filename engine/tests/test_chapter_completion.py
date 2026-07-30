@@ -20,7 +20,7 @@ def build_project(root: Path) -> Path:
     chapter.write_text("# 测试", encoding="utf-8")
     (root / "章节处理").mkdir(parents=True, exist_ok=True)
     (root / "章节处理" / chapter.name).write_text("analysis", encoding="utf-8")
-    write_json(root / "章节处理" / "第001章_测试.json", {})
+    write_json(root / "章节处理" / "Delta" / "第001章_测试.json", {})
     for name in ("story_before_ch001.json", "story_after_ch001.json"):
         write_json(root / "故事结构版本" / name, {})
     write_json(root / "结构变更日志" / "diff_ch001.json", {})

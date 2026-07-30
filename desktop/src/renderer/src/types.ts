@@ -49,6 +49,9 @@ export interface LogEntry {
   name: string
   size: number
   mtime: number
+  task_type: string
+  seq: number
+  stage: string
 }
 
 export interface QueueItem {

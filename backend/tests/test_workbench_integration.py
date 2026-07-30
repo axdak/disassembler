@@ -496,7 +496,7 @@ def _gov_seed_project(project: Path) -> None:
                 "## 2. 出场人物\n- 主角：阅读来信后从迟疑转为主动求证。\n")
     (project / "章节处理").mkdir(parents=True, exist_ok=True)
     (project / "章节处理" / chapter.name).write_text(analysis, encoding="utf-8")
-    _write_json(project / "章节处理" / f"{chapter.stem}.json", {
+    _write_json(project / "章节处理" / "Delta" / f"{chapter.stem}.json", {
         "章节": "第001章", "新增元素": _GOV_EMPTY_BUCKETS,
         "修改元素": _GOV_EMPTY_BUCKETS})
     for rel in [f"质量治理/delta校验/{chapter.stem}.json",

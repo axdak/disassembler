@@ -36,6 +36,7 @@ export function App() {
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [settings, setSettings] = useState<Record<string, unknown>>({})
   const [err, setErr] = useState('')
+  const [ok, setOk] = useState('')
   const [drawer, setDrawer] = useState<ArtifactDrawerState>({ open: false, kind: 'artifact', path: '', content: '' })
 
   const workbench = useProjectTasks(selected)
@@ -150,7 +151,12 @@ export function App() {
     } catch (e: any) { setErr(String(e)) }
   }
   async function saveSettings() {
-    try { await window.api.updateSettings(settings); setErr('设置已保存') } catch (e: any) { setErr(String(e)) }
+    try {
+      await window.api.updateSettings(settings)
+      setErr('')
+      setOk('设置已保存')
+      setTimeout(() => setOk(''), 3000)
+    } catch (e: any) { setOk(''); setErr(String(e)) }
   }
 
   async function createTask(type: TaskType, params: Record<string, unknown>) {
@@ -276,6 +282,9 @@ export function App() {
               {wbErr && <button onClick={() => setTab('logs')} style={{ marginLeft: 8 }}>查看日志</button>}
             </div>
           )}
+          {ok && (
+            <div style={{ color: '#2e7d32', marginTop: 12, fontSize: 13 }}>{ok}</div>
+          )}
         </main>
       </div>
       <ArtifactDrawer state={drawer} onClose={() => setDrawer((d) => ({ ...d, open: false }))} />
@@ -312,6 +321,15 @@ function SettingsView({ settings, setSettings, onSave }: {
           onChange={(e) => setSettings({ ...settings, analysis_concurrency: Math.max(1, Number(e.target.value) || 1) })}
         />
         <span style={{ fontSize: 12, color: '#888' }}> &gt;1 时章节分析并行（delta 仍串行）</span>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>分章任务并发量: </label>
+        <input
+          type="number" min={1} style={{ width: 60 }}
+          value={String((settings.per_chapter_concurrency as number) ?? 2)}
+          onChange={(e) => setSettings({ ...settings, per_chapter_concurrency: Math.max(1, Number(e.target.value) || 1) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> 章节结构/视觉资产多章并行；1=逐章串行</span>
       </div>
       <p style={{ fontSize: 12, color: '#888' }}>
         其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。

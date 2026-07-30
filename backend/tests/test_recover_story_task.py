@@ -55,6 +55,7 @@ def project(tmp_path: Path) -> Path:
     p = tmp_path / "novel"
     (p / "原文拆解").mkdir(parents=True)
     (p / "章节处理").mkdir(parents=True)
+    (p / "章节处理" / "Delta").mkdir(parents=True, exist_ok=True)
     _write_json(p / "原文拆解" / "_索引.json", {"chapters": [
         {"seq": 1, "filename": "第001章_测试.md", "title": "测试"}
     ]})
@@ -64,7 +65,7 @@ def project(tmp_path: Path) -> Path:
     _write_json(p / "故事结构_增量.json", {})
     _write_json(p / "故事结构版本" / "story_after_ch001.json", SAMPLE_STORY)
     # A chapter-2 delta file makes max_available_delta_seq() return 2.
-    (p / "章节处理" / "第002章_测试.json").write_text("{}", encoding="utf-8")
+    (p / "章节处理" / "Delta" / "第002章_测试.json").write_text("{}", encoding="utf-8")
     return p
 
 
