@@ -64,7 +64,10 @@ def run_migrate(project_dir: Path, file: str = "故事结构_增量.json", dry_r
         print("dry-run：未写入文件。")
         return 0
 
-    backup = story_path.with_name(story_path.name + ".before_chronology_migration.bak")
+    # 备份统一放到 故事结构版本/备份/，避免根目录被 .bak 堆积
+    _bak_dir = project_dir / "故事结构版本" / "备份"
+    _bak_dir.mkdir(parents=True, exist_ok=True)
+    backup = _bak_dir / (story_path.name + ".before_chronology_migration.bak")
     if not backup.exists():
         shutil.copy2(story_path, backup)
     story_path.write_text(json.dumps(migrated, ensure_ascii=False, indent=2), encoding="utf-8")

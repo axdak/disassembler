@@ -70,8 +70,8 @@ def test_migrate_chronology_adapter_runs_and_produces_backup_and_report(project)
     assert "chapter" in result["revision"]
     assert "process" in result["revision"]
 
-    # A .before_chronology_migration.bak backup is produced next to the story.
-    backup = project / "故事结构_增量.json.before_chronology_migration.bak"
+    # A .before_chronology_migration.bak backup is produced under 故事结构版本/备份/.
+    backup = project / "故事结构版本" / "备份" / "故事结构_增量.json.before_chronology_migration.bak"
     assert backup.is_file()
 
     # The migration report lands at the canonical governance path.

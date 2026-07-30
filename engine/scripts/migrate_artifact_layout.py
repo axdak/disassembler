@@ -142,8 +142,33 @@ def migrate_visual(project_dir: Path, title_map: Dict[int, str], apply: bool) ->
     )
 
 
+def migrate_root_baks(project_dir: Path, apply: bool) -> int:
+    """根级故事 JSON 的时间戳备份 (.bak_*) 移到 故事结构版本/备份/。"""
+    if not project_dir.is_dir():
+        return 0
+    bak_dir = project_dir / "故事结构版本" / "备份"
+    moved = 0
+    for p in sorted(project_dir.iterdir()):
+        if not p.is_file():
+            continue
+        # 时间戳备份（故事结构_增量.json.bak_YYYYMMDD_HHMMSS 等）或 chronology 迁移备份
+        if re.match(r"^故事结构.*\.bak_\d{8}_\d{6}$", p.name) or p.name.endswith(".before_chronology_migration.bak"):
+            target = bak_dir / p.name
+            if target.is_file():
+                if apply:
+                    p.unlink(missing_ok=True)
+                print(f"  [skip] {p.name} 已在 备份/")
+                continue
+            print(f"  [bak]   {p.name} -> 故事结构版本/备份/{p.name}")
+            if apply:
+                bak_dir.mkdir(parents=True, exist_ok=True)
+                p.rename(target)
+            moved += 1
+    return moved
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="迁移产物到新布局（delta 子目录 + 分章扁平化）。默认 dry-run。")
+    ap = argparse.ArgumentParser(description="迁移产物到新布局（delta 子目录 + 分章扁平化 + 根级.bak归档）。默认 dry-run。")
     ap.add_argument("project_dir")
     ap.add_argument("--apply", action="store_true", help="实际移动文件；缺省仅预览")
     args = ap.parse_args(argv)
@@ -163,9 +188,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     n2 = migrate_structure(project_dir, title_map, args.apply)
     print("-- 视觉资产 分章扁平化 --")
     n3 = migrate_visual(project_dir, title_map, args.apply)
+    print("-- 根级 .bak 备份 -> 故事结构版本/备份/ --")
+    n4 = migrate_root_baks(project_dir, args.apply)
 
-    print(f"\n合计: delta {n1}、结构 {n2}、视觉 {n3} 个文件待/已迁移。")
-    if not args.apply and (n1 or n2 or n3):
+    print(f"\n合计: delta {n1}、结构 {n2}、视觉 {n3}、bak {n4} 个文件待/已迁移。")
+    if not args.apply and (n1 or n2 or n3 or n4):
         print("（dry-run 预览；加 --apply 实际执行）")
     return 0
 

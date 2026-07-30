@@ -256,7 +256,13 @@ def main():
     for w in warns: print('  ! '+w)
     if args.dry_run: return 0 if not warns else 2
     out=args.out or args.story_json
-    if args.backup and out==args.story_json: shutil.copy2(args.story_json,args.story_json+'.bak_'+dt.datetime.now().strftime('%Y%m%d_%H%M%S'))
+    if args.backup and out==args.story_json:
+        # 备份统一放到 源同级/故事结构版本/备份/，避免根目录被 .bak 堆积
+        _bak_dir = os.path.join(os.path.dirname(os.path.abspath(args.story_json)), "故事结构版本", "备份")
+        os.makedirs(_bak_dir, exist_ok=True)
+        _bak = os.path.join(_bak_dir, os.path.basename(args.story_json)+'.bak_'+dt.datetime.now().strftime('%Y%m%d_%H%M%S'))
+        shutil.copy2(args.story_json, _bak)
+        print(f'已备份: {_bak}')
     save(out,new); print(f'已写入: {out}')
     return 0 if not warns else 2
 if __name__=='__main__': sys.exit(main())

@@ -77,10 +77,13 @@ def collect(project_dir: Path) -> list[Path]:
                 to_delete.append(a)
 
     # 2. 空骨架 .bak 备份（apply_governance_ops --backup 留下），单独按内容判定。
-    if project_dir.is_dir():
-        for p in project_dir.iterdir():
-            if STORY_BAK_RE.match(p.name) and _is_empty_skeleton(p):
-                to_delete.append(p)
+    #    新布局在 故事结构版本/备份/；旧布局在项目根，兼容扫描两处。
+    bak_dirs = [project_dir, project_dir / "故事结构版本" / "备份"]
+    for bak_dir in bak_dirs:
+        if bak_dir.is_dir():
+            for p in bak_dir.iterdir():
+                if p.is_file() and STORY_BAK_RE.match(p.name) and _is_empty_skeleton(p):
+                    to_delete.append(p)
 
     # 去重并稳定排序。
     seen: set[Path] = set()

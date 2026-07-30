@@ -505,7 +505,10 @@ def main() -> int:
     if args.in_place:
         out_path = args.input_json
         if args.backup:
-            backup = f"{args.input_json}.bak_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            # 备份统一放到 源同级/故事结构版本/备份/，避免根目录被 .bak 堆积
+            _bak_dir = os.path.join(os.path.dirname(os.path.abspath(args.input_json)), "故事结构版本", "备份")
+            os.makedirs(_bak_dir, exist_ok=True)
+            backup = os.path.join(_bak_dir, os.path.basename(args.input_json)+f".bak_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}")
             shutil.copy2(args.input_json, backup)
             print(f"已备份: {backup}")
     else:
