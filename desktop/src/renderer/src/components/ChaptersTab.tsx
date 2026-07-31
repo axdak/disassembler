@@ -59,6 +59,13 @@ export function ChaptersTab({
       return next
     })
   }
+  function toggleAll() {
+    setSelected((prev) => {
+      // 已全选则清空，否则全选
+      if (rows.length > 0 && prev.size === rows.length) return new Set()
+      return new Set(rows.map((r) => r.seq))
+    })
+  }
   function runBatch(type: TaskType) {
     const seqs = rows.filter((r) => selected.has(r.seq)).map((r) => r.seq)
     if (seqs.length === 0) return
@@ -66,19 +73,30 @@ export function ChaptersTab({
   }
 
   const hasSelection = selected.size > 0
+  const allSelected = rows.length > 0 && selected.size === rows.length
+  const someSelected = hasSelection && !allSelected
 
   return (
     <div>
       <h3 style={{ marginTop: 0 }}>章节工作台</h3>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         {BATCH_ACTIONS.map((a) => (
           <button key={a.type} onClick={() => runBatch(a.type)} disabled={!hasSelection}>{a.label}</button>
         ))}
+        <span style={{ fontSize: 12, color: '#666' }}>已选 {selected.size}/{rows.length}</span>
       </div>
       <table style={{ fontSize: 13, width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
-            <th style={{ textAlign: 'left' }}></th>
+            <th style={{ textAlign: 'left' }}>
+              <input
+                type="checkbox"
+                aria-label="全选"
+                checked={allSelected}
+                ref={(el: HTMLInputElement | null) => { if (el) el.indeterminate = someSelected }}
+                onChange={toggleAll}
+              />
+            </th>
             <th style={{ textAlign: 'left' }}>seq</th>
             <th style={{ textAlign: 'left' }}>标题</th>
             {CARD_KEYS.map((k) => <th key={k} style={{ textAlign: 'center' }}>{CARD_HEADERS[k]}</th>)}
