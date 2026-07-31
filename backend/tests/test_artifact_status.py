@@ -303,4 +303,7 @@ def test_chapter_row_exposes_latest_task_and_error(tmp_path):
     assert ch.latest_task["id"] == 1
     assert ch.latest_task["status"] == "failed"
     assert ch.error == "rerun boom"
-    assert ch.cards["analysis"].status == "failed"
+    # 产物已存在时，任务失败不把卡片标成 failed（该章其实成功，任务在别处失败）；
+    # 失败信息在行级 latest_task/error 上仍可见。
+    assert ch.cards["analysis"].status == "latest"
+    assert ch.cards["analysis"].error is None

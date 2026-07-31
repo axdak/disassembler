@@ -242,28 +242,37 @@ def _card_for(target, current, latest_task, paths_for_target):
         )
 
     tstatus = latest_task["status"]
+    # 产物已存在时按新鲜度判定完成态（latest/stale）；产物缺失为 missing。
+    # 关键：多章任务在某一章失败/取消时，前面已成功写出产物的章仍算完成，
+    # 不应被任务的失败状态污染成 failed/cancelled。
+    if artifact_present:
+        deps = _deps_for_target(target, latest_task["params"])
+        stale = _is_stale(latest_task["input_revision"], current, deps)
+        done_state = "stale" if stale else "latest"
+    else:
+        done_state = "missing"
+
     if tstatus in _QUEUED_STATES:
         state = "queued"
     elif tstatus in _RUNNING_STATES:
         state = "running"
     elif tstatus in _FAILED_STATES:
-        state = "failed"
+        # 产物已存在 -> 该章其实成功（任务在别的章失败），按完成态显示；产物缺失才标 failed
+        state = done_state if artifact_present else "failed"
     elif tstatus in _CANCELLED_STATES:
-        state = "cancelled"
-    else:  # done (or unknown terminal) -> check freshness + presence
-        deps = _deps_for_target(target, latest_task["params"])
-        stale = _is_stale(latest_task["input_revision"], current, deps)
-        if stale:
-            state = "stale" if artifact_present else "missing"
-        else:
-            state = "latest" if artifact_present else "missing"
+        state = done_state if artifact_present else "cancelled"
+    else:  # done (or unknown terminal) -> freshness + presence
+        state = done_state
+
+    # error 只在真正 failed（产物缺失）时显示，避免已成功章被任务的失败错误污染
+    error = latest_task["error"] if state == "failed" else None
 
     return CardStatus(
         status=state,
         artifact_present=artifact_present,
         latest_task_id=latest_task["id"],
         latest_task_status=tstatus,
-        error=latest_task["error"],
+        error=error,
         paths=path_strings,
     )
 
