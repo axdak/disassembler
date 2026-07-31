@@ -324,6 +324,9 @@ def main() -> int:
                 expected_output = expected_outputs[0]
                 expected_output.parent.mkdir(parents=True, exist_ok=True)
                 expected_output.write_text(content + "\n", encoding="utf-8")
+                # capture_stdout 模式下 stdout 否则为空（产物已写文件、不回显内容），
+                # 留一行摘要给 worker 日志，便于判断该章是否真完成。
+                print(f"provider 已通过 stdout 捕获写入: {expected_output.name}（{len(content)} 字符）")
                 return 0
             if result.stdout:
                 print(result.stdout, end="")
@@ -336,6 +339,7 @@ def main() -> int:
                     last_returncode = 1
                     continue
                 return 1
+            print(f"provider 已写入产物: {', '.join(p.name for p in expected_outputs if p.is_file())}")
             return 0
     finally:
         os.environ.pop("ND_AGY_LOG_FILE", None)

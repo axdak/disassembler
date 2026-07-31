@@ -28,7 +28,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from chronology import chapter_time
 from story_schema_rules import COLLECTION_KEYS
@@ -87,7 +87,7 @@ MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d
 # 单次子进程调用超时（秒）。生产场景默认 600；测试可用 ND_COMMAND_TIMEOUT=10
 # 之类的更短值，让卡死的子进程更快暴露而不是等满 10 分钟。
 INTERNAL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("ND_COMMAND_TIMEOUT", "600"))
-DEFAULT_WORKER_TIMEOUT_SECONDS = int(os.getenv("ND_WORKER_TIMEOUT", "1800"))
+DEFAULT_WORKER_TIMEOUT_SECONDS = int(os.getenv("ND_WORKER_TIMEOUT", "1200"))
 DEFAULT_WORKER_RETRIES = int(os.getenv("ND_WORKER_RETRIES", "2"))
 RUN_MODES = ("auto", "subagent", "serial", "worker")
 WORKER_PROVIDERS = ("manual", "auto", "agy", "codebuddy")
@@ -2191,12 +2191,14 @@ def cmd_run_interleaved(
     concurrency: int = 2,
     audit_interval: int = 5,
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    emit: Optional[Callable] = None,
 ) -> int:
     """交错流水线：N 个并行分析 worker 产出分析MD；1 个串行 delta worker 按章序消费。
 
     每章 delta 依赖前序章节已合并进 故事结构_增量.json 的结构，故 delta 必须按序串行；
     分析MD 互相独立可并行。分析时间被藏到 delta 串行时间之后。
     完成后所有章节分析+delta 均已提交；后续 chapter_delta 阶段为空跑。
+    emit: 可选事件回调 emit(type, stage, detail, data)，逐章完成时发射进度事件。
     """
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -2265,6 +2267,9 @@ def cmd_run_interleaved(
             with cond:
                 ready[seq] = True
                 cond.notify_all()
+            if emit:
+                emit("chapter_progress", stage="chapter_analysis",
+                     detail=f"ch{seq:03d}/{total} 分析完成", data={"seq": seq, "total": total})
 
     def consumer() -> None:
         for seq in seqs:
@@ -2305,6 +2310,9 @@ def cmd_run_interleaved(
                             fail(rc); return
                     else:
                         fail(rc); return
+                if emit:
+                    emit("chapter_progress", stage="chapter_delta",
+                         detail=f"ch{seq:03d}/{total} delta完成", data={"seq": seq, "total": total})
                 if audit_interval and seq % audit_interval == 0:
                     start = seq - audit_interval + 1
                     rc = run_periodic_governance(

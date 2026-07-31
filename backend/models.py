@@ -47,7 +47,7 @@ class RunConfig(BaseModel):
     worker_command: str = ""
     worker_loop: str = "continuous"
     worker_retries: int = 2
-    worker_timeout_seconds: int = 1800
+    worker_timeout_seconds: int = 1200
     max_attempts: int = 10
     stagnant_limit: int = 3
     max_repair_rounds: int = 3

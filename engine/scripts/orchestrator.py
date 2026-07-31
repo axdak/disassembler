@@ -55,7 +55,7 @@ class Config:
     worker_command: str = ""  # 非空时作为显式 worker 命令（provider 视为 manual），用于假 worker 测试与里程碑4
     worker_loop: str = "continuous"
     worker_retries: int = 2
-    worker_timeout_seconds: int = 1800
+    worker_timeout_seconds: int = 1200
     worker_window: str = "hidden"
     max_attempts: int = 10  # 安全上限；真正硬阻塞由 stagnant_limit 触发
     stagnant_limit: int = 3
@@ -238,7 +238,7 @@ class Orchestrator:
         if self.config.chapter_mode == "interleaved":
             return cmd_run_interleaved(
                 self.project_dir, concurrency=self.config.analysis_concurrency,
-                **self._run_worker_kwargs(),
+                emit=self.emit, **self._run_worker_kwargs(),
             )
         return cmd_run(self.project_dir, phase="analysis",
                         concurrency=self.config.analysis_concurrency, **self._run_worker_kwargs())
