@@ -69,7 +69,9 @@ export function ChaptersTab({
   function runBatch(type: TaskType) {
     const seqs = rows.filter((r) => selected.has(r.seq)).map((r) => r.seq)
     if (seqs.length === 0) return
-    onCreateTask(type, { chapters: seqs })
+    // per-chapter adapter（chapter_analysis_rerun/chapter_delta_rerun/chapter_visual/chapter_structure）
+    // 均读 params.seqs；勿用 chapters（那是 governance/export 的章节范围字符串参数）。
+    onCreateTask(type, { seqs })
   }
 
   const hasSelection = selected.size > 0

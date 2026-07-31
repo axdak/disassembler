@@ -246,7 +246,7 @@ describe('workbench seven-tab UI', () => {
     fireEvent.click(screen.getByRole('button', { name: '重跑章节分析' }))
     await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(1))
     expect(fake.calls.tasksCreate[0].type).toBe('chapter_analysis_rerun')
-    expect(fake.calls.tasksCreate[0].params.chapters).toEqual([1, 2])
+    expect(fake.calls.tasksCreate[0].params.seqs).toEqual([1, 2])
   })
 
   it('governance tab: range selection + history', async () => {
