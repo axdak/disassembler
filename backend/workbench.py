@@ -401,7 +401,15 @@ class WorkbenchTaskManager:
                 )
                 self._emit(saved, "task_done", result=result)
         except Exception as exc:
-            if cancellation_event.is_set() or self.db.get_task(task["id"])["cancel_requested"]:
+            # rc=130 是 worker 被取消的返回码（stream_shell_command 取消时返回 130）。
+            # 即使本任务的 cancellation_event 未置上（如被并行的流水线停止经全局
+            # _cancel_event 连带杀掉），也按取消处理，避免误标 failed。
+            is_cancel = (
+                cancellation_event.is_set()
+                or self.db.get_task(task["id"])["cancel_requested"]
+                or "rc=130" in str(exc)
+            )
+            if is_cancel:
                 saved = self.db.update_task(
                     task["id"], status="cancelled", ended_at=_now_iso()
                 )
