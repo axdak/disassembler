@@ -193,6 +193,7 @@ class Orchestrator:
                 worker_retries=self.config.worker_retries,
                 worker_timeout_seconds=self.config.worker_timeout_seconds,
                 worker_window=self.config.worker_window,
+                cancel_event=self._cancel,
             )
         return dict(
             run_mode="worker",
@@ -201,6 +202,7 @@ class Orchestrator:
             worker_retries=self.config.worker_retries,
             worker_timeout_seconds=self.config.worker_timeout_seconds,
             worker_window=self.config.worker_window,
+            cancel_event=self._cancel,
         )
 
     def _auto_namespace(self) -> argparse.Namespace:
@@ -224,6 +226,7 @@ class Orchestrator:
             worker_window=self.config.worker_window,
             worker_loop=self.config.worker_loop,
             per_chapter_concurrency=self.config.per_chapter_concurrency,
+            cancel_event=self._cancel,
         )
 
     def _worker_command(self) -> str:

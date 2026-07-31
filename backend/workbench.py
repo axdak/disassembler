@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,12 @@ from typing import Callable, Protocol
 from db import Database
 from hub import BroadcastHub
 from revisions import project_revisions, task_is_stale
+
+# engine/scripts 在 sys.path 时导入 set_cancel_event（task_adapters 也会加，这里自保）
+_ENGINE_SCRIPTS = str(Path(__file__).resolve().parent.parent / "engine" / "scripts")
+if _ENGINE_SCRIPTS not in sys.path:
+    sys.path.insert(0, _ENGINE_SCRIPTS)
+from run_pipeline import set_cancel_event  # noqa: E402
 
 
 WRITER_TASK_TYPES = frozenset({
@@ -364,6 +371,8 @@ class WorkbenchTaskManager:
         self, task, adapter, cancellation_event, writer_owner, reader_owner
     ) -> None:
         reader_released = False
+        # 把本任务的取消事件注入线程本地，让 adapter 跑的 worker 能收到取消信号
+        set_cancel_event(cancellation_event)
         try:
             project = self.db.get_project(task["project_id"])
             if not project:
@@ -422,6 +431,8 @@ class WorkbenchTaskManager:
                 )
                 self._emit(saved, "task_failed", error=str(exc), result=evidence)
         finally:
+            # 清除线程本地取消事件，避免泄漏到后续任务
+            set_cancel_event(threading.Event())
             with self._lock:
                 self._active.pop(task["id"], None)
             if writer_owner is not None:

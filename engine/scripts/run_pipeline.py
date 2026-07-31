@@ -134,14 +134,18 @@ def timeout_output(exc: subprocess.TimeoutExpired, timeout_seconds: float) -> st
     return f"{output}\n命令执行超时（{timeout_seconds:g} 秒），已终止。\n"
 
 
-# 可取消的 worker：编排器通过 set_cancel_event 注入 threading.Event，
-# stream_shell_command 轮询它，被取消时 kill 子进程并返回 130（用户取消）。
-_cancel_event = threading.Event()
+# 可取消的 worker：每个运行上下文（编排器/工作台任务）通过 set_cancel_event 把自己的
+# threading.Event 注入线程本地存储；stream_shell_command 轮询它，被取消时 kill 子进程
+# 并返回 130（用户取消）。用 threading.local 而非模块全局，避免并发运行互相串取消信号。
+_cancel_local = threading.local()
 
 
 def set_cancel_event(event: "threading.Event") -> None:
-    global _cancel_event
-    _cancel_event = event
+    _cancel_local.event = event
+
+
+def _get_cancel_event() -> "Optional[threading.Event]":
+    return getattr(_cancel_local, "event", None)
 
 
 def _kill_tree(proc: "subprocess.Popen") -> None:
@@ -209,7 +213,8 @@ def stream_shell_command(
 
     while True:
         drain_output()
-        if _cancel_event.is_set():
+        _ce = _get_cancel_event()
+        if _ce is not None and _ce.is_set():
             _kill_tree(proc)
             reader.join(timeout=1)
             drain_output()
@@ -2060,12 +2065,15 @@ def cmd_run_analysis(
     worker_loop: str = DEFAULT_WORKER_LOOP,
     rerun_command: str = "",
     concurrency: int = 1,
+    cancel_event: Optional["threading.Event"] = None,
 ) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow.
 
     concurrency>1 时并行生成各章分析MD（分析MD互相独立、不碰 故事结构_增量.json，可并行）；
     delta 阶段需合并同一 故事结构_增量.json 仍保持串行。
     """
+    if cancel_event is not None:
+        set_cancel_event(cancel_event)
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
@@ -2081,7 +2089,7 @@ def cmd_run_analysis(
         )
     return _cmd_run_analysis_parallel(
         project_dir, files, chapter_command, worker_timeout_seconds,
-        worker_retries, worker_window, concurrency,
+        worker_retries, worker_window, concurrency, cancel_event,
     )
 
 
@@ -2138,10 +2146,12 @@ def _cmd_run_analysis_serial(project_dir, files, chapter_command, worker_timeout
 
 
 def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeout_seconds,
-                               worker_retries, worker_window, concurrency) -> int:
+                               worker_retries, worker_window, concurrency, cancel_event=None) -> int:
     from concurrent.futures import ThreadPoolExecutor
 
     def _do_one(item):
+        if cancel_event is not None:
+            set_cancel_event(cancel_event)  # 线程池线程需各自设线程本地取消事件
         _chapter, ttype, task_pack, expected, seq = item
         return run_worker(
             chapter_command, project_dir, ttype, task_pack, expected, seq,
@@ -2192,6 +2202,7 @@ def cmd_run_interleaved(
     audit_interval: int = 5,
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
     emit: Optional[Callable] = None,
+    cancel_event: Optional["threading.Event"] = None,
 ) -> int:
     """交错流水线：N 个并行分析 worker 产出分析MD；1 个串行 delta worker 按章序消费。
 
@@ -2231,6 +2242,8 @@ def cmd_run_interleaved(
             cond.notify_all()
 
     def producer() -> None:
+        if cancel_event is not None:
+            set_cancel_event(cancel_event)
         while True:
             with cond:
                 if err["rc"]:
@@ -2272,6 +2285,8 @@ def cmd_run_interleaved(
                      detail=f"ch{seq:03d}/{total} 分析完成", data={"seq": seq, "total": total})
 
     def consumer() -> None:
+        if cancel_event is not None:
+            set_cancel_event(cancel_event)
         for seq in seqs:
             with cond:
                 while not ready.get(seq) and not err["rc"]:
@@ -2443,7 +2458,10 @@ def cmd_run(
     worker_window: str = DEFAULT_WORKER_WINDOW,
     worker_loop: str = DEFAULT_WORKER_LOOP,
     concurrency: int = 1,
+    cancel_event: Optional["threading.Event"] = None,
 ) -> int:
+    if cancel_event is not None:
+        set_cancel_event(cancel_event)
     requested_chapter_command = chapter_command
     requested_audit_command = audit_command
     mode = effective_run_mode(run_mode, chapter_command, audit_command, worker_provider)
@@ -2474,6 +2492,7 @@ def cmd_run(
             worker_loop=worker_loop,
             rerun_command=rerun_command,
             concurrency=concurrency,
+            cancel_event=cancel_event,
         )
     if phase == "delta":
         return cmd_run_delta(
@@ -3164,6 +3183,7 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
 
     suffix = f"{task}_per_chapter"
     concurrency = max(1, getattr(args, "per_chapter_concurrency", 1))
+    cancel_event = getattr(args, "cancel_event", None)
     # supervised 模式为主控 agent 逐章交接，不并行；无 worker 命令时走 handoff 串行。
     use_parallel = (
         concurrency > 1
@@ -3197,6 +3217,8 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
             wk_window = getattr(args, "worker_window", DEFAULT_WORKER_WINDOW)
 
             def _do_one(job):
+                if cancel_event is not None:
+                    set_cancel_event(cancel_event)  # 线程池线程需各自设线程本地取消事件
                 seq_j, task_pack_j, expected_j = job
                 return run_multi_output_worker(
                     worker_command, project_dir, task, task_pack_j, expected_j, seq_j,
