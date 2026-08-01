@@ -369,7 +369,10 @@ def collect_artifact_status(project_dir, tasks, *, revisions: dict | None = None
                 per_chapter_latest.append(latest)
         stale = any(c.status == "stale" for c in cards.values())
         latest_task = max(per_chapter_latest, key=lambda t: t["id"] or 0) if per_chapter_latest else None
-        error = latest_task["error"] if latest_task and latest_task.get("error") else None
+        # 行级 error 只在该章有 failed 卡片（产物缺失）时显示；
+        # 已成功的章（卡片 latest/stale）不显示任务的失败错误
+        has_failed_card = any(c.status == "failed" for c in cards.values())
+        error = latest_task["error"] if (latest_task and latest_task.get("error") and has_failed_card) else None
         chapter_cards.append(ChapterCardStatus(
             seq=seq,
             filename=ch.get("filename", ""),

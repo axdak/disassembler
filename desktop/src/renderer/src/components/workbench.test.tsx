@@ -152,6 +152,7 @@ function mountFakeApi(opts: { appendPreview?: AppendPlan } = {}): FakeApi {
     pickFolder: async () => null,
     createFromBook: async () => PROJECT,
     onEvent: (cb) => { handlers.push(cb); return () => { const i = handlers.indexOf(cb); if (i >= 0) handlers.splice(i, 1) } },
+    openInFolder: async () => {},
   }
   return {
     api,

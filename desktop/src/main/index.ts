@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, Tray, nativeImage, shell } from 'electron'
 import { join } from 'node:path'
 import type { ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'node:stream'
@@ -104,6 +104,11 @@ function registerIpc(): void {
   })
   ipcMain.handle('nd:projects:fromBook', (_e, source_file: string) =>
     bpost('/projects/from-book', { source_file }))
+  // 在系统文件管理器中打开并选中指定文件
+  ipcMain.handle('nd:open-in-folder', (_e, path: string) => {
+    shell.showItemInFolder(path)
+    return true
+  })
 }
 
 function startEventBridge(win: BrowserWindow): void {

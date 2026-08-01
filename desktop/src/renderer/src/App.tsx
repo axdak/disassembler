@@ -233,6 +233,8 @@ export function App() {
                   artifactStatus={workbench.artifactStatus}
                   onCreateTask={createTask}
                   onOpenArtifact={loadArtifact}
+                  runningTaskId={workbench.tasks.find((t) => t.status === 'running')?.id ?? null}
+                  onCancelTask={workbench.cancel}
                 />
               )}
               {tab === 'analysis' && (

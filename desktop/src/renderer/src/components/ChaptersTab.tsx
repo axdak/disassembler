@@ -31,11 +31,15 @@ export function ChaptersTab({
   artifactStatus,
   onCreateTask,
   onOpenArtifact,
+  runningTaskId,
+  onCancelTask,
 }: {
   chapters: Chapter[]
   artifactStatus: ArtifactStatusResponse | null
   onCreateTask: (type: TaskType, params: Record<string, unknown>) => Promise<void>
   onOpenArtifact: (path: string) => void
+  runningTaskId: number | null
+  onCancelTask: (taskId: number) => Promise<void>
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
@@ -83,8 +87,11 @@ export function ChaptersTab({
       <h3 style={{ marginTop: 0 }}>章节工作台</h3>
       <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         {BATCH_ACTIONS.map((a) => (
-          <button key={a.type} onClick={() => runBatch(a.type)} disabled={!hasSelection}>{a.label}</button>
+          <button key={a.type} onClick={() => runBatch(a.type)} disabled={!hasSelection || runningTaskId != null}>{a.label}</button>
         ))}
+        {runningTaskId != null && (
+          <button onClick={() => onCancelTask(runningTaskId)} style={{ color: 'crimson' }}>取消运行中任务</button>
+        )}
         <span style={{ fontSize: 12, color: '#666' }}>已选 {selected.size}/{rows.length}</span>
       </div>
       <table style={{ fontSize: 13, width: '100%', borderCollapse: 'collapse' }}>

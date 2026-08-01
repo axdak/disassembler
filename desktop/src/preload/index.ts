@@ -44,6 +44,7 @@ const api = {
     ipcRenderer.on('nd:event', handler)
     return () => ipcRenderer.removeListener('nd:event', handler)
   },
+  openInFolder: (path: string) => ipcRenderer.invoke('nd:open-in-folder', path),
 }
 
 contextBridge.exposeInMainWorld('api', api)

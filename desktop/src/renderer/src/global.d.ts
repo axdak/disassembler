@@ -50,6 +50,7 @@ declare global {
       pickFolder(): Promise<string | null>
       createFromBook(source_file: string): Promise<Project>
       onEvent(cb: (ev: unknown) => void): () => void
+      openInFolder(path: string): Promise<void>
     }
   }
 }
