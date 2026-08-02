@@ -400,7 +400,10 @@ def summarize_story_structure(story: Dict[str, Any], max_items: int = 80) -> str
         items = story.get(key, []) if isinstance(story, dict) else []
         lines.append(f"- {key}: {len(items)}")
         names = []
-        for item in items[:max_items]:
+        # max_items <= 0 表示不限制（给全部名称），与 build_lightweight_index 的全索引语义对齐；
+        # 供大书的全书分析任务包使用，避免 80 截断导致第 81 个起元素名称被遗漏。
+        shown = items if max_items <= 0 else items[:max_items]
+        for item in shown:
             if isinstance(item, dict) and item.get("名称"):
                 brief = item.get("名称")
                 group = item.get("分组")
@@ -416,7 +419,7 @@ def summarize_story_structure(story: Dict[str, Any], max_items: int = 80) -> str
                 names.append(str(brief))
         if names:
             lines.append("  - " + "、".join(names))
-        if len(items) > max_items:
+        if max_items > 0 and len(items) > max_items:
             lines.append(f"  - ……另有 {len(items) - max_items} 个未列出")
     return "\n".join(lines)
 
@@ -590,7 +593,7 @@ def split_batches(chapters: List[Dict[str, Any]], project_dir: Path, task: str, 
     return batches
 
 
-def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None, story_summary_max_items: int = 80, context_budget_chars: int = 160000) -> str:
+def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None, story_summary_max_items: int = 0, context_budget_chars: int = 160000) -> str:
     story_path = project_dir / "故事结构_增量.json"
     story = load_json(story_path) or {}
     task_info = TASKS[task]
@@ -646,6 +649,8 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
     lines.append("")
 
     lines.append("## 当前故事结构摘要")
+    # story_summary_max_items <= 0 表示不限制（给全部名称），默认全索引，避免大书第 81 个起元素名称被遗漏；
+    # 与 build_lightweight_index / 周期治理 story_index 档的全索引语义一致，保留分组与事件视觉标签锚点。
     lines.append(summarize_story_structure(story, max_items=story_summary_max_items))
     lines.append("")
 
@@ -698,7 +703,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-pack-chars", type=int, default=70000, help="单个任务包最大字符数，超出自动分包")
     parser.add_argument("--max-original-chars", type=int, default=6000, help="每章原文最多放入字符数；sample模式会抽样")
     parser.add_argument("--max-analysis-chars", type=int, default=12000, help="每章分析MD最多放入字符数")
-    parser.add_argument("--story-summary-max-items", type=int, default=80, help="故事结构摘要每集合最大列出条目数")
+    parser.add_argument("--story-summary-max-items", type=int, default=0, help="故事结构摘要每集合最大列出条目数；0=不限制（全名称索引，默认，避免大书遗漏）")
     parser.add_argument("--context-budget-chars", type=int, default=160000, help="上下文预算字符数，auto模式按此自动分级")
     parser.add_argument("--out-dir", default="", help="输出目录；默认 全书分析/_任务包/<timestamp>_<task>")
     parser.add_argument("--per-chapter", action="store_true", help="每个章节生成一份独立任务包（visual_assets / chapter_structure）")

@@ -534,7 +534,7 @@ def build_analysis_auto_foreground_command(args: argparse.Namespace, task: str, 
         ("max_pack_chars", "--max-pack-chars", 70000),
         ("max_original_chars", "--max-original-chars", 6000),
         ("max_analysis_chars", "--max-analysis-chars", 12000),
-        ("story_summary_max_items", "--story-summary-max-items", 80),
+        ("story_summary_max_items", "--story-summary-max-items", 0),
         ("context_budget_chars", "--context-budget-chars", 160000),
     ]:
         value = getattr(args, name, default)
@@ -2056,7 +2056,7 @@ def cmd_run_analysis(
     include_original: str = "auto",
     max_original_chars: int = 6000,
     max_analysis_chars: int = 12000,
-    story_summary_max_items: int = 80,
+    story_summary_max_items: int = 0,
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
@@ -2199,7 +2199,7 @@ def cmd_run_interleaved(
     include_original: str = "auto",
     max_original_chars: int = 6000,
     max_analysis_chars: int = 12000,
-    story_summary_max_items: int = 80,
+    story_summary_max_items: int = 0,
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
@@ -2464,7 +2464,7 @@ def cmd_run(
     include_original: str = "auto",
     max_original_chars: int = 6000,
     max_analysis_chars: int = 12000,
-    story_summary_max_items: int = 80,
+    story_summary_max_items: int = 0,
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
@@ -2924,7 +2924,7 @@ def cmd_split(args: argparse.Namespace) -> int:
 def cmd_analysis_pack(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir)
     init_dirs(project_dir)
-    cmd = [sys.executable, str(script_path("analysis_context_pack.py")), str(project_dir), "--task", args.task, "--chapters", args.chapters, "--include-original", args.include_original, "--max-pack-chars", str(args.max_pack_chars), "--max-original-chars", str(args.max_original_chars), "--max-analysis-chars", str(args.max_analysis_chars), "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 80)), "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000))]
+    cmd = [sys.executable, str(script_path("analysis_context_pack.py")), str(project_dir), "--task", args.task, "--chapters", args.chapters, "--include-original", args.include_original, "--max-pack-chars", str(args.max_pack_chars), "--max-original-chars", str(args.max_original_chars), "--max-analysis-chars", str(args.max_analysis_chars), "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 0)), "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000))]
     if args.targets:
         cmd.extend(["--targets", *args.targets])
     if args.question:
@@ -3126,7 +3126,7 @@ def run_analysis_context_pack_for_auto(args: argparse.Namespace, task: str, seq:
             "--max-pack-chars", str(args.max_pack_chars),
             "--max-original-chars", str(args.max_original_chars),
             "--max-analysis-chars", str(args.max_analysis_chars),
-            "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 80)),
+            "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 0)),
             "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000)),
         ])
     return run_cmd(cmd)
@@ -3340,7 +3340,7 @@ def cmd_visual_assets_auto_legacy(args: argparse.Namespace) -> int:
             "--max-pack-chars", str(args.max_pack_chars),
             "--max-original-chars", str(args.max_original_chars),
             "--max-analysis-chars", str(args.max_analysis_chars),
-            "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 80)),
+            "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 0)),
             "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000)),
         ]
         rc = run_cmd(cmd)
@@ -3823,7 +3823,7 @@ def main() -> int:
     p_pack.add_argument("--max-pack-chars", type=int, default=70000)
     p_pack.add_argument("--max-original-chars", type=int, default=6000)
     p_pack.add_argument("--max-analysis-chars", type=int, default=12000)
-    p_pack.add_argument("--story-summary-max-items", type=int, default=80)
+    p_pack.add_argument("--story-summary-max-items", type=int, default=0)
     p_pack.add_argument("--context-budget-chars", type=int, default=160000)
     p_pack.add_argument("--out-dir", default="")
     p_pack.add_argument("--per-chapter", action="store_true", help="每章一份独立任务包（visual_assets / chapter_structure），产物扁平写入 全书分析/<维度>/分章/ 下 chNNN_<标题>_*.md")
@@ -3838,7 +3838,7 @@ def main() -> int:
     p_vauto.add_argument("--max-pack-chars", type=int, default=70000)
     p_vauto.add_argument("--max-original-chars", type=int, default=6000)
     p_vauto.add_argument("--max-analysis-chars", type=int, default=12000)
-    p_vauto.add_argument("--story-summary-max-items", type=int, default=80)
+    p_vauto.add_argument("--story-summary-max-items", type=int, default=0)
     p_vauto.add_argument("--context-budget-chars", type=int, default=160000)
     p_vauto.add_argument("--force-aggregate", action="store_true", help="即便顶层汇总已存在，也重新生成 aggregate 任务包")
 
@@ -3857,7 +3857,7 @@ def main() -> int:
     p_sauto.add_argument("--max-pack-chars", type=int, default=70000)
     p_sauto.add_argument("--max-original-chars", type=int, default=6000)
     p_sauto.add_argument("--max-analysis-chars", type=int, default=12000)
-    p_sauto.add_argument("--story-summary-max-items", type=int, default=80)
+    p_sauto.add_argument("--story-summary-max-items", type=int, default=0)
     p_sauto.add_argument("--context-budget-chars", type=int, default=160000)
     p_sauto.add_argument("--force-aggregate", action="store_true", help=argparse.SUPPRESS)
     p_sauto.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent, serial, worker, or auto")

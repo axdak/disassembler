@@ -69,7 +69,7 @@ class Config:
     include_original: str = "auto"  # auto | none | sample | full
     max_original_chars: int = 6000
     max_analysis_chars: int = 12000
-    story_summary_max_items: int = 80
+    story_summary_max_items: int = 0  # 0=不限制（全名称索引，默认，避免大书全书分析任务包遗漏元素）
     context_budget_chars: int = 160000
     delta_full_story_kb: int = 256
     audit_max_context_chars: int = 524288
