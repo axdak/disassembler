@@ -392,6 +392,14 @@ function SettingsView({ settings, setSettings, onSave }: {
           />
           <span style={{ fontSize: 12, color: '#888' }}> 字符；auto 按此分级（×0.5/×1.0 两道阈值），也是分析包总预算标尺</span>
         </div>
+        <div style={{ marginTop: 8 }}>
+          <label>单包字符上限: </label>
+          <input type="number" min={10000} style={{ width: 80 }}
+            value={String((settings.max_pack_chars as number) ?? 70000)}
+            onChange={(e) => setSettings({ ...settings, max_pack_chars: Math.max(10000, Number(e.target.value) || 70000) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；全书分析任务包超出此值自动分包（多包走 reduce），仅影响阶段5全书分析任务包</span>
+        </div>
       </div>
 
       {/* 第三组：Delta 与周期治理 —— 两个独立子系统的上下文压缩阈值，与分析任务包互不影响 */}

@@ -822,6 +822,7 @@ def test_runconfig_to_config_passes_compression_fields():
         context_budget_chars=222222,
         delta_full_story_kb=66,
         audit_max_context_chars=111111,
+        max_pack_chars=55555,
     )
     cfg = runconfig_to_config(rc)
     assert cfg.include_original == "full"
@@ -831,3 +832,4 @@ def test_runconfig_to_config_passes_compression_fields():
     assert cfg.context_budget_chars == 222222
     assert cfg.delta_full_story_kb == 66
     assert cfg.audit_max_context_chars == 111111
+    assert cfg.max_pack_chars == 55555

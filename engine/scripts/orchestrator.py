@@ -73,6 +73,7 @@ class Config:
     context_budget_chars: int = 160000
     delta_full_story_kb: int = 256
     audit_max_context_chars: int = 524288
+    max_pack_chars: int = 70000  # 全书分析任务包单包最大字符数，超出自动分包；只影响阶段5全书分析任务包
 
 
 class Orchestrator:
@@ -220,7 +221,7 @@ class Orchestrator:
         """
         return argparse.Namespace(
             project_dir=str(self.project_dir),
-            max_pack_chars=70000,
+            max_pack_chars=self.config.max_pack_chars,
             force_aggregate=False,
             run_mode="worker",
             worker_provider="manual" if self.config.worker_command else self.config.worker_provider,
@@ -279,7 +280,7 @@ class Orchestrator:
         rc = run_cmd([
             sys.executable, str(script_path("analysis_context_pack.py")), str(self.project_dir),
             "--task", task, "--chapters", "all", "--include-original", "sample",
-            "--max-pack-chars", "70000", "--max-original-chars", "6000", "--max-analysis-chars", "12000",
+            "--max-pack-chars", str(self.config.max_pack_chars), "--max-original-chars", "6000", "--max-analysis-chars", "12000",
         ])
         if rc != 0:
             return rc

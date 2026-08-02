@@ -51,6 +51,7 @@ def runconfig_to_config(rc: RunConfig) -> Config:
         context_budget_chars=rc.context_budget_chars,
         delta_full_story_kb=rc.delta_full_story_kb,
         audit_max_context_chars=rc.audit_max_context_chars,
+        max_pack_chars=rc.max_pack_chars,
     )
 
 

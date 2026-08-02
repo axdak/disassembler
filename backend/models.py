@@ -64,6 +64,7 @@ class RunConfig(BaseModel):
     context_budget_chars: int = 160000
     delta_full_story_kb: int = 256
     audit_max_context_chars: int = 524288
+    max_pack_chars: int = 70000  # 全书分析任务包单包最大字符数，超出自动分包；只影响阶段5全书分析任务包
 
 
 class RunStart(BaseModel):
