@@ -43,6 +43,14 @@ def runconfig_to_config(rc: RunConfig) -> Config:
         chapter_mode=rc.chapter_mode,
         fullbook_tasks=tuple(rc.fullbook_tasks),
         export_source=rc.export_source,
+        # 任务包上下文压缩策略（透传至 orchestrator.Config，再经 CLI 喂给 run_pipeline）
+        include_original=rc.include_original,
+        max_original_chars=rc.max_original_chars,
+        max_analysis_chars=rc.max_analysis_chars,
+        story_summary_max_items=rc.story_summary_max_items,
+        context_budget_chars=rc.context_budget_chars,
+        delta_full_story_kb=rc.delta_full_story_kb,
+        audit_max_context_chars=rc.audit_max_context_chars,
     )
 
 

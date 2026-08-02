@@ -6,7 +6,7 @@ import pytest
 from db import Database
 from hub import BroadcastHub
 from models import RunConfig
-from runner import QueueRunner, RunManager
+from runner import QueueRunner, RunManager, runconfig_to_config
 from workbench import WorkbenchTaskManager, WriterCoordinator
 
 
@@ -810,3 +810,24 @@ def test_shutdown_cancels_active_work_and_stops_admission(manager_env):
     assert writer_factory.instances[0].cancel_called.is_set()
     with pytest.raises(RuntimeError, match="已关闭"):
         manager.create(p1["id"], "governance", {})
+
+
+def test_runconfig_to_config_passes_compression_fields():
+    """RunConfig 的压缩策略字段必须透传到 orchestrator.Config，否则设置页配置静默失效。"""
+    rc = RunConfig(
+        include_original="full",
+        max_original_chars=9999,
+        max_analysis_chars=8888,
+        story_summary_max_items=77,
+        context_budget_chars=222222,
+        delta_full_story_kb=66,
+        audit_max_context_chars=111111,
+    )
+    cfg = runconfig_to_config(rc)
+    assert cfg.include_original == "full"
+    assert cfg.max_original_chars == 9999
+    assert cfg.max_analysis_chars == 8888
+    assert cfg.story_summary_max_items == 77
+    assert cfg.context_budget_chars == 222222
+    assert cfg.delta_full_story_kb == 66
+    assert cfg.audit_max_context_chars == 111111
