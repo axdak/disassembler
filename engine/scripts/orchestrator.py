@@ -71,7 +71,8 @@ class Config:
     max_analysis_chars: int = 12000
     story_summary_max_items: int = 80
     context_budget_chars: int = 160000
-    delta_full_story_kb: int = 80
+    delta_full_story_kb: int = 256
+    audit_max_context_chars: int = 524288
 
 
 class Orchestrator:
@@ -203,6 +204,7 @@ class Orchestrator:
             story_summary_max_items=self.config.story_summary_max_items,
             context_budget_chars=self.config.context_budget_chars,
             delta_full_story_kb=self.config.delta_full_story_kb,
+            audit_max_context_chars=self.config.audit_max_context_chars,
         )
         if self.config.worker_command:
             return {**base, "worker_provider": "manual",
@@ -235,6 +237,7 @@ class Orchestrator:
             story_summary_max_items=self.config.story_summary_max_items,
             context_budget_chars=self.config.context_budget_chars,
             delta_full_story_kb=self.config.delta_full_story_kb,
+            audit_max_context_chars=self.config.audit_max_context_chars,
         )
 
     def _worker_command(self) -> str:

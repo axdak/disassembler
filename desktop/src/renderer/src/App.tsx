@@ -377,10 +377,18 @@ function SettingsView({ settings, setSettings, onSave }: {
       <div style={{ marginTop: 8 }}>
         <label>Delta故事阈值: </label>
         <input type="number" min={10} style={{ width: 70 }}
-          value={String((settings.delta_full_story_kb as number) ?? 80)}
-          onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 80) })}
+          value={String((settings.delta_full_story_kb as number) ?? 256)}
+          onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 256) })}
         />
         <span style={{ fontSize: 12, color: '#888' }}> KB；故事JSON超此值时delta提取改用名称索引+近期delta</span>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>周期审计上下文上限: </label>
+        <input type="number" min={10000} style={{ width: 80 }}
+          value={String((settings.audit_max_context_chars as number) ?? 524288)}
+          onChange={(e) => setSettings({ ...settings, audit_max_context_chars: Math.max(10000, Number(e.target.value) || 524288) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> 字符；周期审计单包最大字符数，524288=512×1024，适配长上下文模型</span>
       </div>
       <p style={{ fontSize: 12, color: '#888' }}>
         其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。

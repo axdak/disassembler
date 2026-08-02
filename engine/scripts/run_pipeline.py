@@ -101,9 +101,9 @@ if DEFAULT_WORKER_LOOP not in WORKER_LOOPS:
     DEFAULT_WORKER_LOOP = "supervised"
 
 # 周期审计由外部 Agent 执行，脚本无法得知实际模型 tokenizer，故采用可配置的
-# 字符预算而不伪造精确 token 计数。默认值为 256k 上下文模型预留输出、系统提示和
-# 工具调用后的保守输入上限；调用方可按实际模型覆盖。
-DEFAULT_AUDIT_MAX_CONTEXT_CHARS = 160_000
+# 字符预算而不伪造精确 token 计数。默认 524288 = 512×1024，对应 512K 字符预算，
+# 适配长上下文模型；调用方可按实际模型覆盖。
+DEFAULT_AUDIT_MAX_CONTEXT_CHARS = 524_288
 AUDIT_CONTEXT_FORMAT_VERSION = 2
 AUDIT_RESOLVED_STATUSES = {"committed", "covered_by_children"}
 
@@ -1215,7 +1215,7 @@ def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, sta
 # Delta 提取器故事上下文分级阈值
 # 「增量JSON膨胀应对」：故事 JSON 超过此阈值时，delta 提取器改用全部名称索引
 # + 最近10章delta完整内容，而非完整故事JSON。阈值可经设置页配置。
-DELTA_FULL_STORY_KB = 80
+DELTA_FULL_STORY_KB = 256
 
 
 def _recent_delta_name_summary(project_dir: Path, chapter_seq: int, count: int = 10) -> str:
@@ -1308,7 +1308,7 @@ def build_delta_story_context(story: Path, project_dir: Path, chapter_seq: int,
     """按分级策略构造 Delta 提取器的故事上下文。
 
     | 故事 JSON 大小 | 输入策略 |
-    | < 阈值(默认80KB) | 完整故事 JSON |
+    | < 阈值(默认256KB) | 完整故事 JSON |
     | ≥ 阈值          | 全部元素名称索引 + 最近10章 Delta 完整内容 |
 
     大档附上 故事结构_增量.json 路径，供 worker 按需读取局部详情。
@@ -3772,7 +3772,7 @@ def main() -> int:
     p_run.add_argument("project_dir")
     p_run.add_argument("--max-chapters", type=int, default=0)
     p_run.add_argument("--audit-interval", type=int, default=5, help="每N章执行一次自动周期治理；0表示关闭")
-    p_run.add_argument("--audit-max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认按256k上下文模型预留输出和安全余量")
+    p_run.add_argument("--audit-max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认 524288 = 512×1024，适配长上下文模型")
     p_run.add_argument("--phase", choices=["auto", "analysis", "delta"], default="auto", help="运行阶段：auto=旧逐章流程；analysis=只循环生成/校验章节分析MD；delta=先要求全部MD合格，再循环生成/提交结构JSON")
     p_run.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent=main agent dispatches a child agent, serial=main agent handles return-2 task packs then reruns, worker=external CLI worker, auto=worker when configured otherwise subagent")
     p_run.add_argument("--chapter-command", default="", help="外部章节 worker 命令；由 run 传入当前任务包并验收章节分析/Delta/修复产物")
@@ -3810,7 +3810,7 @@ def main() -> int:
     p_audit.add_argument("project_dir")
     p_audit.add_argument("--chapters", required=True, help="章节范围，例如 1-5 或 1-10")
     p_audit.add_argument("--force", action="store_true")
-    p_audit.add_argument("--max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认按256k上下文模型预留输出和安全余量")
+    p_audit.add_argument("--max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认 524288 = 512×1024，适配长上下文模型")
 
     p_pack = sub.add_parser("analysis-pack", help="生成全书/局部分析任务包")
     p_pack.add_argument("project_dir")

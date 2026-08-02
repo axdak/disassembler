@@ -632,7 +632,7 @@ def test_commit_governance_rejects_no_change_missing_metadata():
 
 
 def test_delta_story_context_passes_full_story_when_small():
-    # < 80KB：完整故事 JSON 直接传给 Delta 提取器。
+    # < 256KB：完整故事 JSON 直接传给 Delta 提取器。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -648,18 +648,18 @@ def test_delta_story_context_passes_full_story_when_small():
         assert "FULL_ONLY_MARKER" in ctx
         assert "主角介绍" in ctx
 
-    print("[OK] 小故事(<80KB) Delta 上下文传完整 JSON")
+    print("[OK] 小故事(<256KB) Delta 上下文传完整 JSON")
 
 
 def test_delta_story_context_passes_name_index_plus_recent_when_medium():
-    # 80-200KB：传元素名称摘要 + 最近10章 Delta，不传完整详情。
+    # ≥256KB（中量）：传元素名称摘要 + 最近10章 Delta，不传完整详情。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
         data = empty_story()
         data["角色集"] = [
             {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
-            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 90000},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 280000},
         ]
         write_json(story, data)
 
@@ -669,7 +669,7 @@ def test_delta_story_context_passes_name_index_plus_recent_when_medium():
         assert "主角A" in ctx
         assert "路人B" in ctx
 
-    print("[OK] 中故事(80-200KB) Delta 上下文传名称摘要+最近10章Delta")
+    print("[OK] 中故事(≥256KB) Delta 上下文传名称摘要+最近10章Delta")
 
 
 def test_delta_story_context_large_tier_all_names_not_details():
@@ -680,7 +680,7 @@ def test_delta_story_context_large_tier_all_names_not_details():
         data = empty_story()
         data["角色集"] = [
             {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
-            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 210000},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 520000},
         ]
         write_json(story, data)
 
@@ -701,7 +701,7 @@ def test_delta_story_context_large_tier_all_faction_names():
         story = project / "故事结构_增量.json"
         data = empty_story()
         data["角色集"] = [
-            {"名称": "主角A", "是否主角": True, "所属阵营": ["大公会"], "介绍": "x" * 210000},
+            {"名称": "主角A", "是否主角": True, "所属阵营": ["大公会"], "介绍": "x" * 280000},
         ]
         data["阵营集"] = [
             {"名称": "大公会", "父级阵营": ""},
@@ -720,14 +720,14 @@ def test_delta_story_context_large_tier_all_faction_names():
 
 
 def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
-    # 80-200KB：名称摘要 + 最近10章 Delta 实际内容（不只是名称）。
+    # ≥256KB（中量）：名称摘要 + 最近10章 Delta 实际内容（不只是名称）。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
         data = empty_story()
         data["角色集"] = [
             {"名称": "主角A", "是否主角": True, "介绍": "主角介绍"},
-            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 90000},
+            {"名称": "路人B", "介绍": "FULL_ONLY_MARKER" + "x" * 280000},
         ]
         write_json(story, data)
         # 准备前一章已提交的 Delta，带一个可识别的实际内容标记
@@ -750,7 +750,7 @@ def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
         assert "FULL_ONLY_MARKER" not in ctx  # 故事详情不进摘要
         assert "第001章 Delta:" in ctx  # 实际 Delta 块标记
 
-    print("[OK] 80-200KB 档传名称摘要+最近10章Delta实际内容")
+    print("[OK] ≥256KB 档传名称摘要+最近10章Delta实际内容")
 
 
 if __name__ == "__main__":
