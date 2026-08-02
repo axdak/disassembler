@@ -300,96 +300,122 @@ function SettingsView({ settings, setSettings, onSave }: {
   onSave: () => void
 }) {
   const prov = (settings.worker_provider as string) || 'agy'
+  // 分区样式：浅灰边框 + 顶/底留白，与组件其余行内 style 风格一致
+  const sectionStyle = {
+    border: '1px solid #e0e0e0', borderRadius: 4, padding: '10px 12px',
+    marginTop: 12, background: '#fafafa',
+  }
+  const groupHintStyle = { fontSize: 12, color: '#888', margin: '4px 0 8px' }
   return (
     <div style={{ maxWidth: 520 }}>
       <h3>设置</h3>
-      <label>worker provider: </label>
-      <select value={prov} onChange={(e) => setSettings({ ...settings, worker_provider: e.target.value })}>
-        <option value="agy">agy</option>
-        <option value="codebuddy">codebuddy</option>
-      </select>
-      <div style={{ marginTop: 8 }}>
-        <label>章节模式: </label>
-        <select value={(settings.chapter_mode as string) || 'two_phase'} onChange={(e) => setSettings({ ...settings, chapter_mode: e.target.value })}>
-          <option value="two_phase">两阶段（先全部分析再 delta）</option>
-          <option value="interleaved">交错流水线（分析并行+delta 串行重叠）</option>
+
+      {/* 第一组：运行调度 —— 影响流水线怎么跑（worker/并发/章节编排），与压缩无关 */}
+      <div style={sectionStyle}>
+        <h4 style={{ margin: '0 0 6px' }}>运行调度</h4>
+        <div style={groupHintStyle}>控制 worker 后端、章节编排方式与各阶段并发度。</div>
+        <label>worker provider: </label>
+        <select value={prov} onChange={(e) => setSettings({ ...settings, worker_provider: e.target.value })}>
+          <option value="agy">agy</option>
+          <option value="codebuddy">codebuddy</option>
         </select>
+        <div style={{ marginTop: 8 }}>
+          <label>章节模式: </label>
+          <select value={(settings.chapter_mode as string) || 'two_phase'} onChange={(e) => setSettings({ ...settings, chapter_mode: e.target.value })}>
+            <option value="two_phase">两阶段（先全部分析再 delta）</option>
+            <option value="interleaved">交错流水线（分析并行+delta 串行重叠）</option>
+          </select>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>分析并发量: </label>
+          <input
+            type="number" min={1} style={{ width: 60 }}
+            value={String((settings.analysis_concurrency as number) ?? 1)}
+            onChange={(e) => setSettings({ ...settings, analysis_concurrency: Math.max(1, Number(e.target.value) || 1) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> &gt;1 时章节分析并行（delta 仍串行）</span>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>分章任务并发量: </label>
+          <input
+            type="number" min={1} style={{ width: 60 }}
+            value={String((settings.per_chapter_concurrency as number) ?? 2)}
+            onChange={(e) => setSettings({ ...settings, per_chapter_concurrency: Math.max(1, Number(e.target.value) || 1) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 章节结构/视觉资产多章并行；1=逐章串行</span>
+        </div>
       </div>
-      <div style={{ marginTop: 8 }}>
-        <label>分析并发量: </label>
-        <input
-          type="number" min={1} style={{ width: 60 }}
-          value={String((settings.analysis_concurrency as number) ?? 1)}
-          onChange={(e) => setSettings({ ...settings, analysis_concurrency: Math.max(1, Number(e.target.value) || 1) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> &gt;1 时章节分析并行（delta 仍串行）</span>
+
+      {/* 第二组：分析任务包 —— 全书分析/章节结构分析/视觉资产三类任务共用 build_pack 的打包参数 */}
+      <div style={sectionStyle}>
+        <h4 style={{ margin: '0 0 6px' }}>分析任务包</h4>
+        <div style={groupHintStyle}>以下参数作用于所有分析任务（全书分析、章节结构分析、视觉资产）的任务包打包。</div>
+        <div style={{ marginTop: 8 }}>
+          <label>原文策略: </label>
+          <select value={(settings.include_original as string) || 'auto'} onChange={(e) => setSettings({ ...settings, include_original: e.target.value })}>
+            <option value="auto">auto（按故事大小自动分级）</option>
+            <option value="full">full（全文）</option>
+            <option value="sample">sample（三段抽样）</option>
+            <option value="none">none（不放原文）</option>
+          </select>
+          <span style={{ fontSize: 12, color: '#888' }}> auto：小→全文、中→抽样、大→不放</span>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>每章原文上限: </label>
+          <input type="number" min={1000} style={{ width: 70 }}
+            value={String((settings.max_original_chars as number) ?? 6000)}
+            onChange={(e) => setSettings({ ...settings, max_original_chars: Math.max(1000, Number(e.target.value) || 6000) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；sample 模式三段各取 1/3</span>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>分析MD上限: </label>
+          <input type="number" min={1000} style={{ width: 70 }}
+            value={String((settings.max_analysis_chars as number) ?? 12000)}
+            onChange={(e) => setSettings({ ...settings, max_analysis_chars: Math.max(1000, Number(e.target.value) || 12000) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；每章分析MD塞入任务包的字符上限</span>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>摘要最大条目: </label>
+          <input type="number" min={0} style={{ width: 70 }}
+            value={String((settings.story_summary_max_items as number) ?? 0)}
+            onChange={(e) => setSettings({ ...settings, story_summary_max_items: Math.max(0, Number(e.target.value) || 0) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 故事结构摘要每集合列出元素的上限条数；0=不限（全名称索引，默认，避免大书遗漏）</span>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>上下文预算: </label>
+          <input type="number" min={10000} style={{ width: 80 }}
+            value={String((settings.context_budget_chars as number) ?? 160000)}
+            onChange={(e) => setSettings({ ...settings, context_budget_chars: Math.max(10000, Number(e.target.value) || 160000) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；auto 按此分级（×0.5/×1.0 两道阈值），也是分析包总预算标尺</span>
+        </div>
       </div>
-      <div style={{ marginTop: 8 }}>
-        <label>分章任务并发量: </label>
-        <input
-          type="number" min={1} style={{ width: 60 }}
-          value={String((settings.per_chapter_concurrency as number) ?? 2)}
-          onChange={(e) => setSettings({ ...settings, per_chapter_concurrency: Math.max(1, Number(e.target.value) || 1) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> 章节结构/视觉资产多章并行；1=逐章串行</span>
+
+      {/* 第三组：Delta 与周期治理 —— 两个独立子系统的上下文压缩阈值，与分析任务包互不影响 */}
+      <div style={sectionStyle}>
+        <h4 style={{ margin: '0 0 6px' }}>Delta 与周期治理</h4>
+        <div style={groupHintStyle}>Delta 提取与周期审计各自独立的上下文压缩阈值，与分析任务包参数互不影响。</div>
+        <div style={{ marginTop: 8 }}>
+          <label>Delta故事阈值: </label>
+          <input type="number" min={10} style={{ width: 70 }}
+            value={String((settings.delta_full_story_kb as number) ?? 256)}
+            onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 256) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> KB；story.json 超此值时 delta 改用名称索引+最近10章 delta，不再传完整故事</span>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <label>周期审计上下文上限: </label>
+          <input type="number" min={10000} style={{ width: 80 }}
+            value={String((settings.audit_max_context_chars as number) ?? 524288)}
+            onChange={(e) => setSettings({ ...settings, audit_max_context_chars: Math.max(10000, Number(e.target.value) || 524288) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；超限则故事结构逐级降载，三级都超自动二分拆包，绝不截断证据</span>
+        </div>
       </div>
-      <div style={{ marginTop: 8 }}>
-        <label>原文策略: </label>
-        <select value={(settings.include_original as string) || 'auto'} onChange={(e) => setSettings({ ...settings, include_original: e.target.value })}>
-          <option value="auto">auto（按故事大小自动分级）</option>
-          <option value="full">full（全文）</option>
-          <option value="sample">sample（三段抽样）</option>
-          <option value="none">none（不放原文）</option>
-        </select>
-      </div>
-      <div style={{ marginTop: 8 }}>
-        <label>每章原文上限: </label>
-        <input type="number" min={1000} style={{ width: 70 }}
-          value={String((settings.max_original_chars as number) ?? 6000)}
-          onChange={(e) => setSettings({ ...settings, max_original_chars: Math.max(1000, Number(e.target.value) || 6000) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> 字符；sample 模式三段各取 1/3</span>
-      </div>
-      <div style={{ marginTop: 8 }}>
-        <label>分析MD上限: </label>
-        <input type="number" min={1000} style={{ width: 70 }}
-          value={String((settings.max_analysis_chars as number) ?? 12000)}
-          onChange={(e) => setSettings({ ...settings, max_analysis_chars: Math.max(1000, Number(e.target.value) || 12000) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> 字符</span>
-      </div>
-      <div style={{ marginTop: 8 }}>
-        <label>摘要最大条目: </label>
-        <input type="number" min={10} style={{ width: 70 }}
-          value={String((settings.story_summary_max_items as number) ?? 80)}
-          onChange={(e) => setSettings({ ...settings, story_summary_max_items: Math.max(10, Number(e.target.value) || 80) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> 故事结构摘要每集合列出上限</span>
-      </div>
-      <div style={{ marginTop: 8 }}>
-        <label>上下文预算: </label>
-        <input type="number" min={10000} style={{ width: 80 }}
-          value={String((settings.context_budget_chars as number) ?? 160000)}
-          onChange={(e) => setSettings({ ...settings, context_budget_chars: Math.max(10000, Number(e.target.value) || 160000) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> 字符；auto 模式按此自动分级</span>
-      </div>
-      <div style={{ marginTop: 8 }}>
-        <label>Delta故事阈值: </label>
-        <input type="number" min={10} style={{ width: 70 }}
-          value={String((settings.delta_full_story_kb as number) ?? 256)}
-          onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 256) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> KB；故事JSON超此值时delta提取改用名称索引+近期delta</span>
-      </div>
-      <div style={{ marginTop: 8 }}>
-        <label>周期审计上下文上限: </label>
-        <input type="number" min={10000} style={{ width: 80 }}
-          value={String((settings.audit_max_context_chars as number) ?? 524288)}
-          onChange={(e) => setSettings({ ...settings, audit_max_context_chars: Math.max(10000, Number(e.target.value) || 524288) })}
-        />
-        <span style={{ fontSize: 12, color: '#888' }}> 字符；周期审计单包最大字符数，524288=512×1024，适配长上下文模型</span>
-      </div>
+
       <p style={{ fontSize: 12, color: '#888' }}>
         其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。
       </p>
