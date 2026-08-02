@@ -1011,7 +1011,8 @@ def recover_story_from_snapshot(project_dir: Path, snapshot_seq: Optional[int] =
     return 0
 
 
-def build_lightweight_index(story_path: Path, max_names: int = 80) -> str:
+def build_lightweight_index(story_path: Path, max_names: int = 0) -> str:
+    """全部元素名称索引。max_names=0 表示不限制（给全部名称）。"""
     data = load_json(story_path, {}) or {}
     lines = []
     intro = data.get("介绍", {}) if isinstance(data, dict) else {}
@@ -1032,9 +1033,12 @@ def build_lightweight_index(story_path: Path, max_names: int = 80) -> str:
                 names.append(f"{name}[{'/'.join(str(a) for a in aliases[:3])}]")
             else:
                 names.append(name)
-        lines.append(f"{key}({len(names)}): " + "、".join(names[:max_names]))
-        if len(names) > max_names:
-            lines[-1] += f" ……另有{len(names)-max_names}个"
+        if max_names > 0:
+            lines.append(f"{key}({len(names)}): " + "、".join(names[:max_names]))
+            if len(names) > max_names:
+                lines[-1] += f" ……另有{len(names)-max_names}个"
+        else:
+            lines.append(f"{key}({len(names)}): " + "、".join(names))
     return "\n".join(lines)
 
 
@@ -1209,10 +1213,9 @@ def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, sta
 
 
 # Delta 提取器故事上下文分级阈值
-# 「增量JSON膨胀应对」表。按故事 JSON 字节数选择输入策略，避免随章节累积
-# 把整本故事塞给 Delta 提取器。
+# 「增量JSON膨胀应对」：故事 JSON 超过此阈值时，delta 提取器改用全部名称索引
+# + 最近10章delta完整内容，而非完整故事JSON。阈值可经设置页配置。
 DELTA_FULL_STORY_KB = 80
-DELTA_SUMMARY_STORY_KB = 200
 
 
 def _recent_delta_name_summary(project_dir: Path, chapter_seq: int, count: int = 10) -> str:
@@ -1250,17 +1253,10 @@ def _recent_delta_name_summary(project_dir: Path, chapter_seq: int, count: int =
     return "\n\n".join(blocks) if blocks else "无"
 
 
-def _recent_delta_full_content(project_dir: Path, chapter_seq: int, count: int = 10,
-                               max_chars: int = 60000) -> str:
-    """早于 chapter_seq 且已提交 Delta 的最近 count 章的实际 Delta 内容（80-200KB 档）。
-
-    与 _recent_delta_name_summary（仅名称，>200KB 档）对应：规格 117 行要"最近10章
-    Delta"，118 行才是"最近10章摘要"。
-    """
+def _recent_delta_full_content(project_dir: Path, chapter_seq: int, count: int = 10) -> str:
+    """早于 chapter_seq 且已提交 Delta 的最近 count 章的实际 Delta 完整内容。"""
     start_seq = max(1, chapter_seq - count)
     blocks: List[str] = []
-    total = 0
-    capped = False
     for seq in range(start_seq, chapter_seq):
         chapter = chapter_by_seq(project_dir, seq)
         if not chapter:
@@ -1270,12 +1266,6 @@ def _recent_delta_full_content(project_dir: Path, chapter_seq: int, count: int =
             continue
         text = p["delta"].read_text(encoding="utf-8", errors="ignore")
         blocks.append(f"第{seq:03d}章 Delta:\n{text}")
-        total += len(text)
-        if total >= max_chars:
-            capped = True
-            break
-    if capped:
-        blocks.append("...[最近10章Delta累计已超预算，后续按需读取完整JSON]")
     return "\n\n".join(blocks) if blocks else "无"
 
 
@@ -1313,32 +1303,25 @@ def _main_factions_detail(data: dict, protos: List[dict]) -> str:
     return "\n\n".join(blocks) if blocks else "无"
 
 
-def build_delta_story_context(story: Path, project_dir: Path, chapter_seq: int) -> str:
+def build_delta_story_context(story: Path, project_dir: Path, chapter_seq: int,
+                              full_story_kb: int = DELTA_FULL_STORY_KB) -> str:
     """按分级策略构造 Delta 提取器的故事上下文。
 
     | 故事 JSON 大小 | 输入策略 |
-    | < 80KB         | 完整故事 JSON |
-    | 80-200KB       | 元素名称摘要 + 最近10章 Delta 实际内容 |
-    | > 200KB        | 主角/主要阵营 + 最近10章名称摘要 |
+    | < 阈值(默认80KB) | 完整故事 JSON |
+    | ≥ 阈值          | 全部元素名称索引 + 最近10章 Delta 完整内容 |
 
-    摘要档附上 故事结构_增量.json 路径，供 Agent worker 按需读取局部详情。
+    大档附上 故事结构_增量.json 路径，供 worker 按需读取局部详情。
     """
     data = load_json(story, {})
     full_json = json.dumps(data, ensure_ascii=False, indent=2)
     size = len(full_json.encode("utf-8"))
-    full_kb = DELTA_FULL_STORY_KB * 1024
-    summary_kb = DELTA_SUMMARY_STORY_KB * 1024
-    if size < full_kb:
+    if size < full_story_kb * 1024:
         return full_json
+    index = build_lightweight_index(story)
+    recent = _recent_delta_full_content(project_dir, chapter_seq, count=10)
     note = f"（完整故事结构见：{story}，需要时按需读取局部详情。）"
-    if size < summary_kb:
-        index = build_lightweight_index(story)
-        recent = _recent_delta_full_content(project_dir, chapter_seq, count=10)
-        return f"{index}\n\n## 最近10章Delta\n{recent}\n\n{note}"
-    protos = [c for c in (data.get("角色集") or []) if isinstance(c, dict) and c.get("是否主角")]
-    protag = _main_factions_detail(data, protos)
-    recent_names = _recent_delta_name_summary(project_dir, chapter_seq, count=10)
-    return f"{protag}\n\n## 最近10章Delta名称摘要\n{recent_names}\n\n{note}"
+    return f"{index}\n\n## 最近10章Delta\n{recent}\n\n{note}"
 
 
 def write_audit_pack(
@@ -1810,7 +1793,8 @@ def prepare_chapter_analysis(project_dir: Path, chapter: Path, force: bool = Fal
     return 0
 
 
-def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False) -> int:
+def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
+                          full_story_kb: int = DELTA_FULL_STORY_KB) -> int:
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
@@ -1835,7 +1819,7 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False)
     chapter_time_str = chapter_time(chapter_seq)
     chapter_text = chapter.read_text(encoding="utf-8", errors="ignore")
     analysis_text = p["analysis"].read_text(encoding="utf-8", errors="ignore")
-    summary = build_delta_story_context(story, project_dir, chapter_seq)
+    summary = build_delta_story_context(story, project_dir, chapter_seq, full_story_kb=full_story_kb)
 
     content = render_prompt(
         "流水线/单章增量提取.j2",
@@ -1855,7 +1839,8 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False)
     return 0
 
 
-def prepare_chapter(project_dir: Path, seq: Optional[int] = None, force: bool = False) -> int:
+def prepare_chapter(project_dir: Path, seq: Optional[int] = None, force: bool = False,
+                    full_story_kb: int = DELTA_FULL_STORY_KB) -> int:
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
@@ -1867,7 +1852,7 @@ def prepare_chapter(project_dir: Path, seq: Optional[int] = None, force: bool = 
     if not p["analysis"].is_file():
         return prepare_chapter_analysis(project_dir, chapter, force)
     if not p["delta"].is_file():
-        return prepare_chapter_delta(project_dir, chapter, force)
+        return prepare_chapter_delta(project_dir, chapter, force, full_story_kb=full_story_kb)
     print(f"第{seq_from_file(chapter):03d}章的章节分析MD和Delta JSON均已存在。")
     return 0
 
@@ -2073,6 +2058,7 @@ def cmd_run_analysis(
     max_analysis_chars: int = 12000,
     story_summary_max_items: int = 80,
     context_budget_chars: int = 160000,
+    delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow.
 
@@ -2215,6 +2201,7 @@ def cmd_run_interleaved(
     max_analysis_chars: int = 12000,
     story_summary_max_items: int = 80,
     context_budget_chars: int = 160000,
+    delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
     """交错流水线：N 个并行分析 worker 产出分析MD；1 个串行 delta worker 按章序消费。
 
@@ -2311,7 +2298,7 @@ def cmd_run_interleaved(
                 if is_chapter_complete(project_dir, chapter):
                     continue
                 if not p["delta"].is_file():
-                    prepare_chapter(project_dir, seq)
+                    prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
                     rc = run_worker(chapter_command, project_dir, "delta", p["delta_task"],
                                     p["delta"], seq, timeout=worker_timeout_seconds,
                                     retries=worker_retries, worker_window=worker_window)
@@ -2383,6 +2370,8 @@ def cmd_run_delta(
     worker_window: str = DEFAULT_WORKER_WINDOW,
     worker_loop: str = DEFAULT_WORKER_LOOP,
     rerun_command: str = "",
+    cancel_event: Optional["threading.Event"] = None,
+    delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
     """Require all chapter analyses before entering the existing serial Delta flow."""
     init_dirs(project_dir)
@@ -2476,6 +2465,7 @@ def cmd_run(
     max_analysis_chars: int = 12000,
     story_summary_max_items: int = 80,
     context_budget_chars: int = 160000,
+    delta_full_story_kb: int = DELTA_FULL_STORY_KB,
 ) -> int:
     if cancel_event is not None:
         set_cancel_event(cancel_event)
@@ -2525,6 +2515,8 @@ def cmd_run(
             worker_window=worker_window,
             worker_loop=worker_loop,
             rerun_command=rerun_command,
+            cancel_event=cancel_event,
+            delta_full_story_kb=delta_full_story_kb,
         )
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -2554,7 +2546,7 @@ def cmd_run(
         seq = seq_from_file(nxt)
         p = artifact_paths(project_dir, nxt)
         if not p["analysis"].is_file():
-            prepare_chapter(project_dir, seq)
+            prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
             print("已交接：等待章节分析MD。")
             if not chapter_command:
                 return 2
@@ -2575,7 +2567,7 @@ def cmd_run(
                 return 2
             continue
         if not p["delta"].is_file():
-            rc = prepare_chapter(project_dir, seq)
+            rc = prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
             if rc != 0:
                 return rc
             if p["analysis_regenerate_task"].is_file():

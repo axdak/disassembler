@@ -374,6 +374,14 @@ function SettingsView({ settings, setSettings, onSave }: {
         />
         <span style={{ fontSize: 12, color: '#888' }}> 字符；auto 模式按此自动分级</span>
       </div>
+      <div style={{ marginTop: 8 }}>
+        <label>Delta故事阈值: </label>
+        <input type="number" min={10} style={{ width: 70 }}
+          value={String((settings.delta_full_story_kb as number) ?? 80)}
+          onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 80) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> KB；故事JSON超此值时delta提取改用名称索引+近期delta</span>
+      </div>
       <p style={{ fontSize: 12, color: '#888' }}>
         其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。
       </p>

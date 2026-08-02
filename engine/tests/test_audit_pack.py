@@ -672,8 +672,8 @@ def test_delta_story_context_passes_name_index_plus_recent_when_medium():
     print("[OK] 中故事(80-200KB) Delta 上下文传名称摘要+最近10章Delta")
 
 
-def test_delta_story_context_passes_protagonist_factions_when_large():
-    # > 200KB：传主角/主要阵营 + 最近10章摘要，不传完整故事。
+def test_delta_story_context_large_tier_all_names_not_details():
+    # ≥ 阈值：传全部名称索引 + 最近10章delta完整内容，不传完整故事详情。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -686,14 +686,16 @@ def test_delta_story_context_passes_protagonist_factions_when_large():
 
         ctx = build_delta_story_context(story, project, chapter_seq=1)
 
-        assert "FULL_ONLY_MARKER" not in ctx
-        assert "主角介绍" in ctx
+        assert "FULL_ONLY_MARKER" not in ctx  # 故事详情不进索引
+        assert "主角A" in ctx  # 全部名称都在
+        assert "路人B" in ctx  # 全部名称都在（不只是主角）
+        assert "故事结构_增量.json" in ctx  # 附文件路径
 
-    print("[OK] 大故事(>200KB) Delta 上下文传主角/阵营+最近10章")
+    print("[OK] 大故事(≥阈值) Delta 上下文传全部名称索引+文件路径")
 
 
-def test_delta_story_context_large_tier_only_main_factions():
-    # >200KB：只传主要阵营（顶层+主角所属），不传从属阵营的完整档案。
+def test_delta_story_context_large_tier_all_faction_names():
+    # ≥阈值：给全部阵营名称（包括从属和无关阵营），不只主要阵营。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -712,9 +714,9 @@ def test_delta_story_context_large_tier_only_main_factions():
 
         assert "大公会" in ctx
         assert "无关边缘公会" in ctx
-        assert "大公会下属小队" not in ctx
+        assert "大公会下属小队" in ctx  # 从属阵营也在（全部名称）
 
-    print("[OK] >200KB 档只传主要阵营(顶层+主角所属)，不传从属阵营")
+    print("[OK] ≥阈值档给全部阵营名称")
 
 
 def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
