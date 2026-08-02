@@ -241,12 +241,51 @@ def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[
     return "\n".join(lines)
 
 
-def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[str, Any]]) -> str:
+def _build_summary_index(summary_text: str) -> str:
+    """把 章节梗概汇总.md 压缩为分章索引：每章一行「第NNN章 标题｜功能」。
+
+    供 build_structure_context 梗概三档的档2使用——全书梗概超预算时降载为分章索引，
+    保留章节骨架（标题/功能）而不堆砌 500 字正文，避免硬截断丢掉后半段。
+    解析按 markdown 章节标题行（## 第NNN章 / ### 第NNN章 / # 第NNN章 等）切分；
+    取标题行 + 紧随其后的第一个非空短行（通常是「章节功能」）作为索引项。
+    无法识别章节标题时回退为空串（调用方据此走档3）。
+    """
+    if not summary_text:
+        return ""
+    lines = summary_text.splitlines()
+    index_lines: List[str] = ["# 章节梗概分章索引", ""]
+    i = 0
+    found = False
+    while i < len(lines):
+        line = lines[i].strip()
+        # 匹配「第NNN章」开头的标题行（##/###/# 前缀或无前缀均可）
+        if re.match(r"^#{0,6}\s*第\s*\d+\s*章", line):
+            found = True
+            title = re.sub(r"^#{0,6}\s*", "", line)
+            # 紧随其后的第一个非空行作为功能摘要（截断到 60 字防长段）
+            func = ""
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines):
+                func = lines[j].strip()[:60]
+            index_lines.append(f"- {title}｜{func}" if func else f"- {title}")
+            i = j + 1
+        else:
+            i += 1
+    return "\n".join(index_lines) if found else ""
+
+
+def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[str, Any]], max_pack_chars: int = 70000) -> str:
     """结构类全书分析的上下文：全书级中间产物 + 指引，不逐章堆砌章节分析MD。
 
     结构类维度（STRUCTURE_TASKS）的结论靠故事结构元素和全书级中间产物回指，
     不需要每章 1.2 万字分析MD。本函数按 task 收集相关全书级产物，并指引 worker
     按需读 故事结构_增量.json 取元素详情。上游产物缺失时显式标注，不静默吞掉。
+
+    章节梗概汇总段借鉴周期治理（write_audit_pack）的 fallback 链思想：单一字符预算
+    （max_pack_chars）下逐档降载（全量梗概 → 分章梗概索引 → 仅故事索引），超限降载
+    而非硬截断，避免大书梗概被砍掉后半段丢内容。
     """
     lines: List[str] = ["## 全书级分析材料", ""]
 
@@ -255,14 +294,28 @@ def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[st
         lines.append(build_narrative_structure_background(project_dir, chapters))
         lines.append("")
     else:
-        # 其他结构类：章节梗概汇总（每章约 500 字，全书级骨架）
+        # 其他结构类：章节梗概汇总（每章约 500 字，全书级骨架）——三档降载，不截断
         summary_path = project_dir / "全书分析" / "剧情结构" / "章节梗概汇总.md"
-        lines.append("### 章节梗概汇总")
-        if summary_path.is_file() and summary_path.stat().st_size > 0:
+        summary_text = summary_path.read_text(encoding="utf-8", errors="ignore") if summary_path.is_file() and summary_path.stat().st_size > 0 else ""
+        # 梗概段可用预算 = max_pack_chars - 固定开销（故事索引 + 契约 + 指引，经验约 3 万）
+        summary_budget = max(10000, max_pack_chars - 30000)
+        # 三档 fallback：全量梗概 → 分章梗概索引 → 仅故事索引（留空，靠上方故事结构摘要）
+        if summary_text and len(summary_text) <= summary_budget:
+            lines.append("### 章节梗概汇总")
             lines.append("```markdown")
-            lines.append(read_text(summary_path, 50000))
+            lines.append(summary_text)
             lines.append("```")
+        elif summary_text:
+            summary_index = _build_summary_index(summary_text)
+            if summary_index and len(summary_index) <= summary_budget:
+                lines.append("### 章节梗概汇总（已降载为分章索引：全书梗概超预算，每章压缩为标题/功能行）")
+                lines.append("```markdown")
+                lines.append(summary_index)
+                lines.append("```")
+            else:
+                lines.append("### 章节梗概汇总（已降载：全书过大，仅保留上方故事结构索引，按需读 `故事结构_增量.json`）")
         else:
+            lines.append("### 章节梗概汇总")
             lines.append("【未生成 `章节梗概汇总.md`；建议先运行 `--task summary` 生成。本任务将主要依赖故事结构JSON摘要。】")
         lines.append("")
 
@@ -593,7 +646,43 @@ def split_batches(chapters: List[Dict[str, Any]], project_dir: Path, task: str, 
     return batches
 
 
-def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None, story_summary_max_items: int = 0, context_budget_chars: int = 160000) -> str:
+def split_narrative_batches(project_dir: Path, chapters: List[Dict[str, Any]], max_pack_chars: int) -> List[List[Dict[str, Any]]]:
+    """narrative_structure 专用分批：按分章 章节结构.md 的字符大小累加切批。
+
+    与 split_batches 不同——后者用 build_chapter_block（原文/分析MD/Delta）量每章，
+    而 narrative_structure 的每章材料是「分章 章节结构.md」（build_narrative_structure_background
+    读取），不经过 build_chapter_block，故需专用估算。每章按 12000 字符上限计入
+    （与 build_narrative_structure_background 的 read_text(path, 12000) 一致）。
+
+    预留 OVERHEAD 给固定开销（4 个全书级产物各约 1.2 万 + 故事索引 + 契约），确保
+    每个 partial 整包不超 max_pack_chars。无任何分章 章节结构.md 时退化为单包
+    （build_narrative_structure_background 会标注「未生成」，与原行为一致）。
+    """
+    batches: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_size = 0
+    OVERHEAD = 50000
+    budget = max(20000, max_pack_chars - OVERHEAD)
+    has_any = False
+    for ch in chapters:
+        seq = int(ch["seq"])
+        path = _existing_chapter_structure_path(project_dir, seq)
+        size = min(path.stat().st_size, 12000) if path and path.is_file() else 0
+        if size > 0:
+            has_any = True
+        if current and current_size + size > budget:
+            batches.append(current)
+            current = []
+            current_size = 0
+        current.append(ch)
+        current_size += size
+    if current:
+        batches.append(current)
+    # 无任何分章章节结构.md → 整本一包（退化到原单包行为）
+    return batches if has_any else [chapters]
+
+
+def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None, story_summary_max_items: int = 0, context_budget_chars: int = 160000, max_pack_chars: int = 70000) -> str:
     story_path = project_dir / "故事结构_增量.json"
     story = load_json(story_path) or {}
     task_info = TASKS[task]
@@ -670,7 +759,7 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
     lines.append("")
     if task in STRUCTURE_TASKS and per_chapter_seq is None:
         # 结构类全书分析：全书级素材 + 指引，不逐章堆砌章节分析MD/原文
-        lines.append(build_structure_context(project_dir, task, chapters))
+        lines.append(build_structure_context(project_dir, task, chapters, max_pack_chars=max_pack_chars))
         lines.append("")
     else:
         # include_original=auto：按故事 JSON 文件大小自动分级
@@ -752,8 +841,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.task in STRUCTURE_TASKS:
-        # 结构类全书分析：单包全书，不按章分包（无每章材料，靠全书级素材）
+    if args.task == "narrative_structure":
+        # narrative_structure：按分章 章节结构.md 分批 + partial→reduce（复用多包 reduce 机制）
+        batches = split_narrative_batches(project_dir, chapters, args.max_pack_chars)
+    elif args.task in STRUCTURE_TASKS:
+        # 其余结构类全书分析：单包全书，不按章分包（无每章材料，靠全书级素材；
+        # 上下文超限时由 build_structure_context 内部三档降载兜底，不截断）
         batches = [chapters]
     else:
         batches = split_batches(
@@ -781,6 +874,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             len(batches),
             story_summary_max_items=args.story_summary_max_items,
             context_budget_chars=args.context_budget_chars,
+            max_pack_chars=args.max_pack_chars,
         )
         path = out_dir / f"pack_{i:03d}.md"
         path.write_text(content, encoding="utf-8")
