@@ -280,7 +280,9 @@ class Orchestrator:
         rc = run_cmd([
             sys.executable, str(script_path("analysis_context_pack.py")), str(self.project_dir),
             "--task", task, "--chapters", "all", "--include-original", "sample",
-            "--max-pack-chars", str(self.config.max_pack_chars), "--max-original-chars", "6000", "--max-analysis-chars", "12000",
+            "--max-pack-chars", str(self.config.max_pack_chars),
+            "--max-original-chars", str(self.config.max_original_chars),
+            "--max-analysis-chars", str(self.config.max_analysis_chars),
         ])
         if rc != 0:
             return rc

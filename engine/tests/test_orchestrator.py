@@ -243,6 +243,28 @@ def test_fullbook_multi_pack_reduce(tmp_path):
     assert (mpath.parent / "reduce_task_pack.md").is_file()
 
 
+def test_fullbook_task_passes_compression_config_to_pack_cmd(tmp_path):
+    """阶段5 全书分析任务包命令行必须透传 config 的压缩字段，否则设置页静默失效（写死回归守卫）。"""
+    mpath = _write_manifest(tmp_path, "summary", 1, ["全书分析/剧情结构/章节梗概汇总.md"])
+    cfg = Config(
+        worker_provider="agy",
+        fullbook_tasks=("summary",),
+        max_pack_chars=55555,
+        max_original_chars=9999,
+        max_analysis_chars=8888,
+    )
+    orch = Orchestrator(tmp_path, config=cfg)
+    with patch.object(orchestrator, "run_cmd", return_value=0) as rc_mock, \
+         patch.object(orchestrator, "latest_analysis_manifest", return_value=mpath), \
+         patch.object(orchestrator, "run_worker", side_effect=_write_expected_worker):
+        rc = orch._stage_fullbook_analysis()
+    assert rc == 0
+    cmd = rc_mock.call_args.args[0]
+    assert "--max-pack-chars" in cmd and "55555" in cmd
+    assert "--max-original-chars" in cmd and "9999" in cmd
+    assert "--max-analysis-chars" in cmd and "8888" in cmd
+
+
 def test_full_pipeline_completes(tmp_path):
     bus = EventBus()
     done = []
