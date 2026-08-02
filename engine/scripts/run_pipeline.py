@@ -530,10 +530,12 @@ def build_analysis_auto_foreground_command(args: argparse.Namespace, task: str, 
     command_name = "visual-assets-auto" if task == "visual_assets" else "chapter-structure-auto"
     command: List[str] = [sys.executable, str(Path(__file__).resolve()), command_name, str(args.project_dir)]
     for name, flag, default in [
-        ("include_original", "--include-original", "sample"),
+        ("include_original", "--include-original", "auto"),
         ("max_pack_chars", "--max-pack-chars", 70000),
         ("max_original_chars", "--max-original-chars", 6000),
         ("max_analysis_chars", "--max-analysis-chars", 12000),
+        ("story_summary_max_items", "--story-summary-max-items", 80),
+        ("context_budget_chars", "--context-budget-chars", 160000),
     ]:
         value = getattr(args, name, default)
         if value != default:
@@ -2066,6 +2068,11 @@ def cmd_run_analysis(
     rerun_command: str = "",
     concurrency: int = 1,
     cancel_event: Optional["threading.Event"] = None,
+    include_original: str = "auto",
+    max_original_chars: int = 6000,
+    max_analysis_chars: int = 12000,
+    story_summary_max_items: int = 80,
+    context_budget_chars: int = 160000,
 ) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow.
 
@@ -2203,6 +2210,11 @@ def cmd_run_interleaved(
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
     emit: Optional[Callable] = None,
     cancel_event: Optional["threading.Event"] = None,
+    include_original: str = "auto",
+    max_original_chars: int = 6000,
+    max_analysis_chars: int = 12000,
+    story_summary_max_items: int = 80,
+    context_budget_chars: int = 160000,
 ) -> int:
     """交错流水线：N 个并行分析 worker 产出分析MD；1 个串行 delta worker 按章序消费。
 
@@ -2459,6 +2471,11 @@ def cmd_run(
     worker_loop: str = DEFAULT_WORKER_LOOP,
     concurrency: int = 1,
     cancel_event: Optional["threading.Event"] = None,
+    include_original: str = "auto",
+    max_original_chars: int = 6000,
+    max_analysis_chars: int = 12000,
+    story_summary_max_items: int = 80,
+    context_budget_chars: int = 160000,
 ) -> int:
     if cancel_event is not None:
         set_cancel_event(cancel_event)
@@ -2914,7 +2931,7 @@ def cmd_split(args: argparse.Namespace) -> int:
 def cmd_analysis_pack(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir)
     init_dirs(project_dir)
-    cmd = [sys.executable, str(script_path("analysis_context_pack.py")), str(project_dir), "--task", args.task, "--chapters", args.chapters, "--include-original", args.include_original, "--max-pack-chars", str(args.max_pack_chars), "--max-original-chars", str(args.max_original_chars), "--max-analysis-chars", str(args.max_analysis_chars)]
+    cmd = [sys.executable, str(script_path("analysis_context_pack.py")), str(project_dir), "--task", args.task, "--chapters", args.chapters, "--include-original", args.include_original, "--max-pack-chars", str(args.max_pack_chars), "--max-original-chars", str(args.max_original_chars), "--max-analysis-chars", str(args.max_analysis_chars), "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 80)), "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000))]
     if args.targets:
         cmd.extend(["--targets", *args.targets])
     if args.question:
@@ -3116,6 +3133,8 @@ def run_analysis_context_pack_for_auto(args: argparse.Namespace, task: str, seq:
             "--max-pack-chars", str(args.max_pack_chars),
             "--max-original-chars", str(args.max_original_chars),
             "--max-analysis-chars", str(args.max_analysis_chars),
+            "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 80)),
+            "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000)),
         ])
     return run_cmd(cmd)
 
@@ -3328,6 +3347,8 @@ def cmd_visual_assets_auto_legacy(args: argparse.Namespace) -> int:
             "--max-pack-chars", str(args.max_pack_chars),
             "--max-original-chars", str(args.max_original_chars),
             "--max-analysis-chars", str(args.max_analysis_chars),
+            "--story-summary-max-items", str(getattr(args, "story_summary_max_items", 80)),
+            "--context-budget-chars", str(getattr(args, "context_budget_chars", 160000)),
         ]
         rc = run_cmd(cmd)
         if rc != 0:
@@ -3805,10 +3826,12 @@ def main() -> int:
     p_pack.add_argument("--chapters", default="all")
     p_pack.add_argument("--targets", nargs="*", default=[])
     p_pack.add_argument("--question", default="")
-    p_pack.add_argument("--include-original", choices=["none", "sample", "full"], default="sample")
+    p_pack.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto")
     p_pack.add_argument("--max-pack-chars", type=int, default=70000)
     p_pack.add_argument("--max-original-chars", type=int, default=6000)
     p_pack.add_argument("--max-analysis-chars", type=int, default=12000)
+    p_pack.add_argument("--story-summary-max-items", type=int, default=80)
+    p_pack.add_argument("--context-budget-chars", type=int, default=160000)
     p_pack.add_argument("--out-dir", default="")
     p_pack.add_argument("--per-chapter", action="store_true", help="每章一份独立任务包（visual_assets / chapter_structure），产物扁平写入 全书分析/<维度>/分章/ 下 chNNN_<标题>_*.md")
     p_pack.add_argument("--aggregate", action="store_true", help="（仅 visual_assets）生成顶层汇总任务包，从 分章/ 合并顶层五件套")
@@ -3818,10 +3841,12 @@ def main() -> int:
 
     p_vauto = sub.add_parser("visual-assets-auto", help="按章自主推进视觉资产生成（每次返回2交接一章，全部完成后交接aggregate）")
     p_vauto.add_argument("project_dir")
-    p_vauto.add_argument("--include-original", choices=["none", "sample", "full"], default="sample")
+    p_vauto.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto")
     p_vauto.add_argument("--max-pack-chars", type=int, default=70000)
     p_vauto.add_argument("--max-original-chars", type=int, default=6000)
     p_vauto.add_argument("--max-analysis-chars", type=int, default=12000)
+    p_vauto.add_argument("--story-summary-max-items", type=int, default=80)
+    p_vauto.add_argument("--context-budget-chars", type=int, default=160000)
     p_vauto.add_argument("--force-aggregate", action="store_true", help="即便顶层汇总已存在，也重新生成 aggregate 任务包")
 
     p_vauto.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent, serial, worker, or auto")
@@ -3835,10 +3860,12 @@ def main() -> int:
     p_vauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: hidden by default, powershell, or powershell-keep")
 
     p_sauto.add_argument("project_dir")
-    p_sauto.add_argument("--include-original", choices=["none", "sample", "full"], default="sample")
+    p_sauto.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto")
     p_sauto.add_argument("--max-pack-chars", type=int, default=70000)
     p_sauto.add_argument("--max-original-chars", type=int, default=6000)
     p_sauto.add_argument("--max-analysis-chars", type=int, default=12000)
+    p_sauto.add_argument("--story-summary-max-items", type=int, default=80)
+    p_sauto.add_argument("--context-budget-chars", type=int, default=160000)
     p_sauto.add_argument("--force-aggregate", action="store_true", help=argparse.SUPPRESS)
     p_sauto.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent, serial, worker, or auto")
     p_sauto.add_argument("--worker-provider", choices=WORKER_PROVIDERS, default="manual", help="built-in worker provider for worker route")

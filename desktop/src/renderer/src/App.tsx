@@ -333,6 +333,47 @@ function SettingsView({ settings, setSettings, onSave }: {
         />
         <span style={{ fontSize: 12, color: '#888' }}> 章节结构/视觉资产多章并行；1=逐章串行</span>
       </div>
+      <div style={{ marginTop: 8 }}>
+        <label>原文策略: </label>
+        <select value={(settings.include_original as string) || 'auto'} onChange={(e) => setSettings({ ...settings, include_original: e.target.value })}>
+          <option value="auto">auto（按故事大小自动分级）</option>
+          <option value="full">full（全文）</option>
+          <option value="sample">sample（三段抽样）</option>
+          <option value="none">none（不放原文）</option>
+        </select>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>每章原文上限: </label>
+        <input type="number" min={1000} style={{ width: 70 }}
+          value={String((settings.max_original_chars as number) ?? 6000)}
+          onChange={(e) => setSettings({ ...settings, max_original_chars: Math.max(1000, Number(e.target.value) || 6000) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> 字符；sample 模式三段各取 1/3</span>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>分析MD上限: </label>
+        <input type="number" min={1000} style={{ width: 70 }}
+          value={String((settings.max_analysis_chars as number) ?? 12000)}
+          onChange={(e) => setSettings({ ...settings, max_analysis_chars: Math.max(1000, Number(e.target.value) || 12000) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> 字符</span>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>摘要最大条目: </label>
+        <input type="number" min={10} style={{ width: 70 }}
+          value={String((settings.story_summary_max_items as number) ?? 80)}
+          onChange={(e) => setSettings({ ...settings, story_summary_max_items: Math.max(10, Number(e.target.value) || 80) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> 故事结构摘要每集合列出上限</span>
+      </div>
+      <div style={{ marginTop: 8 }}>
+        <label>上下文预算: </label>
+        <input type="number" min={10000} style={{ width: 80 }}
+          value={String((settings.context_budget_chars as number) ?? 160000)}
+          onChange={(e) => setSettings({ ...settings, context_budget_chars: Math.max(10000, Number(e.target.value) || 160000) })}
+        />
+        <span style={{ fontSize: 12, color: '#888' }}> 字符；auto 模式按此自动分级</span>
+      </div>
       <p style={{ fontSize: 12, color: '#888' }}>
         其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。
       </p>

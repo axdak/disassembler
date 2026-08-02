@@ -65,6 +65,12 @@ class Config:
     chapter_mode: str = "two_phase"  # two_phase | interleaved
     fullbook_tasks: tuple = FULLBOOK_TASKS
     export_source: str = "final"
+    # 任务包上下文压缩策略（可经设置页配置）
+    include_original: str = "auto"  # auto | none | sample | full
+    max_original_chars: int = 6000
+    max_analysis_chars: int = 12000
+    story_summary_max_items: int = 80
+    context_budget_chars: int = 160000
 
 
 class Orchestrator:
@@ -183,27 +189,24 @@ class Orchestrator:
     # ---- worker 调用公共参数 ----
 
     def _run_worker_kwargs(self) -> dict:
-        if self.config.worker_command:
-            return dict(
-                run_mode="worker",
-                worker_provider="manual",
-                chapter_command=self.config.worker_command,
-                audit_command=self.config.worker_command,
-                worker_loop=self.config.worker_loop,
-                worker_retries=self.config.worker_retries,
-                worker_timeout_seconds=self.config.worker_timeout_seconds,
-                worker_window=self.config.worker_window,
-                cancel_event=self._cancel,
-            )
-        return dict(
+        base = dict(
             run_mode="worker",
-            worker_provider=self.config.worker_provider,
             worker_loop=self.config.worker_loop,
             worker_retries=self.config.worker_retries,
             worker_timeout_seconds=self.config.worker_timeout_seconds,
             worker_window=self.config.worker_window,
             cancel_event=self._cancel,
+            include_original=self.config.include_original,
+            max_original_chars=self.config.max_original_chars,
+            max_analysis_chars=self.config.max_analysis_chars,
+            story_summary_max_items=self.config.story_summary_max_items,
+            context_budget_chars=self.config.context_budget_chars,
         )
+        if self.config.worker_command:
+            return {**base, "worker_provider": "manual",
+                    "chapter_command": self.config.worker_command,
+                    "audit_command": self.config.worker_command}
+        return {**base, "worker_provider": self.config.worker_provider}
 
     def _auto_namespace(self) -> argparse.Namespace:
         """构造 chapter-structure-auto / visual-assets-auto 所需的 argparse.Namespace。
@@ -213,10 +216,7 @@ class Orchestrator:
         """
         return argparse.Namespace(
             project_dir=str(self.project_dir),
-            include_original="sample",
             max_pack_chars=70000,
-            max_original_chars=6000,
-            max_analysis_chars=12000,
             force_aggregate=False,
             run_mode="worker",
             worker_provider="manual" if self.config.worker_command else self.config.worker_provider,
@@ -227,6 +227,11 @@ class Orchestrator:
             worker_loop=self.config.worker_loop,
             per_chapter_concurrency=self.config.per_chapter_concurrency,
             cancel_event=self._cancel,
+            include_original=self.config.include_original,
+            max_original_chars=self.config.max_original_chars,
+            max_analysis_chars=self.config.max_analysis_chars,
+            story_summary_max_items=self.config.story_summary_max_items,
+            context_budget_chars=self.config.context_budget_chars,
         )
 
     def _worker_command(self) -> str:

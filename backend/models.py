@@ -56,6 +56,12 @@ class RunConfig(BaseModel):
     chapter_mode: str = "two_phase"
     fullbook_tasks: list[str] = DEFAULT_FULLBOOK_TASKS
     export_source: str = "final"
+    # 任务包上下文压缩策略（可经设置页配置）
+    include_original: str = "auto"  # auto | none | sample | full
+    max_original_chars: int = 6000
+    max_analysis_chars: int = 12000
+    story_summary_max_items: int = 80
+    context_budget_chars: int = 160000
 
 
 class RunStart(BaseModel):

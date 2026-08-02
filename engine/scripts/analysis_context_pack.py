@@ -590,7 +590,7 @@ def split_batches(chapters: List[Dict[str, Any]], project_dir: Path, task: str, 
     return batches
 
 
-def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None) -> str:
+def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None, story_summary_max_items: int = 80, context_budget_chars: int = 160000) -> str:
     story_path = project_dir / "故事结构_增量.json"
     story = load_json(story_path) or {}
     task_info = TASKS[task]
@@ -646,7 +646,7 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
     lines.append("")
 
     lines.append("## 当前故事结构摘要")
-    lines.append(summarize_story_structure(story))
+    lines.append(summarize_story_structure(story, max_items=story_summary_max_items))
     lines.append("")
 
     if targets:
@@ -668,9 +668,21 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
         lines.append(build_structure_context(project_dir, task, chapters))
         lines.append("")
     else:
+        # include_original=auto：按故事 JSON 文件大小自动分级
+        # （故事小给全文、中等给抽样、大给空，与 delta/governance 的自动降级思路一致）
+        effective_original = include_original
+        if include_original == "auto":
+            story_file = project_dir / "故事结构_增量.json"
+            story_size = story_file.stat().st_size if story_file.is_file() else 0
+            if story_size < context_budget_chars * 0.5:
+                effective_original = "full"
+            elif story_size < context_budget_chars:
+                effective_original = "sample"
+            else:
+                effective_original = "none"
         lines.append("## 章节材料")
         for ch in chapters:
-            lines.append(build_chapter_block(project_dir, ch, task, include_original, max_original_chars, max_analysis_chars))
+            lines.append(build_chapter_block(project_dir, ch, task, effective_original, max_original_chars, max_analysis_chars))
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -682,10 +694,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--chapters", default="all", help="章节范围，如 all、1-50、1,3,8-12")
     parser.add_argument("--targets", nargs="*", default=[], help="指定结构元素，如 角色:林婉 事件:入门试炼")
     parser.add_argument("--question", default="", help="自定义分析问题，task=custom时尤其有用")
-    parser.add_argument("--include-original", choices=["none", "sample", "full"], default="sample", help="是否包含原文：none/sample/full")
+    parser.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto", help="是否包含原文：auto(按故事大小自动)/none/sample/full")
     parser.add_argument("--max-pack-chars", type=int, default=70000, help="单个任务包最大字符数，超出自动分包")
     parser.add_argument("--max-original-chars", type=int, default=6000, help="每章原文最多放入字符数；sample模式会抽样")
     parser.add_argument("--max-analysis-chars", type=int, default=12000, help="每章分析MD最多放入字符数")
+    parser.add_argument("--story-summary-max-items", type=int, default=80, help="故事结构摘要每集合最大列出条目数")
+    parser.add_argument("--context-budget-chars", type=int, default=160000, help="上下文预算字符数，auto模式按此自动分级")
     parser.add_argument("--out-dir", default="", help="输出目录；默认 全书分析/_任务包/<timestamp>_<task>")
     parser.add_argument("--per-chapter", action="store_true", help="每个章节生成一份独立任务包（visual_assets / chapter_structure）")
     parser.add_argument("--aggregate", action="store_true", help="把分章产物合并为顶层五件套（仅 visual_assets）")
@@ -760,6 +774,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.max_analysis_chars,
             i,
             len(batches),
+            story_summary_max_items=args.story_summary_max_items,
+            context_budget_chars=args.context_budget_chars,
         )
         path = out_dir / f"pack_{i:03d}.md"
         path.write_text(content, encoding="utf-8")
@@ -826,6 +842,8 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
             1,
             1,
             per_chapter_seq=seq,
+            story_summary_max_items=args.story_summary_max_items,
+            context_budget_chars=args.context_budget_chars,
         )
         pack_path = out_root / f"pack_ch{seq:03d}.md"
         pack_path.write_text(pack_content, encoding="utf-8")
@@ -888,6 +906,8 @@ def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse
             1,
             1,
             per_chapter_seq=seq,
+            story_summary_max_items=args.story_summary_max_items,
+            context_budget_chars=args.context_budget_chars,
         )
         pack_path = out_root / f"pack_ch{seq:03d}.md"
         pack_path.write_text(pack_content, encoding="utf-8")
