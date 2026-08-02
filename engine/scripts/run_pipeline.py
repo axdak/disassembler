@@ -2441,6 +2441,7 @@ def cmd_run_delta(
         worker_retries=worker_retries,
         worker_window=worker_window,
         worker_loop=worker_loop,
+        delta_full_story_kb=delta_full_story_kb,
     )
 
 
