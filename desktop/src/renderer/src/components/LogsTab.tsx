@@ -20,7 +20,7 @@ const TASK_TYPE_LABEL: Record<string, string> = {
   visual_assets: '分章', visual_assets_aggregate: '汇总',
   final_draft: '草稿', repair_final: '修复',
   audit_correction: '治理',
-  summary: '梗概', characters: '角色', plot: '剧情',
+  summary: '梗概', characters: '角色', plot: '剧情', style: '文风/节奏',
   worldview: '世界观', settings: '设定', plotlines: '剧情线',
   outline: '大纲', detailed_outline: '详细大纲',
   narrative_structure: '叙事结构', report: '报告',

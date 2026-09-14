@@ -7,7 +7,7 @@
 // of being turned into U+FFFD replacement chars (the prior `buf += chunk`
 // bug under code page 936).
 import { StringDecoder } from 'node:string_decoder'
-import { spawn, type ChildProcessByStdio } from 'child_process'
+import { spawn, spawnSync, type ChildProcessByStdio } from 'child_process'
 import { join, resolve } from 'node:path'
 import type { Readable } from 'node:stream'
 
@@ -74,6 +74,24 @@ export function streamUtf8(stream: Readable, onText: (text: string) => void): ()
   }
 }
 
+
+/** Stop the backend and its worker descendants when the desktop app exits. */
+export function terminateBackendProcess(
+  proc: ChildProcessByStdio<null, Readable, Readable>,
+): void {
+  if (proc.exitCode !== null || proc.signalCode !== null) return
+  if (process.platform === 'win32' && proc.pid) {
+    // Windows does not propagate ChildProcess.kill() to grandchildren. taskkill
+    // targets the exact spawned PID and closes its worker process tree.
+    spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    })
+    return
+  }
+  proc.kill()
+}
+
 /** Spawn the venv backend, decode its stdio, and resolve once BACKEND_READY fires.
  *
  * Returns the spawned ``proc`` synchronously (so the caller can kill it during
@@ -114,6 +132,14 @@ export function startBackendProcess(): BackendSpawn {
     })
 
     streamUtf8(proc.stderr, (text) => process.stderr.write(`[backend err] ${text}`))
+
+    proc.once('error', (error) => {
+      if (!resolved) {
+        resolved = true
+        clearTimeout(timer)
+        rejectP(new Error(`backend spawn failed: ${error.message}`))
+      }
+    })
 
     proc.on('exit', (code) => {
       process.stderr.write(`[backend] exited code=${code}\n`)

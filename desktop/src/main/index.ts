@@ -3,7 +3,8 @@ import { join } from 'node:path'
 import type { ChildProcessByStdio } from 'child_process'
 import type { Readable } from 'node:stream'
 import WebSocket from 'ws'
-import { startBackendProcess } from './backend-process'
+import { startBackendProcess, terminateBackendProcess } from './backend-process'
+import { parseBackendResponse } from './http'
 
 let backendProc: ChildProcessByStdio<null, Readable, Readable> | null = null
 let backendBase = ''
@@ -30,7 +31,7 @@ function authHeaders(): Record<string, string> {
 async function bget(p: string): Promise<any> {
   if (process.env.NDD_DEBUG) process.stdout.write(`[api] GET ${p}\n`)
   const r = await fetch(`${backendBase}${p}`, { headers: authHeaders() })
-  return r.json()
+  return parseBackendResponse(r)
 }
 async function bpost(p: string, body?: any): Promise<any> {
   const r = await fetch(`${backendBase}${p}`, {
@@ -38,11 +39,11 @@ async function bpost(p: string, body?: any): Promise<any> {
     headers: { ...authHeaders(), 'Content-Type': 'application/json' },
     body: body !== undefined ? JSON.stringify(body) : '{}',
   })
-  return r.json()
+  return parseBackendResponse(r)
 }
 async function bdel(p: string): Promise<any> {
   const r = await fetch(`${backendBase}${p}`, { method: 'DELETE', headers: authHeaders() })
-  return r.json()
+  return parseBackendResponse(r)
 }
 
 function registerIpc(): void {
@@ -85,7 +86,7 @@ function registerIpc(): void {
       method: 'PUT',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings }),
-    }).then((r) => r.json()))
+    }).then(parseBackendResponse))
   ipcMain.handle('nd:queue:add', (_e, id: number) => bpost('/queue', { project_id: id }))
   ipcMain.handle('nd:queue:list', () => bget('/queue'))
   ipcMain.handle('nd:queue:remove', (_e, position: number) => bdel(`/queue/${position}`))
@@ -115,6 +116,7 @@ function startEventBridge(win: BrowserWindow): void {
   const url = `${backendBase.replace(/^http/, 'ws')}/ws/events?token=${encodeURIComponent(backendToken)}`
   // uvicorn 起服有窗口期，连接被拒则 1s 后重连，直到连上
   const connect = () => {
+    if (isQuitting || win.isDestroyed()) return
     const ws = new WebSocket(url)
     ws.on('message', (data: any) => {
       if (win.isDestroyed()) return
@@ -124,7 +126,9 @@ function startEventBridge(win: BrowserWindow): void {
         process.stderr.write(`[ws] parse error: ${e}\n`)
       }
     })
-    ws.on('close', () => setTimeout(connect, 1000))
+    ws.on('close', () => {
+      if (!isQuitting && !win.isDestroyed()) setTimeout(connect, 1000)
+    })
     ws.on('error', (e) => process.stderr.write(`[ws] error: ${e}\n`))
   }
   connect()
@@ -157,7 +161,7 @@ function createWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false,
+      sandbox: true,
     },
   })
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -165,6 +169,19 @@ function createWindow(): BrowserWindow {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  // Never expose the privileged preload bridge to navigated external content.
+  // External links open in the system browser and popup windows remain disabled.
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    const currentUrl = win.webContents.getURL()
+    if (currentUrl && targetUrl.split('#')[0] !== currentUrl.split('#')[0]) {
+      event.preventDefault()
+      if (/^https?:\/\//i.test(targetUrl)) void shell.openExternal(targetUrl)
+    }
+  })
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
   // 关闭缩到托盘（非退出时）
   win.on('close', (e) => {
     if (!isQuitting) {
@@ -191,6 +208,9 @@ if (!gotLock) {
       process.stdout.write(`[main] backend ready at ${backendBase}\n`)
     } catch (e: any) {
       process.stderr.write(`[main] backend failed: ${e?.message}\n`)
+      dialog.showErrorBox('后端启动失败', e?.message || '无法启动本地后端服务')
+      app.quit()
+      return
     }
     registerIpc()
     const win = createWindow()
@@ -203,5 +223,5 @@ app.on('window-all-closed', () => {
 })
 app.on('before-quit', () => {
   isQuitting = true
-  if (backendProc) { backendProc.kill(); backendProc = null }
+  if (backendProc) { terminateBackendProcess(backendProc); backendProc = null }
 })
