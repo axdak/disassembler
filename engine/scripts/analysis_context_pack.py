@@ -837,7 +837,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _build_chapter_structure_per_chapter_packs(project_dir, args, chapters)
         return _build_visual_per_chapter_packs(project_dir, args, chapters)
 
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_dir = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_{args.task}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -917,7 +917,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace, chapters: List[Dict[str, Any]]) -> int:
     """为每个选定章节生成一份独立 visual_assets 任务包。"""
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_root = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_visual_assets_per_chapter"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -981,7 +981,7 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
 
 def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse.Namespace, chapters: List[Dict[str, Any]]) -> int:
     """为每个选定章节生成一份独立 chapter_structure 任务包。"""
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_root = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_chapter_structure_per_chapter"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -1064,7 +1064,7 @@ def _build_visual_aggregate_pack(project_dir: Path, args: argparse.Namespace, in
         print("错误: 没有任何章节具备完整的分章视觉资产；请先用 --per-chapter 生成至少一章。")
         return 1
 
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_root = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_visual_assets_aggregate"
     out_root.mkdir(parents=True, exist_ok=True)
 

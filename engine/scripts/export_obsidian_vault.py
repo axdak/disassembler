@@ -516,6 +516,13 @@ def export_obsidian_markdown(
     story = load_json(story_path)
 
     if clean and out_dir.exists():
+        # 仅清理由本导出器创建过的目录；首次导出的空目录也允许使用。
+        # 防止错误/篡改的 out_dir 配合 --clean 删除任意非项目目录。
+        owned_marker = out_dir / "_meta" / "export_report.json"
+        if any(out_dir.iterdir()) and not owned_marker.is_file():
+            raise ValueError(
+                f"refusing to clean non-empty directory not owned by exporter: {out_dir}"
+            )
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

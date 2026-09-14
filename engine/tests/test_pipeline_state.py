@@ -11,11 +11,13 @@ def test_load_fresh(tmp_path):
 def test_save_load_roundtrip(tmp_path):
     st = PipelineState.load(tmp_path)
     st.bump_attempt("chapter_analysis")
+    st.fullbook_completed_tasks.append("summary")
     st.mark_completed("chapter_analysis")
     st.save()
     st2 = PipelineState.load(tmp_path)
     assert st2.current_stage == STAGES[1]
     assert "chapter_analysis" in st2.completed
+    assert st2.fullbook_completed_tasks == ["summary"]
 
 
 def test_mark_completed_advances(tmp_path):

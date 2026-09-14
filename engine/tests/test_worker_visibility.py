@@ -80,6 +80,70 @@ print("VISIBLE_WORKER_DONE")
         assert "VISIBLE_WORKER_DONE" in displayed
 
 
+def test_run_worker_rejects_unchanged_preexisting_output():
+    """自定义 worker 返回 0 但未刷新旧文件时不能伪报完成。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        project.mkdir()
+        task_pack = root / "task.md"
+        task_pack.write_text("# task\n", encoding="utf-8")
+        expected_output = root / "out.md"
+        expected_output.write_text("# stale\n", encoding="utf-8")
+        os.utime(expected_output, ns=(1_000_000_000, 1_000_000_000))
+        worker = root / "worker.py"
+        worker.write_text("print('NO_OUTPUT_CHANGE')\n", encoding="utf-8")
+
+        captured = io.StringIO()
+        with redirect_stdout(captured):
+            rc = run_worker(
+                f'"{sys.executable}" "{worker}"',
+                project,
+                "analysis_regenerate",
+                task_pack,
+                expected_output,
+                timeout=10,
+                retries=0,
+                worker_window="hidden",
+            )
+
+        assert rc == 1
+        assert expected_output.read_text(encoding="utf-8") == "# stale\n"
+        assert "worker未更新已存在的期望产物" in captured.getvalue()
+
+
+def test_run_worker_retries_invalid_json_output():
+    """JSON 产物语法错误时自动重试，不能仅凭文件非空判定成功。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        project.mkdir()
+        task_pack = root / "task.md"
+        task_pack.write_text("# task\n", encoding="utf-8")
+        expected_output = root / "out.json"
+        worker = root / "worker.py"
+        worker.write_text(
+            """
+import json
+import os
+from pathlib import Path
+
+attempt = int(os.environ["ND_WORKER_ATTEMPT"])
+output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+output.write_text("{broken" if attempt == 1 else json.dumps({"ok": True}), encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
+
+        rc = run_worker(
+            f'"{sys.executable}" "{worker}"', project, "delta", task_pack,
+            expected_output, timeout=10, retries=1, worker_window="hidden",
+        )
+
+        assert rc == 0
+        assert expected_output.read_text(encoding="utf-8") == '{"ok": true}'
+
+
 def test_agent_worker_forwards_codebuddy_stderr_to_terminal():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

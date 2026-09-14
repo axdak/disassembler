@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from events import Event, EventBus
-from pipeline_state import PipelineState
+from pipeline_state import STAGES, PipelineState
 from run_pipeline import (
     builtin_agent_worker_command,
     cmd_chapter_structure_auto,
@@ -40,11 +40,14 @@ from run_pipeline import (
     run_worker,
     script_path,
     set_cancel_event,
+    write_fullbook_partial_worker_pack,
+    write_fullbook_reduce_worker_pack,
 )
+from worker_artifacts import confined_project_path, invalid_output_artifacts
 
 # 全书分析任务依赖顺序（阶段5）
 FULLBOOK_TASKS = (
-    "summary", "characters", "plot", "worldview", "settings",
+    "summary", "characters", "plot", "style", "worldview", "settings",
     "plotlines", "outline", "detailed_outline", "narrative_structure", "report",
 )
 
@@ -100,6 +103,7 @@ class Orchestrator:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
         set_cancel_event(self._cancel)
         try:
+            self._reconcile_recovery_state()
             self.emit("pipeline_start", stage=self.state.current_stage)
             while not self.state.is_done():
                 if self._cancel.is_set():
@@ -117,6 +121,50 @@ class Orchestrator:
             return 0
         finally:
             set_cancel_event(threading.Event())  # 重置，避免跨运行/跨测试泄漏
+
+    @staticmethod
+    def _valid_json_file(path: Path) -> bool:
+        try:
+            return path.is_file() and bool(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+
+    def _rewind_to(self, stage: str, reason: str) -> None:
+        """Rewind persisted completion when authoritative artifacts disappeared."""
+        index = STAGES.index(stage)
+        self.state.completed = [
+            item for item in self.state.completed
+            if item in STAGES and STAGES.index(item) < index
+        ]
+        self.state.current_stage = stage
+        self.state.last_error = f"自动恢复回退到 {stage}: {reason}"
+        self.state.save()
+        self.emit("recovery_rewind", stage=stage, detail=reason)
+
+    def _reconcile_recovery_state(self) -> None:
+        """Verify terminal artifacts before trusting a late/done state checkpoint."""
+        current_index = len(STAGES) if self.state.is_done() else (
+            STAGES.index(self.state.current_stage)
+            if self.state.current_stage in STAGES else 0
+        )
+        final = self.project_dir / "故事结构.json"
+        draft = self.project_dir / "故事结构_草稿.json"
+        if current_index > STAGES.index("finalize"):
+            if not self._valid_json_file(final):
+                target = "finalize" if self._valid_json_file(draft) else "final_pack"
+                self._rewind_to(target, "最终故事结构缺失或 JSON 无效")
+                return
+            export_report = self.project_dir / "导出" / "obsidian-vault" / "_meta" / "export_report.json"
+            single = self.project_dir / "导出" / "故事结构总览.md"
+            if self.state.is_done() and (
+                not self._valid_json_file(export_report)
+                or not single.is_file()
+                or single.stat().st_size == 0
+            ):
+                self._rewind_to("export", "导出产物缺失或无效")
+                return
+        elif current_index > STAGES.index("final_pack") and not self._valid_json_file(draft):
+            self._rewind_to("final_pack", "最终草稿缺失或 JSON 无效")
 
     def _run_stage_with_retries(self, stage: str) -> int:
         self.emit("stage_start", stage=stage)
@@ -269,20 +317,47 @@ class Orchestrator:
 
     def _stage_fullbook_analysis(self) -> int:
         for task in self.config.fullbook_tasks:
+            if task in self.state.fullbook_completed_tasks:
+                if self._fullbook_task_outputs_ready(task):
+                    self.emit("progress", stage="fullbook_analysis", detail=f"resume task={task}")
+                    continue
+                self.state.fullbook_completed_tasks.remove(task)
+                self.state.save()
             self.emit("progress", stage="fullbook_analysis", detail=f"task={task}")
             rc = self._run_fullbook_task(task)
             if rc != 0:
                 return rc
+            if task not in self.state.fullbook_completed_tasks:
+                self.state.fullbook_completed_tasks.append(task)
+                self.state.save()
         return 0
+
+    def _fullbook_task_outputs_ready(self, task: str) -> bool:
+        """Check that a saved per-task checkpoint still has valid outputs."""
+        manifest_path = latest_analysis_manifest(self.project_dir, task)
+        if manifest_path is None:
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            outputs = [
+                confined_project_path(self.project_dir, rel)
+                for rel in manifest.get("target_outputs", [])
+            ]
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return bool(outputs) and not invalid_output_artifacts(outputs)
 
     def _run_fullbook_task(self, task: str) -> int:
         # 1. 生成全书分析任务包（packs + manifest + reduce_prompt）
         rc = run_cmd([
             sys.executable, str(script_path("analysis_context_pack.py")), str(self.project_dir),
-            "--task", task, "--chapters", "all", "--include-original", "sample",
+            "--task", task, "--chapters", "all",
+            "--include-original", self.config.include_original,
             "--max-pack-chars", str(self.config.max_pack_chars),
             "--max-original-chars", str(self.config.max_original_chars),
             "--max-analysis-chars", str(self.config.max_analysis_chars),
+            "--story-summary-max-items", str(self.config.story_summary_max_items),
+            "--context-budget-chars", str(self.config.context_budget_chars),
         ])
         if rc != 0:
             return rc
@@ -292,8 +367,17 @@ class Orchestrator:
             return 1
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         packs = manifest.get("packs", [])
-        target_outputs = [self.project_dir / rel for rel in manifest.get("target_outputs", [])]
-        pack_count = manifest.get("pack_count", len(packs))
+        try:
+            target_outputs = [
+                confined_project_path(self.project_dir, rel)
+                for rel in manifest.get("target_outputs", [])
+            ]
+            pack_paths = [confined_project_path(self.project_dir, rel) for rel in packs]
+        except (TypeError, ValueError):
+            return 1
+        # packs 是实际执行依据；不信任可能过期的冗余 pack_count，避免清单数字与
+        # 文件列表不一致时漏跑或错误进入单包分支。
+        pack_count = len(packs)
         if not packs or not target_outputs:
             return 1
         out_dir = manifest_path.parent
@@ -303,31 +387,32 @@ class Orchestrator:
             worker_window=self.config.worker_window,
         )
         if pack_count == 1:
-            # 单包：worker 直接写目标产物
-            return run_worker(
+            # 即使只有一个任务包，也可能拥有多个目标产物（如人物分析三件套、
+            # 故事结构七件套），必须统一走多产物契约并逐一验收。
+            return run_multi_output_worker(
                 self._worker_command(), self.project_dir, task,
-                self.project_dir / packs[0], target_outputs[0], **wk,
+                pack_paths[0], target_outputs, **wk,
             )
         # 多包：逐包出 partial_result，再 reduce 到 target_outputs
         partials: list = []
         for i, pack_rel in enumerate(packs, 1):
             partial = out_dir / f"partial_result_{i:03d}.md"
+            # 原始 pack 中列的是最终产物；增加明确的 partial 覆盖说明，避免
+            # worker 在分包阶段提前覆盖最终文件或遗漏 partial。
+            worker_pack = write_fullbook_partial_worker_pack(
+                self.project_dir, manifest_path, pack_rel, i, pack_count, partial
+            )
             rc = run_worker(
                 self._worker_command(), self.project_dir, task,
-                self.project_dir / pack_rel, partial, **wk,
+                worker_pack, partial, **wk,
             )
             if rc != 0:
                 return rc
             partials.append(partial)
-        # reduce 任务包 = reduce_prompt + 所有 partial
-        reduce_prompt = self.project_dir / manifest.get("reduce_prompt", "")
-        parts: list = []
-        if reduce_prompt.is_file():
-            parts.append(reduce_prompt.read_text(encoding="utf-8"))
-        for p in partials:
-            parts.append(f"# partial: {p.name}\n\n{p.read_text(encoding='utf-8', errors='ignore')}")
-        reduce_pack = out_dir / "reduce_task_pack.md"
-        reduce_pack.write_text("\n\n".join(parts), encoding="utf-8")
+        # 复用工作台同一套 reduce 包装逻辑，显式列出全部最终产物并合并 partial。
+        reduce_pack = write_fullbook_reduce_worker_pack(
+            self.project_dir, manifest_path, partials, target_outputs
+        )
         return run_multi_output_worker(
             self._worker_command(), self.project_dir, f"{task}_reduce",
             reduce_pack, target_outputs, **wk,
@@ -354,10 +439,12 @@ class Orchestrator:
         # 修复草稿后重试，最多 max_repair_rounds 轮。
         draft = self.project_dir / "故事结构_草稿.json"
         repair = self.project_dir / "质量治理" / "最终审计" / "repair_final.md"
+        # 无论允许几轮修复，都先做一次提交校验；随后每完成一轮修复都必须
+        # 再校验一次，避免“最后一轮已经修好却未验收就返回失败”的边界错误。
+        rc = cmd_commit_final_draft(self.project_dir)
+        if rc == 0:
+            return 0
         for _ in range(self.config.max_repair_rounds):
-            rc = cmd_commit_final_draft(self.project_dir)
-            if rc == 0:
-                return 0
             if not repair.is_file():
                 return 1
             wrc = run_worker(
@@ -369,6 +456,9 @@ class Orchestrator:
             )
             if wrc != 0:
                 return 1
+            rc = cmd_commit_final_draft(self.project_dir)
+            if rc == 0:
+                return 0
         return 1
 
     def _stage_finalize(self) -> int:

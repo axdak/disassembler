@@ -36,6 +36,12 @@ from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
 from prompt_loader import render_prompt
+from worker_artifacts import (
+    capture_output_signatures,
+    confined_project_path,
+    invalid_output_artifacts,
+    unchanged_existing_outputs,
+)
 
 
 def _ensure_utf8_console() -> None:
@@ -304,16 +310,28 @@ def run_visible_powershell_command(
             env=env,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
-        try:
-            proc.wait(timeout=timeout + 10 if timeout else None)
-            launcher_output = ""
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            launcher_output = ""
-            message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=launcher_output), timeout)
-            log_path.write_text((log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else "") + message, encoding="utf-8")
-            return 124, (launcher_output or "") + message
+        deadline = time.monotonic() + timeout + 10 if timeout else None
+        while proc.poll() is None:
+            cancel_event = _get_cancel_event()
+            if cancel_event is not None and cancel_event.is_set():
+                _kill_tree(proc)
+                proc.wait()
+                return 130, "[cancelled by user]\n"
+            if deadline is not None and time.monotonic() >= deadline:
+                _kill_tree(proc)
+                proc.wait()
+                launcher_output = ""
+                message = timeout_output(
+                    subprocess.TimeoutExpired(command, timeout, output=launcher_output), timeout
+                )
+                previous = (
+                    log_path.read_text(encoding="utf-8", errors="replace")
+                    if log_path.exists() else ""
+                )
+                log_path.write_text(previous + message, encoding="utf-8")
+                return 124, message
+            time.sleep(0.1)
+        launcher_output = ""
         output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else (launcher_output or "")
         if launcher_output:
             output = launcher_output + output
@@ -372,10 +390,30 @@ def run_cmd(
 def worker_log_path(project_dir: Path, task_type: str, seq: int = 0) -> Path:
     # seq 非零时文件名带 _ch{seq:03d}：分章任务并行时避免同秒同 task_type 的日志互相覆盖，
     # 同时让日志文件名自带章号，便于按阶段/章分类展示。
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 微秒后缀避免并行任务或快速重试在同一秒覆盖彼此日志。
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_type)
     suffix = f"_ch{seq:03d}" if seq else ""
     return project_dir / "质量治理" / "worker日志" / f"{safe_task}{suffix}_{ts}.txt"
+
+
+def wait_before_worker_retry(attempt: int) -> bool:
+    """Apply bounded exponential backoff; return True when cancelled while waiting."""
+    if attempt <= 1:
+        return False
+    try:
+        base = max(0.0, float(os.environ.get("ND_WORKER_RETRY_DELAY_SECONDS", "1")))
+    except ValueError:
+        base = 1.0
+    delay = min(30.0, base * (2 ** (attempt - 2)))
+    if delay <= 0:
+        return False
+    print(f"worker retry backoff: {delay:g}s")
+    cancel_event = _get_cancel_event()
+    if cancel_event is not None:
+        return cancel_event.wait(delay)
+    time.sleep(delay)
+    return False
 
 
 def effective_run_mode(
@@ -431,6 +469,9 @@ def run_worker(
         return 2
     attempts = retries + 1
     for attempt in range(1, attempts + 1):
+        if wait_before_worker_retry(attempt):
+            return 130
+        before_outputs = capture_output_signatures([expected_output])
         env = dict(os.environ)
         env.update({
             "PYTHONIOENCODING": "utf-8",
@@ -469,6 +510,24 @@ def run_worker(
             return returncode
         if not expected_output.is_file() or expected_output.stat().st_size == 0:
             print(f"worker未写出期望产物: {expected_output}")
+            print(f"worker日志: {log_path}")
+            if attempt < attempts:
+                continue
+            return 1
+        invalid = invalid_output_artifacts([expected_output])
+        if invalid:
+            print(f"worker写出的产物格式无效: {expected_output}")
+            print(f"worker日志: {log_path}")
+            if attempt < attempts:
+                continue
+            return 1
+        unchanged = (
+            unchanged_existing_outputs(before_outputs, [expected_output])
+            if os.environ.get("ND_WORKER_REQUIRE_FRESH_OUTPUT", "1") != "0"
+            else []
+        )
+        if unchanged:
+            print(f"worker未更新已存在的期望产物: {expected_output}")
             print(f"worker日志: {log_path}")
             if attempt < attempts:
                 continue
@@ -589,6 +648,9 @@ def run_multi_output_worker(
         return 2
     attempts = retries + 1
     for attempt in range(1, attempts + 1):
+        if wait_before_worker_retry(attempt):
+            return 130
+        before_outputs = capture_output_signatures(expected_outputs)
         env = dict(os.environ)
         env.update({
             "PYTHONIOENCODING": "utf-8",
@@ -630,6 +692,28 @@ def run_multi_output_worker(
         if missing:
             print("worker did not write expected artifact(s):")
             for path in missing:
+                print(f"  - {path}")
+            print(f"worker log: {log_path}")
+            if attempt < attempts:
+                continue
+            return 1
+        invalid = invalid_output_artifacts(expected_outputs)
+        if invalid:
+            print("worker wrote invalid artifact(s):")
+            for path in invalid:
+                print(f"  - {path}")
+            print(f"worker log: {log_path}")
+            if attempt < attempts:
+                continue
+            return 1
+        unchanged = (
+            unchanged_existing_outputs(before_outputs, expected_outputs)
+            if os.environ.get("ND_WORKER_REQUIRE_FRESH_OUTPUT", "1") != "0"
+            else []
+        )
+        if unchanged:
+            print("worker did not refresh pre-existing artifact(s):")
+            for path in unchanged:
                 print(f"  - {path}")
             print(f"worker log: {log_path}")
             if attempt < attempts:
@@ -2760,7 +2844,7 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     ]
     analysis_refs: List[Dict[str, Any]] = []
     for rel, title in analysis_specs:
-        path = project_dir / rel
+        path = confined_project_path(project_dir, rel)
         if path.is_file() and path.stat().st_size > 0:
             analysis_refs.append({
                 "title": title,
@@ -3030,7 +3114,7 @@ def write_analysis_worker_pack(project_dir: Path, manifest_path: Path, record: D
         rel = record.get(key)
         if not rel:
             continue
-        path = project_dir / rel
+        path = confined_project_path(project_dir, rel)
         if path.is_file():
             parts.append(f"# {key}: {rel}\n\n{path.read_text(encoding='utf-8', errors='ignore')}")
     if not parts:
@@ -3059,7 +3143,7 @@ def write_fullbook_partial_worker_pack(
     写最终目标文件而漏掉其余分包内容。本函数在原 pack 前加一段覆盖说明，明确告诉
     worker 只写 partial_path。
     """
-    pack_path = project_dir / pack_rel
+    pack_path = confined_project_path(project_dir, pack_rel)
     if not pack_path.is_file():
         raise FileNotFoundError(f"analysis pack not found: {pack_path}")
     header = (
@@ -3098,7 +3182,7 @@ def write_fullbook_reduce_worker_pack(
         "没有依据的内容；冲突结论标“待确认”。\n\n",
     ]
     if reduce_rel:
-        rp = project_dir / reduce_rel
+        rp = confined_project_path(project_dir, reduce_rel)
         if rp.is_file():
             parts.append(f"## reduce_prompt\n\n{rp.read_text(encoding='utf-8', errors='ignore')}\n\n")
     for i, p in enumerate(partial_paths, 1):
@@ -3497,7 +3581,8 @@ def copy_analysis_task_packages(src_project: Path, dst_project: Path) -> None:
 
 def _analysis_pack_argv(project_dir, *, task, chapters, targets, question,
                         include_original, max_pack_chars, max_original_chars,
-                        max_analysis_chars, out_dir) -> List[str]:
+                        max_analysis_chars, story_summary_max_items,
+                        context_budget_chars, out_dir) -> List[str]:
     argv = [
         str(project_dir),
         "--task", task,
@@ -3506,6 +3591,8 @@ def _analysis_pack_argv(project_dir, *, task, chapters, targets, question,
         "--max-pack-chars", str(max_pack_chars),
         "--max-original-chars", str(max_original_chars),
         "--max-analysis-chars", str(max_analysis_chars),
+        "--story-summary-max-items", str(story_summary_max_items),
+        "--context-budget-chars", str(context_budget_chars),
     ]
     if targets:
         argv.extend(["--targets", *targets])
@@ -3527,6 +3614,8 @@ def scoped_analysis_pack(
     max_pack_chars: int = 70000,
     max_original_chars: int = 6000,
     max_analysis_chars: int = 12000,
+    story_summary_max_items: int = 0,
+    context_budget_chars: int = 160000,
     out_dir: str = "",
     force: bool = False,
 ) -> Dict[str, Any]:
@@ -3546,6 +3635,8 @@ def scoped_analysis_pack(
         task=task, chapters=chapters, targets=targets, question=question,
         include_original=include_original, max_pack_chars=max_pack_chars,
         max_original_chars=max_original_chars, max_analysis_chars=max_analysis_chars,
+        story_summary_max_items=story_summary_max_items,
+        context_budget_chars=context_budget_chars,
         out_dir=out_dir,
     )
     rc = acp_main(argv)
@@ -3568,7 +3659,7 @@ def scoped_analysis_pack(
 
 def _per_chapter_argv(project_dir, *, task, chapters_spec, include_original,
                       max_pack_chars, max_original_chars, max_analysis_chars,
-                      out_dir) -> List[str]:
+                      story_summary_max_items, context_budget_chars, out_dir) -> List[str]:
     argv = [
         str(project_dir),
         "--task", task,
@@ -3578,6 +3669,8 @@ def _per_chapter_argv(project_dir, *, task, chapters_spec, include_original,
         "--max-pack-chars", str(max_pack_chars),
         "--max-original-chars", str(max_original_chars),
         "--max-analysis-chars", str(max_analysis_chars),
+        "--story-summary-max-items", str(story_summary_max_items),
+        "--context-budget-chars", str(context_budget_chars),
     ]
     if out_dir:
         argv.extend(["--out-dir", out_dir])
@@ -3592,6 +3685,8 @@ def scoped_chapter_visual_pack(
     max_pack_chars: int = 70000,
     max_original_chars: int = 6000,
     max_analysis_chars: int = 12000,
+    story_summary_max_items: int = 0,
+    context_budget_chars: int = 160000,
     out_dir: str = "",
 ) -> Dict[str, Any]:
     """对请求的 seq 列表生成 visual_assets per-chapter 任务包。
@@ -3609,6 +3704,8 @@ def scoped_chapter_visual_pack(
         project_dir, task="visual_assets", chapters_spec=chapters_spec,
         include_original=include_original, max_pack_chars=max_pack_chars,
         max_original_chars=max_original_chars, max_analysis_chars=max_analysis_chars,
+        story_summary_max_items=story_summary_max_items,
+        context_budget_chars=context_budget_chars,
         out_dir=out_dir,
     )
     rc = acp_main(argv)
@@ -3659,6 +3756,8 @@ def scoped_chapter_structure_pack(
     max_pack_chars: int = 70000,
     max_original_chars: int = 6000,
     max_analysis_chars: int = 12000,
+    story_summary_max_items: int = 0,
+    context_budget_chars: int = 160000,
     out_dir: str = "",
 ) -> Dict[str, Any]:
     """对请求的 seq 列表生成 chapter_structure per-chapter 任务包。"""
@@ -3672,6 +3771,8 @@ def scoped_chapter_structure_pack(
         project_dir, task="chapter_structure", chapters_spec=chapters_spec,
         include_original=include_original, max_pack_chars=max_pack_chars,
         max_original_chars=max_original_chars, max_analysis_chars=max_analysis_chars,
+        story_summary_max_items=story_summary_max_items,
+        context_budget_chars=context_budget_chars,
         out_dir=out_dir,
     )
     rc = acp_main(argv)

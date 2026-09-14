@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -40,6 +42,8 @@ class PipelineState:
     started_at: float = 0.0
     updated_at: float = 0.0
     last_error: str = ""
+    # 阶段5按分析维度落细粒度断点；崩溃恢复时只重跑缺失/损坏的维度。
+    fullbook_completed_tasks: list[str] = field(default_factory=list)
 
     def _stage(self, stage: str) -> dict[str, Any]:
         return self.stages.setdefault(
@@ -96,6 +100,7 @@ class PipelineState:
             st.started_at = d.get("started_at", 0.0)
             st.updated_at = d.get("updated_at", 0.0)
             st.last_error = d.get("last_error", "")
+            st.fullbook_completed_tasks = list(d.get("fullbook_completed_tasks", []))
             return st
         st = cls(project_dir=str(project_dir))
         st.started_at = time.time()
@@ -105,4 +110,19 @@ class PipelineState:
         self.updated_at = time.time()
         path = Path(self.project_dir) / STATE_REL
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")
+        # 状态文件是自动恢复的依据；先完整写入同目录临时文件，再原子替换，
+        # 避免断电或进程退出留下半截 JSON，使后续运行错误地从头开始。
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(asdict(self), stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp_name, path)
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass

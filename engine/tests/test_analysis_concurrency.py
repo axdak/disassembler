@@ -20,7 +20,9 @@ def _write_project(project: Path, n: int = 3):
 def _write_worker(path: Path):
     path.write_text(
         "import os\nfrom pathlib import Path\n"
-        "Path(os.environ['ND_EXPECTED_OUTPUT']).write_text('# analysis\\n', encoding='utf-8')\n",
+        "output = Path(os.environ['ND_EXPECTED_OUTPUT'])\n"
+        "content = '{}\\n' if output.suffix.lower() == '.json' else '# analysis\\n'\n"
+        "output.write_text(content, encoding='utf-8')\n",
         encoding="utf-8",
     )
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from export_obsidian_vault import export_obsidian_markdown
 
 
@@ -172,3 +174,17 @@ def test_export_obsidian_vault_and_single_markdown(tmp_path: Path) -> None:
     assert "## 角色集" in big_text
     assert "### [[约翰娜·奥尔森多]]" in big_text
     assert "### [[兄弟理念对立与战争危机铺垫]]" in big_text
+
+
+def test_clean_refuses_nonempty_directory_without_export_marker(tmp_path: Path) -> None:
+    story_path = tmp_path / "故事结构.json"
+    out_dir = tmp_path / "user-folder"
+    out_dir.mkdir()
+    keep = out_dir / "important.txt"
+    keep.write_text("keep", encoding="utf-8")
+    write_json(story_path, sample_story())
+
+    with pytest.raises(ValueError, match="not owned by exporter"):
+        export_obsidian_markdown(story_path, out_dir, clean=True)
+
+    assert keep.read_text(encoding="utf-8") == "keep"

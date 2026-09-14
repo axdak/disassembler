@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronology import assign_event_group_orders, first_involved_chapter
-from normalize_story_schema import normalize_structure
+from normalize_story_schema import normalize_structure, save_json
 
 
 def load_json(path: Path) -> Any:
@@ -70,7 +70,8 @@ def run_migrate(project_dir: Path, file: str = "故事结构_增量.json", dry_r
     backup = _bak_dir / (story_path.name + ".before_chronology_migration.bak")
     if not backup.exists():
         shutil.copy2(story_path, backup)
-    story_path.write_text(json.dumps(migrated, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 故事结构是权威数据，使用同目录临时文件原子替换，防止中断造成截断 JSON。
+    save_json(str(story_path), migrated)
     report = project_dir / "质量治理" / "规范化" / "chronology_migration.txt"
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text("\n".join(logs) + "\n", encoding="utf-8")

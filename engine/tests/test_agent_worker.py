@@ -38,7 +38,13 @@ print(os.environ.get("ND_TASK_TYPE", ""))
     )
 
 
-def run_worker(provider: str, provider_env: str, extra_env=None, task_text: str | None = None):
+def run_worker(
+    provider: str,
+    provider_env: str,
+    extra_env=None,
+    task_text: str | None = None,
+    existing_output: str | None = None,
+):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         project = root / "project"
@@ -46,6 +52,10 @@ def run_worker(provider: str, provider_env: str, extra_env=None, task_text: str 
         task = root / "task.md"
         task.write_text(task_text or "# Task\nWrite the target file.\n", encoding="utf-8")
         output = root / "out.md"
+        if existing_output is not None:
+            output.write_text(existing_output, encoding="utf-8")
+            # 固定为旧时间，确保测试能区分“重写相同内容”和“完全没有触碰文件”。
+            os.utime(output, ns=(1_000_000_000, 1_000_000_000))
         fake_cli = root / "fake_cli.py"
         record = root / "record.json"
         write_fake_cli(fake_cli)
@@ -129,6 +139,30 @@ def test_agy_provider_passes_task_pack_path_instead_of_full_task_text():
     assert sentinel not in prompt
     assert payload["task_pack"] in prompt
     assert payload["expected_output"] in prompt
+
+
+def test_agy_provider_rejects_unchanged_preexisting_output():
+    result, output_text, _payload = run_worker(
+        "agy",
+        "ND_AGY_BIN",
+        existing_output="# stale artifact\n",
+    )
+
+    assert result.returncode != 0
+    assert output_text == "# stale artifact\n"
+    assert "provider 未更新已存在的期望输出文件" in result.stdout
+
+
+def test_agy_provider_accepts_refreshed_preexisting_output():
+    result, output_text, _payload = run_worker(
+        "agy",
+        "ND_AGY_BIN",
+        {"FAKE_CLI_DIRECT_WRITE": "1"},
+        existing_output="# stale artifact\n",
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert output_text.startswith("# generated direct artifact")
 
 
 def test_auto_provider_selects_first_available_cli():
@@ -230,6 +264,46 @@ print(os.environ.get("ND_TASK_TYPE", ""))
         assert "已选择 provider: agy" in result.stdout
         assert "已选择 provider: codebuddy" in result.stdout
         assert "-p" in payload["argv"]
+
+
+def test_provider_launch_error_is_reported_without_traceback():
+    """CLI 路径存在但不可执行时，应输出可诊断错误而不是泄漏 Python 堆栈。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        project.mkdir()
+        task = root / "task.md"
+        task.write_text("# Task\n", encoding="utf-8")
+        output = root / "out.md"
+        invalid_cli = root / "invalid-cli"
+        invalid_cli.write_text("not an executable\n", encoding="utf-8")
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "PYTHONIOENCODING": "utf-8",
+                "ND_TASK_TYPE": "analysis",
+                "ND_PROJECT_DIR": str(project),
+                "ND_TASK_PACK": str(task),
+                "ND_EXPECTED_OUTPUT": str(output),
+                "ND_CHAPTER_SEQ": "1",
+                "ND_AGY_BIN": str(invalid_cli),
+            }
+        )
+        result = subprocess.run(
+            [sys.executable, str(WORKER), "--provider", "agy"],
+            cwd=str(project),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+        assert result.returncode == 1
+        assert "provider 启动失败: agy" in result.stdout
+        assert "Traceback" not in result.stdout
 
 
 def test_claude_provider_is_not_supported():

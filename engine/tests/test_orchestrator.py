@@ -82,6 +82,36 @@ def test_state_persisted_between_runs(tmp_path):
     assert m2.call_count == 0
 
 
+def test_done_state_rewinds_to_export_when_export_artifacts_missing(tmp_path):
+    final = tmp_path / "故事结构.json"
+    final.write_text('{"介绍": {"标题": "x"}}', encoding="utf-8")
+    state = PipelineState.load(tmp_path)
+    for stage in orchestrator.STAGES:
+        state.mark_completed(stage)
+    state.save()
+    orch = Orchestrator(tmp_path, config=Config(max_attempts=1), bus=EventBus())
+
+    with patch.object(orchestrator, "run_cmd", return_value=1) as run:
+        rc = orch.run()
+
+    assert rc == 1
+    assert orch.state.current_stage == "export"
+    assert run.call_count == 1
+
+
+def test_done_state_rewinds_to_final_pack_when_final_and_draft_missing(tmp_path):
+    state = PipelineState.load(tmp_path)
+    for stage in orchestrator.STAGES:
+        state.mark_completed(stage)
+    state.save()
+    orch = Orchestrator(tmp_path, config=Config(max_attempts=1), bus=EventBus())
+
+    orch._reconcile_recovery_state()
+
+    assert orch.state.current_stage == "final_pack"
+    assert "final_pack" not in orch.state.completed
+
+
 def test_rc2_handoff_reruns_until_success(tmp_path):
     # rc=2 是交接/检查点，不是失败：重跑同阶段直到成功，不发 stage_fail、不计停滞。
     bus = EventBus()
@@ -167,11 +197,22 @@ def test_commit_final_draft_exhausts_repair_rounds(tmp_path):
     repair = tmp_path / "质量治理" / "最终审计" / "repair_final.md"
     repair.parent.mkdir(parents=True, exist_ok=True)
     repair.write_text("repair instructions", encoding="utf-8")
-    with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1), \
+    with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1) as cfd, \
          patch.object(orchestrator, "run_worker", return_value=0) as rw:
         rc = orch._stage_commit_final_draft()
     assert rc == 1
+    assert cfd.call_count == 3  # 初次校验 + 每轮修复后的再次校验
     assert rw.call_count == 2  # 每轮修复一次，共 2 轮
+
+
+def test_commit_final_draft_still_validates_when_repairs_disabled(tmp_path):
+    orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=0))
+    with patch.object(orchestrator, "cmd_commit_final_draft", return_value=0) as cfd, \
+         patch.object(orchestrator, "run_worker", return_value=0) as rw:
+        rc = orch._stage_commit_final_draft()
+    assert rc == 0
+    assert cfd.call_count == 1
+    assert rw.call_count == 0
 
 
 def test_export_stage(tmp_path):
@@ -214,16 +255,22 @@ def _write_expected_worker(*args, **kwargs):
 
 
 def test_fullbook_single_pack(tmp_path):
-    mpath = _write_manifest(tmp_path, "summary", 1, ["全书分析/剧情结构/章节梗概汇总.md"])
-    orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", fullbook_tasks=("summary",)))
+    outputs = [
+        "全书分析/人物分析/人物档案.md",
+        "全书分析/人物分析/人物关系.md",
+        "全书分析/人物分析/人物提及.json",
+    ]
+    mpath = _write_manifest(tmp_path, "characters", 1, outputs)
+    orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", fullbook_tasks=("characters",)))
     with patch.object(orchestrator, "run_cmd", return_value=0), \
          patch.object(orchestrator, "latest_analysis_manifest", return_value=mpath), \
-         patch.object(orchestrator, "run_worker", side_effect=_write_expected_worker) as rw, \
+         patch.object(orchestrator, "run_worker") as rw, \
          patch.object(orchestrator, "run_multi_output_worker", return_value=0) as rmw:
         rc = orch._stage_fullbook_analysis()
     assert rc == 0
-    assert rw.call_count == 1  # 单包直接写目标
-    assert rmw.call_count == 0  # 无 reduce
+    assert rw.call_count == 0
+    assert rmw.call_count == 1  # 单包也统一验收全部目标产物
+    assert rmw.call_args.args[4] == [tmp_path / rel for rel in outputs]
 
 
 def test_fullbook_multi_pack_reduce(tmp_path):
@@ -240,7 +287,13 @@ def test_fullbook_multi_pack_reduce(tmp_path):
     assert rc == 0
     assert rw.call_count == 2  # 2 包 -> 2 partial
     assert rmw.call_count == 1  # 1 次 reduce
-    assert (mpath.parent / "reduce_task_pack.md").is_file()
+    assert (mpath.parent / "worker_pack_reduce.md").is_file()
+    for index, call in enumerate(rw.call_args_list, 1):
+        worker_pack = call.args[3]
+        assert worker_pack.name == f"worker_pack_{index:03d}.md"
+        content = worker_pack.read_text(encoding="utf-8")
+        assert "只产出**本包的分批结果**" in content
+        assert f"partial_result_{index:03d}.md" in content
 
 
 def test_fullbook_task_passes_compression_config_to_pack_cmd(tmp_path):
@@ -249,20 +302,75 @@ def test_fullbook_task_passes_compression_config_to_pack_cmd(tmp_path):
     cfg = Config(
         worker_provider="agy",
         fullbook_tasks=("summary",),
+        include_original="full",
         max_pack_chars=55555,
         max_original_chars=9999,
         max_analysis_chars=8888,
+        story_summary_max_items=77,
+        context_budget_chars=222222,
     )
     orch = Orchestrator(tmp_path, config=cfg)
     with patch.object(orchestrator, "run_cmd", return_value=0) as rc_mock, \
          patch.object(orchestrator, "latest_analysis_manifest", return_value=mpath), \
-         patch.object(orchestrator, "run_worker", side_effect=_write_expected_worker):
+         patch.object(orchestrator, "run_multi_output_worker", return_value=0):
         rc = orch._stage_fullbook_analysis()
     assert rc == 0
     cmd = rc_mock.call_args.args[0]
     assert "--max-pack-chars" in cmd and "55555" in cmd
     assert "--max-original-chars" in cmd and "9999" in cmd
     assert "--max-analysis-chars" in cmd and "8888" in cmd
+    assert "--include-original" in cmd and "full" in cmd
+    assert "--story-summary-max-items" in cmd and "77" in cmd
+    assert "--context-budget-chars" in cmd and "222222" in cmd
+
+
+def test_fullbook_stage_resumes_completed_tasks_with_valid_outputs(tmp_path):
+    summary_output = "全书分析/剧情结构/章节梗概汇总.md"
+    summary_manifest = _write_manifest(tmp_path, "summary", 1, [summary_output])
+    summary_path = tmp_path / summary_output
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text("# 已完成\n", encoding="utf-8")
+    orch = Orchestrator(
+        tmp_path,
+        config=Config(worker_provider="agy", fullbook_tasks=("summary", "plot")),
+    )
+    orch.state.fullbook_completed_tasks = ["summary"]
+
+    def latest(_project, task):
+        return summary_manifest if task == "summary" else None
+
+    with patch.object(orchestrator, "latest_analysis_manifest", side_effect=latest), \
+         patch.object(orch, "_run_fullbook_task", return_value=0) as run_task:
+        rc = orch._stage_fullbook_analysis()
+
+    assert rc == 0
+    run_task.assert_called_once_with("plot")
+    assert orch.state.fullbook_completed_tasks == ["summary", "plot"]
+
+
+def test_fullbook_stage_reruns_checkpoint_with_invalid_json(tmp_path):
+    outputs = [
+        "全书分析/人物分析/人物档案.md",
+        "全书分析/人物分析/人物关系.md",
+        "全书分析/人物分析/人物提及.json",
+    ]
+    manifest = _write_manifest(tmp_path, "characters", 1, outputs)
+    for rel in outputs:
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken" if path.suffix == ".json" else "# ok\n", encoding="utf-8")
+    orch = Orchestrator(
+        tmp_path,
+        config=Config(worker_provider="agy", fullbook_tasks=("characters",)),
+    )
+    orch.state.fullbook_completed_tasks = ["characters"]
+
+    with patch.object(orchestrator, "latest_analysis_manifest", return_value=manifest), \
+         patch.object(orch, "_run_fullbook_task", return_value=0) as run_task:
+        rc = orch._stage_fullbook_analysis()
+
+    assert rc == 0
+    run_task.assert_called_once_with("characters")
 
 
 def test_full_pipeline_completes(tmp_path):
@@ -317,10 +425,41 @@ outputs = json.loads(os.environ["ND_EXPECTED_OUTPUTS"])
 for item in outputs:
     target = Path(item)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(f"# generated {task_type}\\n{target.name}\\n", encoding="utf-8")
+    content = json.dumps({"generated": task_type}) if target.suffix == ".json" else f"# generated {task_type}\\n{target.name}\\n"
+    target.write_text(content, encoding="utf-8")
 """,
         encoding="utf-8",
     )
+
+
+def test_fullbook_single_pack_real_worker_writes_every_target(tmp_path):
+    """单包多产物必须通过真实 worker 环境契约逐一落盘，防止只验收首文件。"""
+    project = tmp_path / "project"
+    outputs = [
+        "全书分析/人物分析/人物档案.md",
+        "全书分析/人物分析/人物关系.md",
+        "全书分析/人物分析/人物提及.json",
+    ]
+    manifest_path = _write_manifest(project, "characters", 1, outputs)
+    worker = tmp_path / "multi_output_worker.py"
+    _write_multi_output_worker(worker)
+    config = Config(
+        worker_provider="manual",
+        worker_command=f'"{sys.executable}" "{worker}"',
+        worker_timeout_seconds=30,
+        worker_retries=0,
+        fullbook_tasks=("characters",),
+    )
+    orchestrator_instance = Orchestrator(project, config=config)
+    with patch.object(orchestrator, "run_cmd", return_value=0), \
+         patch.object(orchestrator, "latest_analysis_manifest", return_value=manifest_path):
+        rc = orchestrator_instance._stage_fullbook_analysis()
+
+    assert rc == 0
+    for relative_path in outputs:
+        target = project / relative_path
+        assert target.is_file()
+        assert target.stat().st_size > 0
 
 
 def test_chapter_phases_pass_correct_args(tmp_path):

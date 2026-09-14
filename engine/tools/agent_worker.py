@@ -20,6 +20,11 @@ from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from prompt_loader import render_prompt
+from worker_artifacts import (
+    capture_output_signatures,
+    invalid_output_artifacts,
+    unchanged_existing_outputs,
+)
 
 
 PROVIDER_ORDER = ["agy", "codebuddy"]
@@ -283,9 +288,14 @@ def main() -> int:
     attempted = False
     # agy 默认把真实异常吞掉（只吐 "Agent execution terminated due to error."）。
     # 强制 --log-file 写到临时文件，失败时把尾部追加进 worker 日志，便于排查 429 等。
-    agy_log_fd, agy_log_path = tempfile.mkstemp(suffix=".log", prefix="agy_diag_")
-    os.close(agy_log_fd)
-    os.environ.setdefault("ND_AGY_LOG_FILE", agy_log_path)
+    configured_agy_log = os.environ.get("ND_AGY_LOG_FILE", "").strip()
+    owns_agy_log = not configured_agy_log
+    if owns_agy_log:
+        agy_log_fd, agy_log_path = tempfile.mkstemp(suffix=".log", prefix="agy_diag_")
+        os.close(agy_log_fd)
+        os.environ["ND_AGY_LOG_FILE"] = agy_log_path
+    else:
+        agy_log_path = configured_agy_log
     try:
         for provider in provider_order(args.provider):
             if provider not in PROVIDER_ORDER:
@@ -301,14 +311,26 @@ def main() -> int:
             attempted = True
             if args.provider == "auto":
                 print(f"已选择 provider: {provider}", file=sys.stderr)
-            result = run_provider(provider, command, prompt, project_dir)
+            before_outputs = capture_output_signatures(expected_outputs)
+            try:
+                result = run_provider(provider, command, prompt, project_dir)
+            except OSError as exc:
+                # CLI 文件存在但无法启动（损坏、权限或平台不兼容）时，auto 仍应尝试下一个 provider。
+                last_returncode = 1
+                print(f"provider 启动失败: {provider}: {exc}", file=sys.stderr)
+                if provider == "agy":
+                    _dump_provider_log_tail(agy_log_path)
+                if args.provider == "auto":
+                    continue
+                return 1
             last_returncode = result.returncode
             if result.returncode != 0:
                 if result.stdout:
                     print(result.stdout, end="")
                 if result.stderr:
                     print(result.stderr, file=sys.stderr, end="")
-                _dump_provider_log_tail(agy_log_path)
+                if provider == "agy":
+                    _dump_provider_log_tail(agy_log_path)
                 if args.provider == "auto":
                     continue
                 return result.returncode
@@ -324,6 +346,12 @@ def main() -> int:
                 expected_output = expected_outputs[0]
                 expected_output.parent.mkdir(parents=True, exist_ok=True)
                 expected_output.write_text(content + "\n", encoding="utf-8")
+                if invalid_output_artifacts([expected_output]):
+                    print(f"provider 写出的 JSON 格式无效: {expected_output}", file=sys.stderr)
+                    if args.provider == "auto":
+                        last_returncode = 1
+                        continue
+                    return 1
                 # capture_stdout 模式下 stdout 否则为空（产物已写文件、不回显内容），
                 # 留一行摘要给 worker 日志，便于判断该章是否真完成。
                 print(f"provider 已通过 stdout 捕获写入: {expected_output.name}（{len(content)} 字符）")
@@ -339,14 +367,37 @@ def main() -> int:
                     last_returncode = 1
                     continue
                 return 1
+            invalid = invalid_output_artifacts(expected_outputs)
+            if invalid:
+                print("provider 写出的产物格式无效:", file=sys.stderr)
+                for path in invalid:
+                    print(f"- {path}", file=sys.stderr)
+                if args.provider == "auto":
+                    last_returncode = 1
+                    continue
+                return 1
+            unchanged = (
+                unchanged_existing_outputs(before_outputs, expected_outputs)
+                if os.environ.get("ND_WORKER_REQUIRE_FRESH_OUTPUT", "1") != "0"
+                else []
+            )
+            if unchanged:
+                print("provider 未更新已存在的期望输出文件:", file=sys.stderr)
+                for path in unchanged:
+                    print(f"- {path}", file=sys.stderr)
+                if args.provider == "auto":
+                    last_returncode = 1
+                    continue
+                return 1
             print(f"provider 已写入产物: {', '.join(p.name for p in expected_outputs if p.is_file())}")
             return 0
     finally:
-        os.environ.pop("ND_AGY_LOG_FILE", None)
-        try:
-            os.unlink(agy_log_path)
-        except OSError:
-            pass
+        if owns_agy_log:
+            os.environ.pop("ND_AGY_LOG_FILE", None)
+            try:
+                os.unlink(agy_log_path)
+            except OSError:
+                pass
 
     if not attempted:
         print("未找到支持的 provider CLI;请安装 agy/codebuddy 或设置 ND_AGY_BIN/ND_CODEBUDDY_BIN", file=sys.stderr)

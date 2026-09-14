@@ -10,13 +10,18 @@ seq 接续旧索引最大值，只追加新章节 md 和索引条目，不动旧
     python split_chapters_append.py <新原文文件> <项目目录>/原文拆解 [--pattern PATTERN] [--apply] [--increment-only]
 """
 from __future__ import annotations
-import argparse, json, os, re, sys, tempfile
+import argparse, hashlib, json, os, re, sys, tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # 复用 split_chapters.py 的切分原子函数，避免重复实现与行为漂移。
 # 本脚本与 split_chapters.py 同目录，运行时 sys.path[0] 即 scripts/，可直接 import。
 from split_chapters import read_file, detect_pattern, extract_order, normalize_title, safe_name
+
+
+def _file_signature(path: Path) -> str:
+    """Fingerprint an exact preview input so apply can reject stale plans."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def parse_chapters(content: str, pattern: str = '', sample_lines: int = 0, min_matches: int = 2) -> Tuple[Optional[str], List[dict], List[str]]:
@@ -109,6 +114,7 @@ def plan_append(
     if not out_dir.is_dir():
         raise SystemExit(f'错误: 输出目录不存在: {out_dir}')
     old_index = load_old_index(out_dir)
+    old_index_signature = _file_signature(out_dir / '_索引.json')
     old_chapters = old_index.get('chapters', []) or []
     if not old_chapters:
         raise SystemExit('错误: 旧索引 chapters 为空，请先用 split_chapters.py 完成首次拆章。')
@@ -117,6 +123,7 @@ def plan_append(
     max_seq = max((c.get('seq', 0) for c in old_chapters), default=0)
 
     content = read_file(source_file)
+    source_signature = _file_signature(Path(source_file))
     pat, new_chapters, preface_lines = parse_chapters(content, pattern)
     if not pat:
         raise SystemExit('错误: 无法检测新原文的章节标题模式，无法比对。请用 --pattern 显式指定。')
@@ -135,6 +142,8 @@ def plan_append(
                 'increment_only': bool(increment_only),
                 'old_max_seq': max_seq,
                 'old_chapter_count': sum(1 for c in old_chapters if not c.get('is_preface')),
+                'old_index_signature': old_index_signature,
+                'source_signature': source_signature,
                 'preface_lines': preface_lines,
                 'new_chapter_count': len(new_chapters),
                 'prefix_len': 0,
@@ -168,6 +177,8 @@ def plan_append(
         'increment_only': bool(increment_only),
         'old_max_seq': max_seq,
         'old_chapter_count': sum(1 for c in old_chapters if not c.get('is_preface')),
+        'old_index_signature': old_index_signature,
+        'source_signature': source_signature,
         'preface_lines': preface_lines,
         'new_chapter_count': len(new_chapters),
         'prefix_len': prefix_len,
@@ -190,19 +201,47 @@ def apply_append(plan: Dict[str, Any]) -> Dict[str, Any]:
     if not idx_path.is_file():
         raise SystemExit(f'错误: 旧索引不存在: {idx_path}')
 
+    expected_signature = str(plan.get('old_index_signature', ''))
+    if not expected_signature:
+        raise ValueError('追加计划缺少旧索引签名，请重新预览后再执行。')
+    if _file_signature(idx_path) != expected_signature:
+        raise ValueError('章节索引在预览后已变化，请重新预览；本次未写入任何文件。')
+    source_path = Path(str(plan.get('source_file', '')))
+    expected_source_signature = str(plan.get('source_signature', ''))
+    if (
+        not expected_source_signature
+        or not source_path.is_file()
+        or _file_signature(source_path) != expected_source_signature
+    ):
+        raise ValueError('新原文在预览后已变化或不可读取，请重新预览；本次未写入任何文件。')
+
     with open(idx_path, 'r', encoding='utf-8') as f:
         index = json.load(f)
     old_chapters = list(index.get('chapters', []) or [])
     existing_filenames = {c.get('filename') for c in old_chapters if isinstance(c, dict)}
+    old_seqs = [int(c.get('seq', 0)) for c in old_chapters if isinstance(c, dict)]
+    planned = plan.get('appended', []) or []
+    planned_seqs = [int(entry.get('seq', 0)) for entry in planned if isinstance(entry, dict)]
+    current_max = max(old_seqs, default=0)
+    expected_seqs = list(range(current_max + 1, current_max + 1 + len(planned)))
+    if planned_seqs != expected_seqs:
+        raise ValueError('追加计划章节序号与当前索引不连续，请重新预览。')
+    planned_targets: List[Path] = []
+    for entry in planned:
+        filename = str(entry.get('filename', ''))
+        target = out_dir / filename
+        resolved_target = target.resolve()
+        if not filename or out_dir.resolve() not in resolved_target.parents:
+            raise ValueError(f'追加章节文件名越界或为空: {filename}')
+        planned_targets.append(target)
 
     written: List[str] = []
     appended_entries: List[Dict[str, Any]] = []
-    for entry in plan.get('appended', []) or []:
+    for entry, target in zip(planned, planned_targets):
         filename = entry['filename']
         if filename in existing_filenames:
             # 永不覆盖旧章节文件：跳过已存在条目。
             continue
-        target = out_dir / filename
         if target.is_file():
             # 同名文件已存在但不在索引中：避免覆盖，跳过写盘但仍追加索引条目。
             pass

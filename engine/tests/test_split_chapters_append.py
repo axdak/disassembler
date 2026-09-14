@@ -15,6 +15,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent / "scripts"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -211,6 +213,37 @@ def test_apply_uses_temp_file_and_replace(tmp_path, monkeypatch):
     apply_append(plan)
     assert any(str(out_dir / "_索引.json") == p for p in seen), \
         "index must be replaced atomically via os.replace"
+
+
+def test_apply_rejects_plan_when_index_changed_after_preview(tmp_path):
+    _, out_dir, _ = _make_old_project(tmp_path)
+    new_src = tmp_path / "book_new.txt"
+    new_src.write_text(
+        "第1章 序章\n内容\n第2章 相遇\n内容\n第3章 冲突\n内容\n第4章 续写\n内容\n",
+        encoding="utf-8",
+    )
+    plan = plan_append(str(new_src), str(out_dir))
+    index_path = out_dir / "_索引.json"
+    index_path.write_text(index_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="索引在预览后已变化"):
+        apply_append(plan)
+
+    assert not (out_dir / plan["appended"][0]["filename"]).exists()
+
+
+def test_apply_rejects_plan_when_source_changed_after_preview(tmp_path):
+    _, out_dir, _ = _make_old_project(tmp_path)
+    new_src = tmp_path / "book_new.txt"
+    new_src.write_text(
+        "第1章 序章\n内容\n第2章 相遇\n内容\n第3章 冲突\n内容\n第4章 续写\n内容\n",
+        encoding="utf-8",
+    )
+    plan = plan_append(str(new_src), str(out_dir))
+    new_src.write_text(new_src.read_text(encoding="utf-8") + "已变化", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="新原文在预览后已变化"):
+        apply_append(plan)
 
 
 if __name__ == "__main__":
