@@ -15,6 +15,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 
 # runner 导入时会把 engine/scripts 加入 sys.path
 from runner import QueueRunner, RunManager
@@ -59,12 +60,14 @@ def _safe_project_path(project_dir: Path, rel: str) -> Optional[Path]:
     return target
 
 
-# worker 日志文件名规范：{task_type}[_ch{seq:03d}]_{YYYYMMDD_HHMMSS}.txt
-_LOG_NAME_RE = re.compile(r"^(.+?)(?:_ch(\d{3}))?_(\d{8}_\d{6})\.txt$")
+# worker 日志文件名规范：新格式带微秒；兼容读取旧的秒级日志名。
+_LOG_NAME_RE = re.compile(
+    r"^(.+?)(?:_ch(\d{3}))?_(\d{8}_\d{6}(?:_\d{6})?)\.txt$"
+)
 
 # 全书分析任务名（orchestrator.FULLBOOK_TASKS 的镜像，避免跨模块耦合）
 _FULLBOOK_TASK_TYPES = {
-    "summary", "characters", "plot", "worldview", "settings", "plotlines",
+    "summary", "characters", "plot", "style", "worldview", "settings", "plotlines",
     "outline", "detailed_outline", "narrative_structure", "report",
 }
 
@@ -157,6 +160,9 @@ def create_app(
     for adapter in app.state.workbench.adapters.values():
         if isinstance(adapter, AppendChaptersTaskAdapter) and adapter.manager is None:
             adapter.manager = app.state.workbench
+    # 未完成的自动运行队列在应用重启后直接续跑，不要求用户再次点击开始。
+    if app.state.queue.list():
+        app.state.queue.start()
 
     def resolve_run_config(override: Optional[RunConfig]) -> RunConfig:
         # 存档设置作为默认值，调用方显式传入的字段覆盖（前端通常传空 config，需靠这里注入设置）。
@@ -165,7 +171,11 @@ def create_app(
         # 不会把 settings 里的 chapter_mode/analysis_concurrency 等回退成 RunConfig 默认值。
         override_cfg = override or RunStart().config
         merged.update(override_cfg.model_dump(exclude_unset=True))
-        return RunConfig(**{k: v for k, v in merged.items() if k in RunConfig.model_fields})
+        try:
+            return RunConfig(**{k: v for k, v in merged.items() if k in RunConfig.model_fields})
+        except ValidationError as exc:
+            # 历史版本可能已保存无效配置；转换为可理解的 422，而不是在启动任务时返回 500。
+            raise HTTPException(status_code=422, detail=f"已保存的运行设置无效: {exc}") from exc
 
     def require_token(request: Request) -> None:
         auth = request.headers.get("authorization", "")
@@ -211,7 +221,20 @@ def create_app(
         if not src.is_file():
             raise HTTPException(status_code=400, detail="source file not found")
         stem = src.stem
-        project_dir = Path(body.project_dir).resolve() if body.project_dir else src.parent / f"拆书_{stem}"
+        project_dir = (
+            Path(body.project_dir).resolve()
+            if body.project_dir
+            else (src.parent / f"拆书_{stem}").resolve()
+        )
+        existing = app.state.db.get_project_by_path(str(project_dir))
+        if existing:
+            # 重复点击“从书创建”应幂等返回已有项目，不能重新切分并覆盖用户产物。
+            return existing
+        if project_dir.exists() and any(project_dir.iterdir()):
+            raise HTTPException(
+                status_code=409,
+                detail="目标项目目录已存在且非空；请接管该目录或选择其他目录",
+            )
         project_dir.mkdir(parents=True, exist_ok=True)
         rc = run_cmd(
             [sys.executable, str(script_path("run_pipeline.py")), "split", str(project_dir), str(src)],
@@ -219,8 +242,7 @@ def create_app(
         )
         if rc != 0:
             raise HTTPException(status_code=500, detail=f"split failed rc={rc}")
-        existing = app.state.db.get_project_by_path(str(project_dir))
-        return existing or app.state.db.create_project(str(project_dir), stem)
+        return app.state.db.create_project(str(project_dir), stem)
 
     @app.get("/projects/{pid}", dependencies=[Depends(require_token)])
     def project_status(pid: int):
@@ -245,6 +267,12 @@ def create_app(
     @app.delete("/projects/{pid}", dependencies=[Depends(require_token)])
     def delete_project(pid: int):
         _project_or_404(pid)
+        if (
+            app.state.manager.is_running(pid)
+            or app.state.queue.contains(pid)
+            or app.state.db.has_nonterminal_tasks(pid)
+        ):
+            raise HTTPException(status_code=409, detail="项目仍有运行中或排队任务，不能删除")
         app.state.db.delete_project(pid)
         return {"ok": True}
 
@@ -472,7 +500,8 @@ def create_app(
 
     @app.put("/settings", dependencies=[Depends(require_token)])
     def update_settings(body: SettingsUpdate):
-        for k, v in body.settings.items():
+        # 只落库本次显式提交的字段，避免部分更新把其余设置重置为默认值。
+        for k, v in body.settings.model_dump(exclude_unset=True).items():
             app.state.db.set_setting(k, v)
         return app.state.db.all_settings()
 
@@ -480,6 +509,7 @@ def create_app(
 
     @app.post("/queue", dependencies=[Depends(require_token)])
     def queue_add(body: QueueAdd):
+        _project_or_404(body.project_id)
         pos = app.state.queue.add(body.project_id, resolve_run_config(body.config))
         return {"position": pos}
 

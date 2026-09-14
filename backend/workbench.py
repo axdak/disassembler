@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 import time
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Protocol
@@ -101,6 +101,9 @@ class TaskContext:
     # （如 governance）在任务参数未显式指定 worker_command 时自动解析内置
     # agent_worker 命令，对齐 orchestrator 的 _worker_command() 行为。
     worker_provider: str = "agy"
+    # 保存任务启动时的全局设置快照。适配器仍允许任务参数逐项覆盖，从而既保持
+    # 单次任务可定制，也让设置页对自动流水线和工作台任务采用同一套默认值。
+    settings: dict = field(default_factory=dict)
 
     @property
     def id(self) -> int:
@@ -170,7 +173,12 @@ class WorkbenchTaskManager:
         return self._serialize(task)
 
     def list(self, project_id: int, *, revisions: dict | None = None) -> list[dict]:
-        return [self._serialize(task, revisions=revisions) for task in self.db.list_tasks(project_id)]
+        tasks = self.db.list_tasks(project_id)
+        if revisions is None:
+            project = self.db.get_project(project_id)
+            revisions = project_revisions(Path(project["path"])) if project else {}
+        # 一次请求只计算一次项目 revision；大项目不能按任务条数重复读取完整 JSON。
+        return [self._serialize(task, revisions=revisions) for task in tasks]
 
     def get(self, task_id: int) -> dict | None:
         task = self.db.get_task(task_id)
@@ -302,11 +310,18 @@ class WorkbenchTaskManager:
     def _legacy_running(self, project_id: int) -> bool:
         return bool(self.run_manager and self.run_manager.is_running(project_id))
 
+    def _task_writes_project_artifacts(self, task: dict) -> bool:
+        """Use an adapter capability flag in addition to legacy writer types."""
+        if task["task_type"] in WRITER_TASK_TYPES:
+            return True
+        provider = self.adapters[task["task_type"]]
+        return bool(getattr(provider, "writes_project_artifacts", False))
+
     def _try_admit(self, task: dict) -> bool:
         project_id = task["project_id"]
         if self._legacy_running(project_id):
             return False
-        if task["task_type"] in WRITER_TASK_TYPES:
+        if self._task_writes_project_artifacts(task):
             owner = object()
             if not self.writer_coordinator.try_acquire(project_id, owner):
                 return False
@@ -387,6 +402,7 @@ class WorkbenchTaskManager:
                     task["id"], percent, detail
                 ),
                 worker_provider=str(self.db.get_setting("worker_provider", "agy")),
+                settings=self.db.all_settings(),
             )
             prepare = getattr(adapter, "prepare", None)
             if callable(prepare):

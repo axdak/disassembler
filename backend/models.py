@@ -2,12 +2,12 @@
 """FastAPI 请求/响应模型。"""
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_FULLBOOK_TASKS = [
-    "summary", "characters", "plot", "worldview", "settings",
+    "summary", "characters", "plot", "style", "worldview", "settings",
     "plotlines", "outline", "detailed_outline", "narrative_structure", "report",
 ]
 
@@ -43,32 +43,37 @@ class Project(BaseModel):
 
 
 class RunConfig(BaseModel):
-    worker_provider: str = "agy"
+    """Validated configuration shared by direct runs, queues, and saved settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_provider: Literal["manual", "auto", "agy", "codebuddy"] = "agy"
     worker_command: str = ""
-    worker_loop: str = "continuous"
-    worker_retries: int = 2
-    worker_timeout_seconds: int = 1200
-    max_attempts: int = 10
-    stagnant_limit: int = 3
-    max_repair_rounds: int = 3
-    analysis_concurrency: int = 1
-    per_chapter_concurrency: int = 2  # 分章任务（章节结构/视觉资产）并行度；1=逐章串行
-    chapter_mode: str = "two_phase"
-    fullbook_tasks: list[str] = DEFAULT_FULLBOOK_TASKS
-    export_source: str = "final"
+    worker_loop: Literal["supervised", "continuous"] = "continuous"
+    worker_window: Literal["hidden", "powershell", "powershell-keep"] = "hidden"
+    worker_retries: int = Field(default=2, ge=0)
+    worker_timeout_seconds: int = Field(default=1200, gt=0)
+    max_attempts: int = Field(default=10, gt=0)
+    stagnant_limit: int = Field(default=3, gt=0)
+    max_repair_rounds: int = Field(default=3, ge=0)
+    analysis_concurrency: int = Field(default=1, gt=0)
+    per_chapter_concurrency: int = Field(default=2, gt=0)  # 分章任务并行度；1=逐章串行
+    chapter_mode: Literal["two_phase", "interleaved"] = "two_phase"
+    fullbook_tasks: list[str] = Field(default_factory=lambda: list(DEFAULT_FULLBOOK_TASKS))
+    export_source: Literal["final", "process"] = "final"
     # 任务包上下文压缩策略（可经设置页配置）
-    include_original: str = "auto"  # auto | none | sample | full
-    max_original_chars: int = 6000
-    max_analysis_chars: int = 12000
-    story_summary_max_items: int = 0  # 0=不限制（全名称索引，默认，避免大书全书分析任务包遗漏元素）
-    context_budget_chars: int = 160000
-    delta_full_story_kb: int = 256
-    audit_max_context_chars: int = 524288
-    max_pack_chars: int = 70000  # 全书分析任务包单包最大字符数，超出自动分包；只影响阶段5全书分析任务包
+    include_original: Literal["auto", "none", "sample", "full"] = "auto"
+    max_original_chars: int = Field(default=6000, gt=0)
+    max_analysis_chars: int = Field(default=12000, gt=0)
+    story_summary_max_items: int = Field(default=0, ge=0)  # 0=不限制（全名称索引）
+    context_budget_chars: int = Field(default=160000, gt=0)
+    delta_full_story_kb: int = Field(default=256, gt=0)
+    audit_max_context_chars: int = Field(default=524288, gt=0)
+    max_pack_chars: int = Field(default=70000, gt=0)  # 全书分析任务包单包最大字符数
 
 
 class RunStart(BaseModel):
-    config: RunConfig = RunConfig()
+    config: RunConfig = Field(default_factory=RunConfig)
 
 
 class Run(BaseModel):
@@ -116,7 +121,8 @@ class StageEvent(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    settings: dict[str, Any]
+    # RunConfig 全部字段都有默认值；接口使用 exclude_unset，仅保存调用方显式传入项。
+    settings: RunConfig
 
 
 class QueueAdd(BaseModel):

@@ -69,6 +69,12 @@ class ControlledAdapter:
         self.cancel_called.set()
 
 
+class ArtifactWritingAdapter(ControlledAdapter):
+    """Adapter capability used to protect derived canonical project outputs."""
+
+    writes_project_artifacts = True
+
+
 class AdapterFactory:
     def __init__(self, monitor, gates, **adapter_options):
         self.monitor = monitor
@@ -413,6 +419,36 @@ def test_readers_wait_for_writer_admission_then_run_concurrently(manager_env):
     gates[reader2["id"]].set()
     wait_for(lambda: db.get_task(reader1["id"])["status"] == "done")
     wait_for(lambda: db.get_task(reader2["id"])["status"] == "done")
+
+
+def test_artifact_writing_capability_serializes_same_project_tasks(tmp_path):
+    db = Database(tmp_path / "tasks.db")
+    project_path = tmp_path / "project"
+    project_path.mkdir()
+    project = db.create_project(str(project_path))
+    monitor, gates = RunMonitor(), {}
+    adapter = ArtifactWritingAdapter(monitor, gates)
+    manager = WorkbenchTaskManager(
+        db, BroadcastHub(), {"analysis": adapter}, poll_interval=0.01
+    )
+    try:
+        first = manager.create(project["id"], "analysis", {})
+        second = manager.create(project["id"], "analysis", {})
+        wait_for(lambda: db.get_task(first["id"])["status"] == "running")
+        time.sleep(0.05)
+        assert db.get_task(second["id"])["status"] == "queued"
+
+        gates[first["id"]].set()
+        wait_for(lambda: db.get_task(second["id"])["status"] == "running")
+        wait_for(lambda: second["id"] in gates)
+        gates[second["id"]].set()
+        wait_for(lambda: db.get_task(second["id"])["status"] == "done")
+        assert monitor.max_by_project[project["id"]] == 1
+    finally:
+        for gate in gates.values():
+            gate.set()
+        manager.shutdown()
+        db.close()
 
 
 def test_reader_without_prepare_holds_lease_for_its_whole_run(manager_env):
@@ -815,6 +851,7 @@ def test_shutdown_cancels_active_work_and_stops_admission(manager_env):
 def test_runconfig_to_config_passes_compression_fields():
     """RunConfig 的压缩策略字段必须透传到 orchestrator.Config，否则设置页配置静默失效。"""
     rc = RunConfig(
+        worker_window="powershell",
         include_original="full",
         max_original_chars=9999,
         max_analysis_chars=8888,
@@ -825,6 +862,7 @@ def test_runconfig_to_config_passes_compression_fields():
         max_pack_chars=55555,
     )
     cfg = runconfig_to_config(rc)
+    assert cfg.worker_window == "powershell"
     assert cfg.include_original == "full"
     assert cfg.max_original_chars == 9999
     assert cfg.max_analysis_chars == 8888

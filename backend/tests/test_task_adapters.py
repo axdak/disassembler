@@ -167,6 +167,35 @@ def project(tmp_path: Path) -> Path:
 
 # --- AnalysisAdapter ------------------------------------------------------
 
+def test_analysis_adapter_uses_global_pack_settings_as_defaults():
+    parsed = AnalysisAdapter._parse_params({}, {
+        "include_original": "none",
+        "max_pack_chars": 43210,
+        "story_summary_max_items": 25,
+        "context_budget_chars": 98765,
+        "worker_timeout_seconds": 77,
+        "worker_retries": 4,
+        "worker_window": "powershell",
+    })
+
+    assert parsed["include_original"] == "none"
+    assert parsed["max_pack_chars"] == 43210
+    assert parsed["story_summary_max_items"] == 25
+    assert parsed["context_budget_chars"] == 98765
+    assert parsed["worker_timeout_seconds"] == 77
+    assert parsed["worker_retries"] == 4
+    assert parsed["worker_window"] == "powershell"
+
+
+def test_analysis_adapter_task_params_override_global_settings():
+    parsed = AnalysisAdapter._parse_params(
+        {"include_original": "full", "max_pack_chars": 12000},
+        {"include_original": "none", "max_pack_chars": 43210},
+    )
+
+    assert parsed["include_original"] == "full"
+    assert parsed["max_pack_chars"] == 12000
+
 def _install_fake_workers(monkeypatch, calls=None):
     """Replace run_worker/run_multi_output_worker with fakes that write placeholder
     artifacts, so AnalysisAdapter can be exercised end-to-end without a real LLM.
@@ -644,10 +673,10 @@ def test_export_adapter_selects_final_source_by_default(project, tmp_path):
 
 
 def test_export_adapter_force_wipes_existing_vault(project, tmp_path):
-    """force (spec §3.5) wipes the existing export dir before regenerating,
-    preserving task history (the adapter never touches task rows)."""
+    """force wipes an exporter-owned vault before regenerating it."""
     out_dir = tmp_path / "vault-clean"
-    out_dir.mkdir(parents=True)
+    (out_dir / "_meta").mkdir(parents=True)
+    (out_dir / "_meta" / "export_report.json").write_text("{}", encoding="utf-8")
     (out_dir / "stale.md").write_text("stale", encoding="utf-8")
 
     adapter = ExportAdapter()

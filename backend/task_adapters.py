@@ -2,17 +2,16 @@
 
 Six adapters back the workbench task types introduced in Task 3:
 
-- ``analysis`` (reader, prepare) — builds one analysis task pack for a scope.
-- ``chapter_visual`` (reader, prepare) — per-chapter visual_assets packs or aggregate.
-- ``chapter_structure`` (reader, prepare) — per-chapter chapter_structure packs.
+- ``analysis`` (snapshot + writer) — builds a pack and writes canonical analysis outputs.
+- ``chapter_visual`` (snapshot + writer) — per-chapter visual_assets packs or aggregate.
+- ``chapter_structure`` (snapshot + writer) — per-chapter chapter_structure packs.
 - ``chapter_analysis_rerun`` (writer, no prepare) — regenerate chapter analysis task packs.
 - ``chapter_delta_rerun`` (writer, no prepare) — regenerate chapter delta task packs.
-- ``export`` (reader, prepare) — export story JSON to an Obsidian vault.
+- ``export`` (snapshot + writer) — export story JSON to an Obsidian vault.
 
-Readers snapshot stable inputs under reader admission (writers excluded) in ``prepare``,
-then run the engine scoped function against the snapshot outside any lock and merge
-Markdown task packages back to the real project dir. Writers hold the project writer lock
-for the whole run (no prepare) and run directly against the live project dir.
+Snapshot adapters copy stable inputs in ``prepare``. Adapters that later write canonical
+project artifacts declare ``writes_project_artifacts`` so the scheduler keeps a project
+writer lease for the full task; truly read-only adapters may still run concurrently.
 """
 
 from __future__ import annotations
@@ -73,7 +72,8 @@ from run_pipeline import (  # noqa: E402
 )
 from export_obsidian_vault import export_obsidian_markdown  # noqa: E402
 from migrate_chronology import run_migrate  # noqa: E402
-from normalize_story_schema import normalize_structure  # noqa: E402
+from normalize_story_schema import normalize_structure, save_json  # noqa: E402
+from worker_artifacts import confined_project_path  # noqa: E402
 from split_chapters_append import apply_append  # noqa: E402
 
 
@@ -111,6 +111,12 @@ def _int_param(params: dict, name: str, default: int) -> int:
     return int(value)
 
 
+def _setting(context: TaskContext, name: str, default: Any) -> Any:
+    """Read one value from the task-start settings snapshot."""
+    value = (context.settings or {}).get(name, default)
+    return default if value is None or value == "" else value
+
+
 def _resolve_worker(params: dict, context: TaskContext) -> tuple[str, int, int, str]:
     """Resolve worker command + tuning from params and the global worker_provider.
 
@@ -122,9 +128,18 @@ def _resolve_worker(params: dict, context: TaskContext) -> tuple[str, int, int, 
     provider = _str_param(params, "worker_provider", default="") or context.worker_provider
     if not command and provider and provider != "manual":
         command = builtin_agent_worker_command(provider)
-    timeout = _int_param(params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)
-    retries = _int_param(params, "worker_retries", DEFAULT_WORKER_RETRIES)
-    window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
+    timeout = _int_param(
+        params, "worker_timeout_seconds",
+        int(_setting(context, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)),
+    )
+    retries = _int_param(
+        params, "worker_retries",
+        int(_setting(context, "worker_retries", DEFAULT_WORKER_RETRIES)),
+    )
+    window = _str_param(
+        params, "worker_window",
+        default=str(_setting(context, "worker_window", DEFAULT_WORKER_WINDOW)),
+    )
     return command, timeout, retries, window
 
 
@@ -186,7 +201,10 @@ def _latest_manifest(project_dir: Path, suffix: str) -> Optional[Path]:
 # === AnalysisAdapter =======================================================
 
 class AnalysisAdapter:
-    """Reader adapter: build one analysis task pack for a chapter scope."""
+    """Snapshot inputs, build an analysis pack, then write canonical outputs."""
+
+    # prepare 只读快照，但 run 会让 worker 写 canonical 全书分析产物。
+    writes_project_artifacts = True
 
     def prepare(self, context: TaskContext) -> dict:
         project_dir = Path(context.project_path)
@@ -194,35 +212,56 @@ class AnalysisAdapter:
         return {"snapshot_dir": snapshot_dir, "project_dir": project_dir}
 
     @staticmethod
-    def _parse_params(params: dict) -> dict:
+    def _parse_params(params: dict, settings: Optional[dict] = None) -> dict:
         """Translate the spec public params to engine call params.
 
         spec §8/§3.3: ``{task, chapters, targets, question, original_text,
         force}``. The ``original_text`` alias is the canonical UI name; legacy
         ``include_original``/``original`` remain accepted.
         """
+        settings = settings or {}
         return {
             "task": _str_param(params, "task", "analysis_task", "name", default="summary"),
             "chapters": _str_param(params, "chapters", "chapter_range", default="all"),
             "targets": params.get("targets") or None,
             "question": _str_param(params, "question", default=""),
             "include_original": _str_param(
-                params, "include_original", "original", "original_text", default="sample"
+                params, "include_original", "original", "original_text",
+                default=str(settings.get("include_original", "sample")),
             ),
             "force": _bool_param(params, "force", default=False),
-            "max_pack_chars": _int_param(params, "max_pack_chars", 70000),
-            "max_original_chars": _int_param(params, "max_original_chars", 6000),
-            "max_analysis_chars": _int_param(params, "max_analysis_chars", 12000),
+            "max_pack_chars": _int_param(
+                params, "max_pack_chars", int(settings.get("max_pack_chars", 70000))
+            ),
+            "max_original_chars": _int_param(
+                params, "max_original_chars", int(settings.get("max_original_chars", 6000))
+            ),
+            "max_analysis_chars": _int_param(
+                params, "max_analysis_chars", int(settings.get("max_analysis_chars", 12000))
+            ),
+            "story_summary_max_items": _int_param(
+                params, "story_summary_max_items", int(settings.get("story_summary_max_items", 0))
+            ),
+            "context_budget_chars": _int_param(
+                params, "context_budget_chars", int(settings.get("context_budget_chars", 160000))
+            ),
             "worker_command": _str_param(params, "worker_command", default=""),
             "worker_provider": _str_param(params, "worker_provider", default=""),
-            "worker_timeout_seconds": _int_param(params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS),
-            "worker_retries": _int_param(params, "worker_retries", DEFAULT_WORKER_RETRIES),
-            "worker_window": _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW),
+            "worker_timeout_seconds": _int_param(
+                params, "worker_timeout_seconds",
+                int(settings.get("worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)),
+            ),
+            "worker_retries": _int_param(
+                params, "worker_retries", int(settings.get("worker_retries", DEFAULT_WORKER_RETRIES))
+            ),
+            "worker_window": _str_param(
+                params, "worker_window", default=str(settings.get("worker_window", DEFAULT_WORKER_WINDOW))
+            ),
         }
 
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
-        parsed = self._parse_params(params)
+        parsed = self._parse_params(params, context.settings)
         task = parsed["task"]
         chapters = parsed["chapters"]
         targets = parsed["targets"]
@@ -232,6 +271,8 @@ class AnalysisAdapter:
         max_pack_chars = parsed["max_pack_chars"]
         max_original_chars = parsed["max_original_chars"]
         max_analysis_chars = parsed["max_analysis_chars"]
+        story_summary_max_items = parsed["story_summary_max_items"]
+        context_budget_chars = parsed["context_budget_chars"]
 
         project_dir = Path(context.project_path)
         snapshot_dir = (
@@ -251,6 +292,8 @@ class AnalysisAdapter:
                 max_pack_chars=max_pack_chars,
                 max_original_chars=max_original_chars,
                 max_analysis_chars=max_analysis_chars,
+                story_summary_max_items=story_summary_max_items,
+                context_budget_chars=context_budget_chars,
                 force=force,
             )
             context.progress(70, "merging task pack into project")
@@ -262,17 +305,26 @@ class AnalysisAdapter:
         manifest_path = _latest_manifest(project_dir, task) or Path(scoped["manifest_path"])
         manifest = load_json(manifest_path, {}) or {}
         packs = manifest.get("packs") or []
-        target_outputs = [project_dir / rel for rel in (manifest.get("target_outputs") or [])]
+        target_outputs = [
+            confined_project_path(project_dir, rel)
+            for rel in (manifest.get("target_outputs") or [])
+        ]
 
         artifacts = [{"name": "manifest", "path": str(manifest_path)}]
         for index, pack in enumerate(packs):
             if isinstance(pack, str):
-                artifacts.append({"name": f"pack_{index + 1:03d}", "path": str(project_dir / pack)})
+                artifacts.append({
+                    "name": f"pack_{index + 1:03d}",
+                    "path": str(confined_project_path(project_dir, pack)),
+                })
             elif isinstance(pack, dict):
                 rel = pack.get("pack") or pack.get("pack_path")
                 if rel:
                     artifacts.append(
-                        {"name": f"pack_ch{pack.get('seq', 0):03d}", "path": str(project_dir / rel)}
+                        {
+                            "name": f"pack_ch{pack.get('seq', 0):03d}",
+                            "path": str(confined_project_path(project_dir, rel)),
+                        }
                     )
 
         # Worker execution: produce the canonical target_outputs by running the
@@ -297,7 +349,7 @@ class AnalysisAdapter:
                 raise RuntimeError(f"analysis manifest 没有 packs: {manifest_path}")
             if pack_count == 1:
                 pack_rel = packs[0] if isinstance(packs[0], str) else packs[0].get("pack")
-                pack_path = project_dir / pack_rel
+                pack_path = confined_project_path(project_dir, pack_rel)
                 context.progress(80, "worker 执行分析任务包 (1/1)")
                 rc = run_multi_output_worker(
                     worker_command, project_dir, "fullbook_analysis", pack_path, target_outputs,
@@ -354,7 +406,9 @@ class AnalysisAdapter:
 # === ChapterVisualAdapter ==================================================
 
 class ChapterVisualAdapter:
-    """Reader adapter: per-chapter visual_assets packs, or the aggregate pack."""
+    """Snapshot-backed writer for per-chapter or aggregate visual assets."""
+
+    writes_project_artifacts = True
 
     def prepare(self, context: TaskContext) -> dict:
         project_dir = Path(context.project_path)
@@ -368,10 +422,27 @@ class ChapterVisualAdapter:
             raise ValueError("chapter_visual 需要非空 'seqs' 列表")
         seqs = [int(s) for s in seqs]
         aggregate = _bool_param(params, "aggregate", default=False)
-        include_original = _str_param(params, "include_original", "original", default="sample")
-        max_pack_chars = _int_param(params, "max_pack_chars", 70000)
-        max_original_chars = _int_param(params, "max_original_chars", 6000)
-        max_analysis_chars = _int_param(params, "max_analysis_chars", 12000)
+        include_original = _str_param(
+            params, "include_original", "original",
+            default=str(_setting(context, "include_original", "sample")),
+        )
+        max_pack_chars = _int_param(
+            params, "max_pack_chars", int(_setting(context, "max_pack_chars", 70000))
+        )
+        max_original_chars = _int_param(
+            params, "max_original_chars", int(_setting(context, "max_original_chars", 6000))
+        )
+        max_analysis_chars = _int_param(
+            params, "max_analysis_chars", int(_setting(context, "max_analysis_chars", 12000))
+        )
+        story_summary_max_items = _int_param(
+            params, "story_summary_max_items",
+            int(_setting(context, "story_summary_max_items", 0)),
+        )
+        context_budget_chars = _int_param(
+            params, "context_budget_chars",
+            int(_setting(context, "context_budget_chars", 160000)),
+        )
         force_aggregate = _bool_param(params, "force_aggregate", default=False)
 
         project_dir = Path(context.project_path)
@@ -395,7 +466,10 @@ class ChapterVisualAdapter:
                     or Path(scoped["manifest_path"])
                 )
                 manifest = load_json(manifest_path, {}) or {}
-                target_outputs = [project_dir / rel for rel in (manifest.get("target_outputs") or [])]
+                target_outputs = [
+                    confined_project_path(project_dir, rel)
+                    for rel in (manifest.get("target_outputs") or [])
+                ]
                 if not worker_command:
                     raise RuntimeError(
                         "chapter_visual 执行需要 worker：未配置 worker_command，且 worker_provider 为 "
@@ -435,6 +509,8 @@ class ChapterVisualAdapter:
                 max_pack_chars=max_pack_chars,
                 max_original_chars=max_original_chars,
                 max_analysis_chars=max_analysis_chars,
+                story_summary_max_items=story_summary_max_items,
+                context_budget_chars=context_budget_chars,
             )
             context.progress(70, "merging per-chapter packs into project")
             copy_analysis_task_packages(snapshot_dir, project_dir)
@@ -454,8 +530,14 @@ class ChapterVisualAdapter:
                 seq = int(record.get("seq", 0))
                 rel = record.get("pack")
                 if rel:
-                    artifacts.append({"name": f"pack_ch{seq:03d}", "path": str(project_dir / rel)})
-                expected_outputs = [project_dir / rel for rel in (record.get("outputs") or [])]
+                    artifacts.append({
+                        "name": f"pack_ch{seq:03d}",
+                        "path": str(confined_project_path(project_dir, rel)),
+                    })
+                expected_outputs = [
+                    confined_project_path(project_dir, rel)
+                    for rel in (record.get("outputs") or [])
+                ]
                 if not expected_outputs:
                     continue
                 task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
@@ -487,7 +569,9 @@ class ChapterVisualAdapter:
 # === ChapterStructureAdapter ===============================================
 
 class ChapterStructureAdapter:
-    """Reader adapter: per-chapter chapter_structure task packs."""
+    """Snapshot-backed writer for per-chapter structure artifacts."""
+
+    writes_project_artifacts = True
 
     def prepare(self, context: TaskContext) -> dict:
         project_dir = Path(context.project_path)
@@ -500,10 +584,27 @@ class ChapterStructureAdapter:
         if not seqs:
             raise ValueError("chapter_structure 需要非空 'seqs' 列表")
         seqs = [int(s) for s in seqs]
-        include_original = _str_param(params, "include_original", "original", default="sample")
-        max_pack_chars = _int_param(params, "max_pack_chars", 70000)
-        max_original_chars = _int_param(params, "max_original_chars", 6000)
-        max_analysis_chars = _int_param(params, "max_analysis_chars", 12000)
+        include_original = _str_param(
+            params, "include_original", "original",
+            default=str(_setting(context, "include_original", "sample")),
+        )
+        max_pack_chars = _int_param(
+            params, "max_pack_chars", int(_setting(context, "max_pack_chars", 70000))
+        )
+        max_original_chars = _int_param(
+            params, "max_original_chars", int(_setting(context, "max_original_chars", 6000))
+        )
+        max_analysis_chars = _int_param(
+            params, "max_analysis_chars", int(_setting(context, "max_analysis_chars", 12000))
+        )
+        story_summary_max_items = _int_param(
+            params, "story_summary_max_items",
+            int(_setting(context, "story_summary_max_items", 0)),
+        )
+        context_budget_chars = _int_param(
+            params, "context_budget_chars",
+            int(_setting(context, "context_budget_chars", 160000)),
+        )
 
         project_dir = Path(context.project_path)
         snapshot_dir = (
@@ -521,6 +622,8 @@ class ChapterStructureAdapter:
                 max_pack_chars=max_pack_chars,
                 max_original_chars=max_original_chars,
                 max_analysis_chars=max_analysis_chars,
+                story_summary_max_items=story_summary_max_items,
+                context_budget_chars=context_budget_chars,
             )
             context.progress(70, "merging per-chapter packs into project")
             copy_analysis_task_packages(snapshot_dir, project_dir)
@@ -540,8 +643,14 @@ class ChapterStructureAdapter:
                 seq = int(record.get("seq", 0))
                 rel = record.get("pack")
                 if rel:
-                    artifacts.append({"name": f"pack_ch{seq:03d}", "path": str(project_dir / rel)})
-                expected_outputs = [project_dir / rel for rel in (record.get("outputs") or [])]
+                    artifacts.append({
+                        "name": f"pack_ch{seq:03d}",
+                        "path": str(confined_project_path(project_dir, rel)),
+                    })
+                expected_outputs = [
+                    confined_project_path(project_dir, rel)
+                    for rel in (record.get("outputs") or [])
+                ]
                 if not expected_outputs:
                     continue
                 task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
@@ -694,17 +803,22 @@ class RepairAdapter:
         )
 
 
-# === ExportAdapter (reader) ================================================
+# === ExportAdapter (snapshot reader + artifact writer) =====================
 
 class ExportAdapter:
-    """Reader adapter: export story structure JSON to an Obsidian vault."""
+    """Snapshot-backed writer that exports story JSON to an Obsidian vault."""
+
+    writes_project_artifacts = True
 
     def prepare(self, context: TaskContext) -> dict:
         params = context.params or {}
         source = _str_param(params, "source", "export_source", default="final").lower()
         project_dir = Path(context.project_path)
         story_path = self._resolve_story_path(project_dir, source)
-        snapshot = Path(tempfile.mktemp(prefix="nd_story_", suffix=".json"))
+        # NamedTemporaryFile reserves the pathname atomically; tempfile.mktemp
+        # has a race where another process can create the file before copy2.
+        with tempfile.NamedTemporaryFile(prefix="nd_story_", suffix=".json", delete=False) as tmp:
+            snapshot = Path(tmp.name)
         shutil.copy2(story_path, snapshot)
         return {"story_snapshot_path": snapshot, "project_dir": project_dir, "source": source}
 
@@ -870,15 +984,24 @@ class GovernanceTaskAdapter:
         start, end = self._resolve_range(project_dir, params)
         force = _bool_param(params, "force", default=False)
         max_context_chars = _int_param(
-            params, "max_context_chars", DEFAULT_AUDIT_MAX_CONTEXT_CHARS
+            params, "max_context_chars",
+            int(_setting(context, "audit_max_context_chars", DEFAULT_AUDIT_MAX_CONTEXT_CHARS)),
         )
         worker_command = _str_param(
             params, "worker_command", "audit_command", default=""
         )
         worker_timeout = _int_param(
-            params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
+            params, "worker_timeout_seconds",
+            int(_setting(context, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)),
         )
-        worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
+        worker_retries = _int_param(
+            params, "worker_retries",
+            int(_setting(context, "worker_retries", DEFAULT_WORKER_RETRIES)),
+        )
+        worker_window = _str_param(
+            params, "worker_window",
+            default=str(_setting(context, "worker_window", DEFAULT_WORKER_WINDOW)),
+        )
 
         # 周期审计的职责是审计已提交章节。零已提交章节（无 story_after_chNNN.json）
         # 时无内容可审，跑下去只会让 worker 产出空 no_change 并刷出空快照。直接
@@ -928,7 +1051,7 @@ class GovernanceTaskAdapter:
             rc = run_worker(
                 worker_command, project_dir, "audit_correction",
                 paths["pack"], correction_path,
-                timeout=worker_timeout, retries=0, worker_window=worker_window,
+                timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
             )
             if rc != 0:
                 raise RuntimeError(f"audit correction worker 失败 rc={rc}")
@@ -988,7 +1111,8 @@ class NormalizeAdapter:
         data = json.loads(story_path.read_text(encoding="utf-8"))
         context.progress(40, "normalizing story schema")
         normalized, logs = normalize_structure(data, quarantine_invalid_refs=False)
-        story_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 规范化直接更新权威过程结构，必须原子替换以保证自动恢复始终可读。
+        save_json(str(story_path), normalized)
         return _result_json(
             artifacts=[str(story_path)],
             manifest={"logs": len(logs)},
@@ -1122,7 +1246,12 @@ class AppendChaptersTaskAdapter:
         plan["split_dir"] = str(project_dir / "原文拆解")
 
         context.progress(20, "appending new chapter files")
-        report = apply_append(plan)
+        try:
+            report = apply_append(plan)
+        except SystemExit as exc:
+            # CLI helper uses SystemExit for input errors; scheduler threads must
+            # convert it to an ordinary task failure instead of exiting silently.
+            raise ValueError(str(exc)) from exc
         context.progress(70, "queueing new chapter production work")
 
         new_seqs = [int(entry["seq"]) for entry in report.get("appended", []) if entry.get("seq") is not None]
@@ -1169,10 +1298,19 @@ class FinalizeAdapter:
         project_dir = Path(context.project_path)
         worker_command = _str_param(params, "worker_command", default="")
         worker_timeout = _int_param(
-            params, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS
+            params, "worker_timeout_seconds",
+            int(_setting(context, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS)),
         )
-        worker_window = _str_param(params, "worker_window", default=DEFAULT_WORKER_WINDOW)
-        worker_retries = _int_param(params, "worker_retries", 0)
+        worker_window = _str_param(
+            params, "worker_window",
+            default=str(_setting(context, "worker_window", DEFAULT_WORKER_WINDOW)),
+        )
+        worker_retries = _int_param(
+            params, "worker_retries", int(_setting(context, "worker_retries", DEFAULT_WORKER_RETRIES))
+        )
+        max_repair_rounds = _int_param(
+            params, "max_repair_rounds", int(_setting(context, "max_repair_rounds", 3))
+        )
         # 任务参数未显式指定 worker_command 时，按全局 worker_provider 自动解析内置
         # agent_worker 命令（默认 agy），对齐 orchestrator 的 _worker_command() 与
         # GovernanceTaskAdapter/AnalysisAdapter，使 MaintenanceTab 一键 finalize
@@ -1202,8 +1340,8 @@ class FinalizeAdapter:
                 raise RuntimeError(f"final_draft worker 失败 rc={rc}")
 
         context.progress(60, "commit final draft")
-        for _ in range(4):
-            rc = cmd_commit_final_draft(project_dir)
+        rc = cmd_commit_final_draft(project_dir)
+        for _ in range(max_repair_rounds):
             if rc == 0:
                 break
             if not repair.is_file():
@@ -1222,7 +1360,8 @@ class FinalizeAdapter:
             )
             if wrc != 0:
                 raise RuntimeError("repair_final worker 失败")
-        else:
+            rc = cmd_commit_final_draft(project_dir)
+        if rc != 0:
             raise RuntimeError("commit_final_draft 未收敛")
 
         context.progress(80, "validate final")

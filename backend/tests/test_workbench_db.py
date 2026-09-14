@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from db import Database
-from models import WorkbenchTask
+from models import RunConfig, WorkbenchTask
 
 
 def make_db(tmp_path):
@@ -38,6 +38,19 @@ def test_tasks_are_listed_in_fifo_id_order(tmp_path):
     tasks = db.list_tasks(project["id"], limit=10)
 
     assert [task["id"] for task in tasks] == [task["id"] for task in created]
+
+
+def test_task_list_limit_keeps_latest_rows_in_timeline_order(tmp_path):
+    db = make_db(tmp_path)
+    project = db.create_project(str(tmp_path / "project"))
+    created = [
+        db.create_task(project["id"], "analysis", {"order": n}, {})
+        for n in range(105)
+    ]
+
+    tasks = db.list_tasks(project["id"], limit=10)
+
+    assert [task["id"] for task in tasks] == [task["id"] for task in created[-10:]]
 
 
 def test_requesting_task_cancel_sets_persistent_cancel_flag(tmp_path):
@@ -106,3 +119,22 @@ def test_restart_marks_running_tasks_interrupted_and_keeps_queued(tmp_path):
     assert interrupted == [(running["id"], project["id"])]
     assert db.get_task(running["id"])["status"] == "interrupted"
     assert db.get_task(queued["id"])["status"] == "queued"
+
+
+def test_automatic_run_queue_survives_database_reopen(tmp_path):
+    db_path = tmp_path / "workbench.db"
+    db = Database(db_path)
+    project = db.create_project(str(tmp_path / "project"))
+    config = RunConfig(worker_provider="codebuddy", worker_retries=4)
+    created = db.create_queue_item(project["id"], config.model_dump())
+    db.close()
+
+    reopened = Database(db_path)
+    items = reopened.list_queue_items()
+
+    assert items == [{
+        "id": created["id"],
+        "project_id": project["id"],
+        "config": config.model_dump(),
+    }]
+    reopened.close()

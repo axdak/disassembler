@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS workbench_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_workbench_tasks_project_status_id
     ON workbench_tasks(project_id, status, id);
+CREATE TABLE IF NOT EXISTS run_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    config_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_run_queue_id ON run_queue(id);
 """
 
 TASK_STATUSES = frozenset({"queued", "running", "done", "failed", "cancelled", "interrupted"})
@@ -124,6 +132,54 @@ class Database:
     def delete_project(self, project_id: int) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+            self._conn.commit()
+
+    def has_nonterminal_tasks(self, project_id: int) -> bool:
+        """Return whether queued/running work still references the project."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM workbench_tasks "
+                "WHERE project_id=? AND status IN ('queued','running') LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            return row is not None
+
+    # ---- persistent automatic-run queue ----
+
+    def create_queue_item(self, project_id: int, config: dict) -> dict:
+        """Persist one automatic run request before it can be scheduled."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO run_queue(project_id, config_json, created_at) VALUES(?,?,?)",
+                (project_id, json.dumps(config, ensure_ascii=False), _now()),
+            )
+            self._conn.commit()
+            return {
+                "id": cur.lastrowid,
+                "project_id": project_id,
+                "config": dict(config),
+            }
+
+    def list_queue_items(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM run_queue ORDER BY id ASC").fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "project_id": row["project_id"],
+                    "config": json.loads(row["config_json"] or "{}"),
+                }
+                for row in rows
+            ]
+
+    def delete_queue_item(self, item_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM run_queue WHERE id=?", (item_id,))
+            self._conn.commit()
+
+    def clear_queue(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM run_queue")
             self._conn.commit()
 
     # ---- runs ----
@@ -234,7 +290,11 @@ class Database:
     def list_tasks(self, project_id: int, limit: int = 100) -> list:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM workbench_tasks WHERE project_id=? ORDER BY id ASC LIMIT ?",
+                # 先截取最新记录，再按时间正序返回，兼顾 UI 时间线顺序和长期使用时
+                # “最新任务不能被最早 100 条挤掉”的要求。
+                "SELECT * FROM ("
+                "SELECT * FROM workbench_tasks WHERE project_id=? ORDER BY id DESC LIMIT ?"
+                ") ORDER BY id ASC",
                 (project_id, limit),
             ).fetchall()
             return [self._decode_task(row) for row in rows]

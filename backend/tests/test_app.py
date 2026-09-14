@@ -7,7 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import create_app
+from db import Database
 from events import Event
+from models import RunConfig
 
 
 class FakeOrchestrator:
@@ -148,6 +150,32 @@ def test_settings(client, auth):
     assert client.get("/settings", headers=auth).json()["worker_provider"] == "codebuddy"
 
 
+def test_settings_reject_invalid_values_without_persisting(client, auth):
+    """设置必须在落库前校验，避免无效 provider/负数参数延迟到运行期爆炸。"""
+    invalid_provider = client.put(
+        "/settings", json={"settings": {"worker_provider": "claude"}}, headers=auth
+    )
+    assert invalid_provider.status_code == 422
+    assert "worker_provider" not in client.get("/settings", headers=auth).json()
+
+    invalid_retries = client.put(
+        "/settings", json={"settings": {"worker_retries": -1}}, headers=auth
+    )
+    assert invalid_retries.status_code == 422
+    assert "worker_retries" not in client.get("/settings", headers=auth).json()
+
+
+def test_run_reports_historical_invalid_setting_as_422(client, auth, tmp_path):
+    """历史数据库中的坏值应给出可诊断响应，而不是触发未处理的服务端异常。"""
+    client.app.state.db.set_setting("worker_timeout_seconds", 0)
+    pid = client.post("/projects", json={"path": str(tmp_path / "proj")}, headers=auth).json()["id"]
+
+    response = client.post(f"/projects/{pid}/run", json={"config": {}}, headers=auth)
+
+    assert response.status_code == 422
+    assert "已保存的运行设置无效" in response.json()["detail"]
+
+
 def test_hub_broadcasts_events(client, auth, tmp_path):
     pid = client.post("/projects", json={"path": str(tmp_path / "proj")}, headers=auth).json()["id"]
     received = []
@@ -242,6 +270,11 @@ def test_queue_remove(client, auth, tmp_path):
     assert client.get("/queue", headers=auth).json()[0]["project_id"] == p2
 
 
+def test_queue_rejects_missing_project(client, auth):
+    response = client.post("/queue", json={"project_id": 999999}, headers=auth)
+    assert response.status_code == 404
+
+
 def test_stale_run_marked_interrupted_on_restart(tmp_path):
     db_path = str(tmp_path / "app.db")
     auth = {"Authorization": "Bearer sekret"}
@@ -259,6 +292,27 @@ def test_stale_run_marked_interrupted_on_restart(tmp_path):
     assert any(e["type"] == "run_status" and e["detail"] == "interrupted" for e in ev)
 
 
+def test_persisted_automatic_queue_resumes_without_user_action(tmp_path):
+    db_path = tmp_path / "app.db"
+    project_path = tmp_path / "resume-project"
+    project_path.mkdir()
+    db = Database(db_path)
+    project = db.create_project(str(project_path))
+    db.create_queue_item(project["id"], RunConfig().model_dump())
+    db.close()
+
+    app = create_app(str(db_path), "sekret", FakeOrchestrator)
+    client = TestClient(app)
+    auth = {"Authorization": "Bearer sekret"}
+    deadline = time.time() + 5
+    while time.time() < deadline and client.get("/queue", headers=auth).json():
+        time.sleep(0.05)
+
+    assert client.get("/queue", headers=auth).json() == []
+    events = client.get(f"/projects/{project['id']}/events", headers=auth).json()
+    assert any(e["type"] == "run_status" and e["detail"] == "done" for e in events)
+
+
 def test_from_book_creates_project(client, auth, tmp_path):
     book = tmp_path / "book.txt"
     book.write_text("第一章 测试\n正文一\n\n第二章 测试二\n正文二\n", encoding="utf-8")
@@ -269,3 +323,47 @@ def test_from_book_creates_project(client, auth, tmp_path):
     assert idx.is_file()
     chapters = json.loads(idx.read_text(encoding="utf-8")).get("chapters", [])
     assert len(chapters) >= 2
+
+
+def test_from_book_is_idempotent_for_registered_project(client, auth, tmp_path):
+    book = tmp_path / "book.txt"
+    book.write_text("第一章 测试\n原始正文\n", encoding="utf-8")
+    first = client.post("/projects/from-book", json={"source_file": str(book)}, headers=auth)
+    assert first.status_code == 200
+    marker = Path(first.json()["path"]) / "用户标记.txt"
+    marker.write_text("do not overwrite", encoding="utf-8")
+
+    second = client.post("/projects/from-book", json={"source_file": str(book)}, headers=auth)
+
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert marker.read_text(encoding="utf-8") == "do not overwrite"
+
+
+def test_from_book_rejects_unregistered_nonempty_target(client, auth, tmp_path):
+    book = tmp_path / "book.txt"
+    book.write_text("第一章 测试\n正文\n", encoding="utf-8")
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "existing.txt").write_text("keep", encoding="utf-8")
+
+    response = client.post(
+        "/projects/from-book",
+        json={"source_file": str(book), "project_dir": str(target)},
+        headers=auth,
+    )
+
+    assert response.status_code == 409
+    assert (target / "existing.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_delete_rejects_project_queued_for_automatic_run(client, auth, tmp_path):
+    pid = client.post(
+        "/projects", json={"path": str(tmp_path / "queued-project")}, headers=auth
+    ).json()["id"]
+    client.post("/queue", json={"project_id": pid}, headers=auth)
+
+    response = client.delete(f"/projects/{pid}", headers=auth)
+
+    assert response.status_code == 409
+    assert client.get(f"/projects/{pid}", headers=auth).status_code == 200

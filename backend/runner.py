@@ -33,6 +33,7 @@ def runconfig_to_config(rc: RunConfig) -> Config:
         worker_provider=rc.worker_provider,
         worker_command=rc.worker_command,
         worker_loop=rc.worker_loop,
+        worker_window=rc.worker_window,
         worker_retries=rc.worker_retries,
         worker_timeout_seconds=rc.worker_timeout_seconds,
         max_attempts=rc.max_attempts,
@@ -219,35 +220,54 @@ class RunManager:
 
 
 class QueueRunner:
-    """单任务队列：顺序运行多个项目；当前项目完成/阻塞/取消后继续下一个。"""
+    """持久化单任务队列；重启后自动恢复未完成的项目运行请求。"""
 
     def __init__(self, db: Database, manager: "RunManager"):
         self.db = db
         self.manager = manager
-        self._queue: list[tuple[int, RunConfig]] = []
+        self._queue: list[tuple[int, int, RunConfig]] = []
         self._lock = threading.RLock()  # 可重入：start() 持锁时调用 is_running()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        for item in self.db.list_queue_items():
+            try:
+                config = RunConfig(**item["config"])
+            except Exception:
+                # 无效历史记录不能永久卡住队首；运行参数已由 RunConfig 严格校验。
+                self.db.delete_queue_item(item["id"])
+                continue
+            self._queue.append((item["id"], item["project_id"], config))
 
     def add(self, project_id: int, config: RunConfig) -> int:
         with self._lock:
-            self._queue.append((project_id, config))
+            item = self.db.create_queue_item(project_id, config.model_dump())
+            self._queue.append((item["id"], project_id, config))
             return len(self._queue)
 
     def list(self) -> list:
         with self._lock:
-            return [{"position": i + 1, "project_id": pid} for i, (pid, _) in enumerate(self._queue)]
+            return [
+                {"position": i + 1, "project_id": pid}
+                for i, (_, pid, _) in enumerate(self._queue)
+            ]
+
+    def contains(self, project_id: int) -> bool:
+        """Check queued ownership before project metadata is deleted."""
+        with self._lock:
+            return any(pid == project_id for _, pid, _ in self._queue)
 
     def remove(self, position: int) -> bool:
         with self._lock:
             if 1 <= position <= len(self._queue):
-                self._queue.pop(position - 1)
+                item_id, _, _ = self._queue.pop(position - 1)
+                self.db.delete_queue_item(item_id)
                 return True
             return False
 
     def clear(self) -> None:
         with self._lock:
             self._queue.clear()
+            self.db.clear_queue()
 
     def is_running(self) -> bool:
         with self._lock:
@@ -270,23 +290,34 @@ class QueueRunner:
             with self._lock:
                 if not self._queue:
                     break
-                project_id, config = self._queue.pop(0)
+                item_id, project_id, config = self._queue[0]
             if self.manager.is_running(project_id):
+                if self._stop.wait(0.05):
+                    break
                 continue
             try:
                 run_id = self.manager.start(project_id, config)
             except KeyError:
+                with self._lock:
+                    if self._queue and self._queue[0][0] == item_id:
+                        self._queue.pop(0)
+                        self.db.delete_queue_item(item_id)
                 continue
             except RuntimeError:
-                # A workbench writer currently owns the project.  Preserve the
-                # legacy queue row and retry after its admission is released.
-                with self._lock:
-                    self._queue.insert(0, (project_id, config))
+                # 同项目已有运行或 workbench writer 时保留队首，释放后自动重试。
                 if self._stop.wait(0.05):
                     break
                 continue
-            while not self._stop.is_set():
+            # 即使收到 stop，也要等待当前运行形成终态后再消费持久化队项；若进程
+            # 在此期间退出，队项会留存并在下次启动时自动续跑。
+            while True:
                 run = self.db.get_run(run_id)
                 if not run or run["status"] != "running":
                     break
-                time.sleep(1.0)
+                time.sleep(0.1)
+            with self._lock:
+                if self._queue and self._queue[0][0] == item_id:
+                    self._queue.pop(0)
+                    self.db.delete_queue_item(item_id)
+            if self._stop.is_set():
+                break
