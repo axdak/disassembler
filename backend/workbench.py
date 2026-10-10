@@ -18,6 +18,7 @@ _ENGINE_SCRIPTS = str(Path(__file__).resolve().parent.parent / "engine" / "scrip
 if _ENGINE_SCRIPTS not in sys.path:
     sys.path.insert(0, _ENGINE_SCRIPTS)
 from run_pipeline import set_cancel_event  # noqa: E402
+from repair_budget import begin_retry_session  # noqa: E402
 
 
 WRITER_TASK_TYPES = frozenset({
@@ -404,6 +405,9 @@ class WorkbenchTaskManager:
                 worker_provider=str(self.db.get_setting("worker_provider", "agy")),
                 settings=self.db.all_settings(),
             )
+            # A user-created writer task owns one allowance across all nested retries.
+            if writer_owner is not None:
+                begin_retry_session(context.project_path)
             prepare = getattr(adapter, "prepare", None)
             if callable(prepare):
                 prepared_input = prepare(context)

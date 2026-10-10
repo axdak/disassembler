@@ -363,7 +363,7 @@ describe('workbench seven-tab UI', () => {
     fake.setArtifactStatus(withDelta)
     fake.emit({ type: 'chapter_progress', project_id: 1, stage: 'chapter_delta' })
     fake.emit({ type: 'task_done', project_id: 1, task_id: 10 })
-    await act(async () => {})
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
     expect(fake.calls.tasksList).toBe(tasksBefore + 1)
     // Advancing beyond both former polling intervals must not scan the book.
     try {
@@ -380,6 +380,26 @@ describe('workbench seven-tab UI', () => {
     goTab('概览')
     await waitFor(() => expect(projectStatus).toHaveBeenCalled())
     projectStatus.mockRestore()
+  })
+
+  it('reconciles missed events once after reconnect without scanning on progress', async () => {
+    await selectProject()
+    await waitFor(() => expect(fake.calls.tasksList).toBeGreaterThanOrEqual(1))
+    const before = fake.calls.tasksList
+    const artifacts = fake.calls.artifactsStatus
+    vi.useFakeTimers()
+    try {
+      for (let i = 0; i < 100; i++) fake.emit({ type: 'task_progress', project_id: 1, task_id: 10 })
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(fake.calls.tasksList).toBe(before)
+      expect(fake.calls.artifactsStatus).toBe(artifacts)
+      fake.emit({ type: 'connection_restored' })
+      await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+      expect(fake.calls.tasksList).toBe(before + 1)
+      expect(fake.calls.artifactsStatus).toBe(artifacts + 1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('artifact and log paths open in the drawer', async () => {

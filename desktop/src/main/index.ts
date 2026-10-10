@@ -128,6 +128,11 @@ function startEventBridge(win: BrowserWindow): void {
   const connect = () => {
     if (isQuitting || win.isDestroyed()) return
     const ws = new WebSocket(url)
+    ws.on('open', () => {
+      // A reconnect may have missed terminal events. Ask views to reconcile once
+      // instead of reintroducing periodic scans as a connectivity workaround.
+      if (!win.isDestroyed()) win.webContents.send('nd:event', { type: 'connection_restored' })
+    })
     ws.on('message', (data: any) => {
       if (win.isDestroyed()) return
       try {

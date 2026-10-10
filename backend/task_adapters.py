@@ -31,6 +31,7 @@ if str(_ENGINE_SCRIPTS) not in sys.path:
 
 from revisions import project_revisions  # noqa: E402
 from workbench import TaskContext  # noqa: E402
+from worker_checkpoint import run_checkpointed_partial  # noqa: E402
 
 from run_pipeline import (  # noqa: E402
     DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
@@ -366,8 +367,9 @@ class AnalysisAdapter:
                         project_dir, manifest_path, pack_rel, index, pack_count, partial_path
                     )
                     context.progress(75, f"worker 执行分包 ({index}/{pack_count})")
-                    rc = run_worker(
-                        worker_command, project_dir, "fullbook_analysis", worker_pack, partial_path,
+                    rc = run_checkpointed_partial(
+                        run_worker, worker_command, project_dir, "fullbook_analysis", worker_pack, partial_path,
+                        reuse=not force,
                         timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
                     )
                     if rc != 0:
@@ -1356,13 +1358,13 @@ class FinalizeAdapter:
                 worker_command, project_dir, "repair_final",
                 repair, draft,
                 timeout=worker_timeout, retries=worker_retries,
-                worker_window=worker_window,
+                worker_window=worker_window, repair_limit=max_repair_rounds,
             )
             if wrc != 0:
-                raise RuntimeError("repair_final worker 失败")
+                raise RuntimeError(f"repair_final worker 失败 rc={wrc}；已保留草稿与修复记录")
             rc = cmd_commit_final_draft(project_dir)
         if rc != 0:
-            raise RuntimeError("commit_final_draft 未收敛")
+            raise RuntimeError("commit_final_draft 修复预算已耗尽 rc=65；已保留草稿与修复记录")
 
         context.progress(80, "validate final")
         rc = cmd_validate_final(project_dir)

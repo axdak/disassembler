@@ -200,7 +200,7 @@ def test_commit_final_draft_exhausts_repair_rounds(tmp_path):
     with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1) as cfd, \
          patch.object(orchestrator, "run_worker", return_value=0) as rw:
         rc = orch._stage_commit_final_draft()
-    assert rc == 1
+    assert rc == orchestrator.REPAIR_EXHAUSTED
     assert cfd.call_count == 3  # 初次校验 + 每轮修复后的再次校验
     assert rw.call_count == 2  # 每轮修复一次，共 2 轮
 

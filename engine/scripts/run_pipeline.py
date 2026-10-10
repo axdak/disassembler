@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+from functools import wraps
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -39,6 +40,7 @@ from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
 from prompt_loader import render_prompt, prompt_fingerprint
+from worker_admission import worker_admission
 from repair_budget import REPAIR_EXHAUSTED, REPAIR_TASKS, reserve_repair, finish_repair
 from worker_artifacts import (
     capture_output_signatures,
@@ -304,7 +306,19 @@ def stream_shell_command(
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     output_parts: List[str] = []
-    deadline = time.monotonic() + timeout if timeout else None
+    started = time.monotonic()
+    heartbeat = started + 30
+    deadline = started + timeout if timeout else None
+
+    def forward(line: str) -> None:
+        output_parts.append(line)
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        # Persist as output arrives, so a backend interruption does not erase
+        # the diagnostic evidence accumulated before the worker returns.
+        if env.get("ND_WORKER_LOG_PATH"):
+            with Path(env["ND_WORKER_LOG_PATH"]).open("a", encoding="utf-8") as stream:
+                stream.write(line)
 
     def drain_output() -> None:
         while True:
@@ -312,9 +326,7 @@ def stream_shell_command(
                 line = output_queue.get_nowait()
             except queue.Empty:
                 break
-            output_parts.append(line)
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            forward(line)
 
     try:
         while True:
@@ -327,9 +339,7 @@ def stream_shell_command(
                 reader.join(timeout=1)
                 drain_output()
                 message = "[cancelled by user]\n"
-                output_parts.append(message)
-                sys.stdout.write(message)
-                sys.stdout.flush()
+                forward(message)
                 return 130, "".join(output_parts)
             if proc.poll() is not None:
                 break
@@ -340,10 +350,12 @@ def stream_shell_command(
                 reader.join(timeout=1)
                 drain_output()
                 message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=""), timeout)
-                output_parts.append(message)
-                sys.stdout.write(message)
-                sys.stdout.flush()
+                forward(message)
                 return 124, "".join(output_parts)
+            if time.monotonic() >= heartbeat:
+                message = f"[任务仍在运行，已等待 {int(time.monotonic() - started)} 秒；尚未收到完成结果]\n"
+                forward(message)
+                heartbeat = time.monotonic() + 30
             time.sleep(0.1)
 
         reader.join(timeout=1)
@@ -567,6 +579,18 @@ def resolve_worker_commands(
     return chapter_command or command, audit_command or command
 
 
+def _admit_worker(function):
+    """Share model capacity across both worker APIs, including cancellable waits."""
+    @wraps(function)
+    def admitted(*args, **kwargs):
+        with worker_admission.slot(_get_cancel_event()) as acquired:
+            if not acquired:
+                return 130
+            return function(*args, **kwargs)
+    return admitted
+
+
+@_admit_worker
 def run_worker(
     command: str,
     project_dir: Path,
@@ -619,6 +643,9 @@ def run_worker(
                 keep_open=worker_window == "powershell-keep",
             )
         else:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("", encoding="utf-8")
+            env["ND_WORKER_LOG_PATH"] = str(log_path.resolve())
             returncode, output = stream_shell_command(command, project_dir, env, timeout)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(output, encoding="utf-8")
@@ -762,6 +789,7 @@ def worker_supervision_checkpoint(worker_loop: str, message: str, rerun_command:
     return True
 
 
+@_admit_worker
 def run_multi_output_worker(
     command: str,
     project_dir: Path,
@@ -808,6 +836,9 @@ def run_multi_output_worker(
                 keep_open=worker_window == "powershell-keep",
             )
         else:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("", encoding="utf-8")
+            env["ND_WORKER_LOG_PATH"] = str(log_path.resolve())
             returncode, output = stream_shell_command(command, project_dir, env, timeout)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(output, encoding="utf-8")
@@ -1049,13 +1080,39 @@ def artifact_paths(project_dir: Path, chapter: Path) -> Dict[str, Path]:
     }
 
 
+# Cache only validated immutable snapshots; any artifact replacement invalidates it.
+_chapter_validation_cache: Dict[str, tuple] = {}
+
+
+def _chapter_receipt_matches(paths: Dict[str, Path], receipt: dict) -> bool:
+    """Verify the complete publication evidence, never just a snapshot filename."""
+    try:
+        expected = {"analysis", "delta", "before", "diff", "delta_report", "chapter_report"}
+        hashes = receipt.get("artifacts", {})
+        return (set(hashes) == expected
+                and all(hashlib.sha256(paths[key].read_bytes()).hexdigest() == value for key, value in hashes.items())
+                and hashlib.sha256(paths["after"].read_bytes()).hexdigest() == receipt.get("story_sha256"))
+    except (OSError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def is_chapter_complete(project_dir: Path, chapter: Path) -> bool:
     p = artifact_paths(project_dir, chapter)
     required = ["analysis", "delta", "delta_report", "chapter_report", "before", "after", "diff"]
     if not all(p[k].is_file() and p[k].stat().st_size > 0 for k in required):
         return False
 
+    receipt_path = p["after"].with_suffix(".commit.json")
     try:
+        paths = [p[key] for key in required] + ([receipt_path] if receipt_path.exists() else [])
+        signature = tuple((str(path), path.stat().st_mtime_ns, path.stat().st_ctime_ns, path.stat().st_size) for path in paths)
+        cache_key = str(p["after"].resolve())
+        if _chapter_validation_cache.get(cache_key) == signature:
+            return True
+        if receipt_path.exists():
+            receipt = load_json(receipt_path, {})
+            if not receipt.get("published") or not _chapter_receipt_matches(p, receipt):
+                return False
         for report_key in ("delta_report", "chapter_report"):
             report = load_json(p[report_key])
             if not isinstance(report, dict) or report.get("passed") is not True or report.get("mode") != "process":
@@ -1066,6 +1123,8 @@ def is_chapter_complete(project_dir: Path, chapter: Path) -> bool:
         if not isinstance(diff, dict):
             return False
         after_ok, _, _ = validate_structure_file(str(p["after"]), mode="process")
+        if after_ok:
+            _chapter_validation_cache[cache_key] = signature
         return after_ok
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return False
@@ -1086,6 +1145,9 @@ def latest_snapshot_seq(project_dir: Path) -> Optional[int]:
     for path in version_dir.glob("story_after_ch*.json"):
         m = re.match(r"story_after_ch(\d+)\.json$", path.name)
         if m:
+            receipt = load_json(path.with_suffix(".commit.json"), None)
+            if receipt is not None and not receipt.get("published"):
+                continue
             seqs.append(int(m.group(1)))
     return max(seqs) if seqs else None
 
@@ -2135,6 +2197,14 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         print(f"找不到第{seq:03d}章")
         return 1
     p = artifact_paths(project_dir, chapter)
+    receipt_path = p["after"].with_suffix(".commit.json")
+    receipt = load_json(receipt_path, {})
+    if not force and receipt and _chapter_receipt_matches(p, receipt):
+        if receipt.get("published") or receipt.get("story_sha256") == hashlib.sha256(story.read_bytes()).hexdigest():
+            result = _record_chapter_progress(project_dir, chapter, seq)
+            receipt["published"] = True
+            save_json(receipt_path, receipt)
+            return result
     if is_chapter_complete(project_dir, chapter) and not force:
         print(f"第{seq:03d}章已完成，跳过。使用 --force 可重新提交。")
         return 0
@@ -2214,41 +2284,54 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         write_repair_pack(project_dir, chapter, "Delta校验失败", [p["delta_report"]])
         return 1
 
+    # All transformations run against a private candidate. The live structure is
+    # published once, after validation and diff succeed; no rollback window exists.
+    # Invalidate old evidence before touching snapshots, including legacy --force
+    # submissions whose historical snapshots predate publication receipts.
+    save_json(receipt_path, {"published": False})
     shutil.copy2(story, p["before"])
-    backup_tmp = project_dir / "故事结构版本" / f"_rollback_ch{seq:03d}.json"
-    shutil.copy2(story, backup_tmp)
+    candidate = p["before"].with_name(f".chapter_candidate_{seq:03d}.json")
+    shutil.copy2(story, candidate)
+    merge_log = project_dir / "结构变更日志" / f"merge_ch{seq:03d}.txt"
+    normalize_report = project_dir / "质量治理" / "规范化" / f"normalize_ch{seq:03d}.txt"
+    compress_report = project_dir / "质量治理" / "规范化" / f"compress_after_ch{seq:03d}.json"
+    try:
+        steps = [
+            ([sys.executable, str(script_path("merge_delta.py")), str(candidate), str(p["delta"])], merge_log, "章节合并失败"),
+            ([sys.executable, str(script_path("normalize_story_schema.py")), str(candidate), "--in-place", "--report", str(normalize_report)], None, "章节结构规范化失败"),
+            ([sys.executable, str(script_path("compress_tags.py")), "--structure", str(candidate), "--report", str(compress_report)], None, "章节标签处理失败"),
+            ([sys.executable, str(script_path("validate_structure.py")), "--chapter-check", "--mode", "process", "--report-json", str(p["chapter_report"]), str(candidate), str(p["delta"])], None, "章节结构校验失败"),
+            ([sys.executable, str(script_path("diff_structure.py")), str(p["before"]), str(candidate), str(p["diff"])], None, "章节变更记录生成失败"),
+        ]
+        for command, log, reason in steps:
+            rc = run_cmd(command, log) if log is not None else run_cmd(command)
+            if rc != 0:
+                write_repair_pack(project_dir, chapter, reason, [merge_log, normalize_report, compress_report, p["chapter_report"]])
+                return rc
+        # A pending receipt prevents prepublication snapshots from looking complete.
+        # Hashes also allow recovery after replace but before the progress update.
+        receipt = {
+            "published": False,
+            "story_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "artifacts": {key: hashlib.sha256(p[key].read_bytes()).hexdigest()
+                          for key in ("analysis", "delta", "before", "diff", "delta_report", "chapter_report")},
+        }
+        save_json(receipt_path, receipt)
+        shutil.copy2(candidate, p["after"])
+        os.replace(candidate, story)
+        # Leave the receipt pending until progress is durable, so the next run
+        # returns here for reconciliation rather than skipping an unfinished step.
+        result = _record_chapter_progress(project_dir, chapter, seq)
+        receipt["published"] = True
+        save_json(receipt_path, receipt)
+        return result
+    finally:
+        candidate.unlink(missing_ok=True)
 
-    rc = run_cmd([sys.executable, str(script_path("merge_delta.py")), str(story), str(p["delta"])], project_dir / "结构变更日志" / f"merge_ch{seq:03d}.txt")
-    if rc != 0:
-        shutil.copy2(backup_tmp, story)
-        print("合并失败，已回滚。")
-        write_repair_pack(project_dir, chapter, "merge_delta.py合并失败", [project_dir / "结构变更日志" / f"merge_ch{seq:03d}.txt"])
-        return 1
 
-    # 合并后保全式规范化，不隔离前向引用，避免过程信息丢失。
-    run_cmd([sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place", "--report", str(project_dir / "质量治理" / "规范化" / f"normalize_ch{seq:03d}.txt")])
-
-    # 合并后再压一次：跨章累积的标签集即使每章入口已合规，也可能因新 Delta 与既有元素合并而越过上限。
-    compress_struct_report = project_dir / "质量治理" / "规范化" / f"compress_after_ch{seq:03d}.json"
-    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--structure", str(story), "--report", str(compress_struct_report)])
-    if rc != 0:
-        shutil.copy2(backup_tmp, story)
-        print(f"合并后标签压缩失败，已回滚，见: {compress_struct_report}")
-        write_repair_pack(project_dir, chapter, "compress_tags.py(Structure)失败", [compress_struct_report])
-        return 1
-
-    rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--chapter-check", "--mode", "process", "--report-json", str(p["chapter_report"]), str(story), str(p["delta"])])
-    if rc != 0:
-        shutil.copy2(backup_tmp, story)
-        print(f"章节合并后校验失败，已回滚，见: {p['chapter_report']}")
-        write_repair_pack(project_dir, chapter, "合并后结构校验失败", [p["delta_report"], p["chapter_report"]])
-        return 1
-
-    shutil.copy2(story, p["after"])
-    run_cmd([sys.executable, str(script_path("diff_structure.py")), str(p["before"]), str(p["after"]), str(p["diff"])])
-
+def _record_chapter_progress(project_dir: Path, chapter: Path, seq: int) -> int:
+    """Idempotently update progress after a validated chapter has been published."""
     # 更新进度
-    detail = json.dumps({"已完成章节": [chapter.name]}, ensure_ascii=False)
     # 这里不用直接覆盖列表，调用 progress_manager update 不适合追加；手动合并更稳。
     progress_path = project_dir / "进度.json"
     progress = load_json(progress_path, None)

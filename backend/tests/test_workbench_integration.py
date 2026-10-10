@@ -277,6 +277,8 @@ def test_two_projects_run_writers_concurrently(app_client):
     # Both writers run concurrently (different projects, separate writer locks).
     _wait(lambda: _task_status(client, p1["id"], t1["id"]) == "running")
     _wait(lambda: _task_status(client, p2["id"], t2["id"]) == "running")
+    # The scheduler persists running before the adapter thread enters its body.
+    _wait(lambda: set(state["started"]) == {t1["id"], t2["id"]})
     assert state["max_by_project"][p1["id"]] == 1
     assert state["max_by_project"][p2["id"]] == 1
     assert set(state["started"]) == {t1["id"], t2["id"]}

@@ -145,3 +145,31 @@ def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path)
     msg = str(excinfo.value)
     assert "commit_final_draft 失败" in msg
     assert "无 worker_command" in msg
+
+
+def test_finalize_adapter_caps_transport_retries_by_repair_allowance(tmp_path, monkeypatch):
+    """Desktop maintenance uses the same budget as the pipeline entry point."""
+    import task_adapters
+    import run_pipeline
+    project = _seed_project(tmp_path)
+    repair = project / "质量治理/最终审计/repair_final.md"
+    repair.parent.mkdir(parents=True)
+    repair.write_text("repair", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(task_adapters, "cmd_final_pack", lambda *a: 0)
+    monkeypatch.setattr(task_adapters, "cmd_commit_final_draft", lambda *a: 1)
+    monkeypatch.setattr(run_pipeline, "wait_before_worker_retry", lambda attempt: False)
+
+    def worker(command, directory, env, timeout):
+        if env["ND_TASK_TYPE"] == "final_draft":
+            _write_json(Path(env["ND_EXPECTED_OUTPUT"]), EMPTY_STORY)
+            return 0, "local initial draft"
+        calls.append(env["ND_TASK_TYPE"])
+        return 9, "local transport failure"
+
+    monkeypatch.setattr(run_pipeline, "stream_shell_command", worker)
+    context = _make_context(project, {"worker_command": "local-fake", "worker_retries": 5,
+                                      "max_repair_rounds": 2})
+    with pytest.raises(RuntimeError, match="rc=65"):
+        FinalizeAdapter().run(context)
+    assert calls == ["repair_final", "repair_final"]

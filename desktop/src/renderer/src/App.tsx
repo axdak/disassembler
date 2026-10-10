@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { Project, StageEvent, Status, Chapter, LogEntry, QueueItem, TaskType, RecoverSnapshot } from './types'
+import { eventRefresh } from './hooks/eventRefresh'
 import { useProjectTasks } from './hooks/useProjectTasks'
 import { OverviewTab } from './components/OverviewTab'
 import { ChaptersTab } from './components/ChaptersTab'
@@ -56,8 +57,9 @@ export function App() {
     refreshProjects()
     refreshQueue()
     const off = window.api.onEvent((ev) => {
+      if ((ev as StageEvent).type === 'connection_restored') { refreshQueue(); return }
       setEvents((p) => [...p.slice(-400), ev as StageEvent])
-      refreshQueue()
+      if (/^(queue_|pipeline_)/.test((ev as StageEvent).type) || (ev as StageEvent).type === 'run_status') refreshQueue()
     })
     const qi = setInterval(refreshQueue, 3000)
     return () => { off(); clearInterval(qi) }
@@ -65,17 +67,22 @@ export function App() {
 
   useEffect(() => {
     if (selected == null) { setStatus(null); return }
-    // 章节页使用已有项目概况；暂停会扫描全书的 1.5 秒状态轮询。
-    // 离开章节页后立即恢复查询，更新流水线概览。
-    if (browsingChapters) return
+    // Status follows lifecycle events; logs and heartbeats never scan book files.
     let stop = false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const poll = async () => {
+    const read = async () => {
       try { const s = (await window.api.projectStatus(selected)) as Status; if (!stop) setStatus(s) } catch { /* ignore */ }
-      if (!stop) timer = setTimeout(poll, 1500)
     }
-    poll()
-    return () => { stop = true; if (timer) clearTimeout(timer) }
+    const refresh = eventRefresh(read)
+    if (!browsingChapters) refresh.request()
+    const off = window.api.onEvent((ev) => {
+      const event = ev as StageEvent
+      if (event.type === 'connection_restored' && !browsingChapters) { refresh.request(); return }
+      if (event.project_id !== selected || browsingChapters) return
+      if (/^(pipeline_|stage_)/.test(event.type) || event.type === 'run_status'
+          || event.type === 'chapter_progress'
+          || ['task_started', 'task_done', 'task_failed', 'task_cancelled'].includes(event.type)) refresh.request()
+    })
+    return () => { stop = true; refresh.dispose(); off() }
   }, [selected, browsingChapters])
 
   useEffect(() => {
@@ -382,13 +389,8 @@ function SettingsView({ settings, setSettings, onSave }: {
           />
           <span style={{ fontSize: 12, color: '#888' }}> 字符；sample 模式三段各取 1/3</span>
         </div>
-        <div style={{ marginTop: 8 }}>
-          <label>分析MD上限: </label>
-          <input type="number" min={1000} style={{ width: 70 }}
-            value={String((settings.max_analysis_chars as number) ?? 12000)}
-            onChange={(e) => setSettings({ ...settings, max_analysis_chars: Math.max(1000, Number(e.target.value) || 12000) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> 字符；每章分析MD塞入任务包的字符上限</span>
+        <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
+          章节分析保留全文；全书分析材料过长时按任务包大小自动分包。
         </div>
         <div style={{ marginTop: 8 }}>
           <label>摘要最大条目: </label>

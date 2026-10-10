@@ -1,0 +1,71 @@
+"""Content-addressed checkpoints for successful full-book partial outputs.
+
+Only fully embedded task packs are eligible. Changed evidence, worker command,
+provider configuration, or worker/prompt code invalidates the checkpoint.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from merge_delta import save_json
+
+
+def _atomic_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def run_checkpointed_partial(worker, command: str, project: Path, task: str,
+                             pack: Path, output: Path, *, reuse: bool = True, **kwargs) -> int:
+    """Reuse an integrity-checked partial, excluding only its transient output path."""
+    text = pack.read_text(encoding="utf-8")
+    # The wrapper embeds all evidence; only its output location changes per run.
+    # Do not strip dates or paths elsewhere: they may be real story evidence.
+    header, separator, material = text.partition("## 原任务包内容\n\n")
+    if not separator:
+        return worker(command, project, task, pack, output, **kwargs)
+    header = header.replace(str(output), "<PARTIAL_OUTPUT>")
+    engine = Path(__file__).resolve().parents[1]
+    code_hash = hashlib.sha256()
+    for path in sorted([*engine.joinpath("prompts").rglob("*.j2"),
+                        engine / "tools" / "agent_worker.py"]):
+        code_hash.update(str(path.relative_to(engine)).encode())
+        code_hash.update(path.read_bytes())
+    settings = {key: value for key, value in os.environ.items()
+                if key.startswith(("ND_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
+    # Packs may explicitly ask the worker to inspect element details in this file.
+    story = project / "故事结构_增量.json"
+    story_digest = hashlib.sha256(story.read_bytes() if story.is_file() else b"").hexdigest()
+    identity = json.dumps([1, command, task, header + separator + material, story_digest,
+                           settings, code_hash.hexdigest()], sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(identity.encode()).hexdigest()
+    directory = project / "质量治理" / "分包检查点"
+    artifact, receipt = directory / f"{digest}.md", directory / f"{digest}.json"
+    try:
+        saved = json.loads(receipt.read_text(encoding="utf-8"))
+        content = artifact.read_bytes()
+        if reuse and content.strip() and saved.get("sha256") == hashlib.sha256(content).hexdigest():
+            _atomic_bytes(output, content)
+            print(f"已恢复通过检查的分析分包：{output.name}，无需重复请求模型。", flush=True)
+            return 0
+    except (OSError, ValueError, AttributeError):
+        pass  # Missing/corrupt checkpoints never masquerade as completed work.
+    rc = worker(command, project, task, pack, output, **kwargs)
+    if rc == 0 and output.is_file() and output.read_bytes().strip():
+        content = output.read_bytes()
+        _atomic_bytes(artifact, content)
+        save_json(receipt, {"sha256": hashlib.sha256(content).hexdigest()})
+    return rc

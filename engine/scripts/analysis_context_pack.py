@@ -556,7 +556,10 @@ def build_chapter_block(project_dir: Path, ch: Dict[str, Any], task: str, includ
     lines.append("")
     lines.append("#### 章节分析MD")
     lines.append("```markdown")
-    lines.append(read_text(analysis_path, max_analysis_chars) or "【未找到章节分析MD】")
+    # Analysis is evidence, not a disposable excerpt. Full-book generation splits
+    # oversized rendered material below instead of discarding its trailing text.
+    # Keep max_analysis_chars in the API for existing task/config compatibility.
+    lines.append(read_text(analysis_path) or "【未找到章节分析MD】")
     lines.append("```")
     lines.append("")
 
@@ -781,6 +784,24 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
     return "\n".join(lines).rstrip() + "\n"
 
 
+def split_rendered_pack(content: str, budget: int) -> List[str]:
+    """Preserve every material character while repeating the complete contract."""
+    if budget <= 0 or len(content) <= budget:
+        return [content]
+    markers = [marker for marker in ("## 章节材料\n", "## 全书级分析材料\n") if marker in content]
+    if not markers:
+        raise ValueError("任务包超过预算且没有可分包的材料段，请提高 max_pack_chars")
+    marker = min(markers, key=content.index)
+    header, _, material = content.partition(marker)
+    # Reserve enough room for continuation metadata without changing the contract.
+    capacity = budget - len(header) - len(marker) - 256
+    if capacity < 512:
+        raise ValueError("任务契约与故事索引已占满预算，请提高 max_pack_chars；未删除分析材料")
+    pieces = [material[start:start + capacity] for start in range(0, len(material), capacity)]
+    return [header + f"\n材料连续片段 {i}/{len(pieces)}：本包只分析以下片段，汇总时须覆盖全部片段；片段可能在段落或表格中间衔接。\n"
+            + marker + piece for i, piece in enumerate(pieces, 1)]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="生成全书/局部分析任务包")
     parser.add_argument("project_dir", help="拆书项目目录")
@@ -791,7 +812,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto", help="是否包含原文：auto(按故事大小自动)/none/sample/full")
     parser.add_argument("--max-pack-chars", type=int, default=70000, help="单个任务包最大字符数，超出自动分包")
     parser.add_argument("--max-original-chars", type=int, default=6000, help="每章原文最多放入字符数；sample模式会抽样")
-    parser.add_argument("--max-analysis-chars", type=int, default=12000, help="每章分析MD最多放入字符数")
+    parser.add_argument("--max-analysis-chars", type=int, default=12000, help="兼容旧配置；章节分析保留全文，超限通过分包处理")
     parser.add_argument("--story-summary-max-items", type=int, default=0, help="故事结构摘要每集合最大列出条目数；0=不限制（全名称索引，默认，避免大书遗漏）")
     parser.add_argument("--context-budget-chars", type=int, default=160000, help="上下文预算字符数，auto模式按此自动分级")
     parser.add_argument("--out-dir", default="", help="输出目录；默认 全书分析/_任务包/<timestamp>_<task>")
@@ -881,9 +902,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             context_budget_chars=args.context_budget_chars,
             max_pack_chars=args.max_pack_chars,
         )
-        path = out_dir / f"pack_{i:03d}.md"
-        path.write_text(content, encoding="utf-8")
-        pack_files.append(str(path.relative_to(project_dir)))
+        try:
+            pieces = split_rendered_pack(content, args.max_pack_chars)
+        except ValueError as exc:
+            # Keep the full material for diagnosis; do not dispatch a truncated pack.
+            (out_dir / "oversized_pack.md").write_text(content, encoding="utf-8")
+            print(f"分析材料预算不足：{exc}")
+            return 64
+        for piece in pieces:
+            path = out_dir / f"pack_{len(pack_files) + 1:03d}.md"
+            path.write_text(piece, encoding="utf-8")
+            pack_files.append(str(path.relative_to(project_dir)))
 
     reduce_path = out_dir / "reduce_prompt.md"
     reduce_path.write_text(reduce_contract(args.task), encoding="utf-8")

@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 REPAIR_EXHAUSTED = 65
-REPAIR_TASKS = {"repair_chapter", "audit_repair", "analysis_regenerate"}
+REPAIR_TASKS = {"repair_chapter", "audit_repair", "analysis_regenerate", "repair_final"}
 _sessions: dict[str, str] = {}
 _lock = threading.RLock()
 

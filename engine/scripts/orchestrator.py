@@ -8,8 +8,8 @@
 - 直接 import 调用 run_pipeline 的 cmd_*（显式参数），不经过 CLI 翻译层。
 - worker 阶段使用 worker_loop="continuous"，由 cmd_run / cmd_*_auto 内部管理 worker
   子进程、重试与验收；编排器只处理阶段级返回码。
-- 阶段级事件（开始/结束/失败/硬阻塞）经 EventBus 发射；章节级细进度由后端轮询
-  进度.json / _索引.json（里程碑3）。
+- 阶段事件与交错执行的章节进度经 EventBus 发射；界面按事件合并刷新，
+  章节列表由用户手动核对，不依赖高频全书扫描。
 - 崩溃恢复：加载状态文件，从 current_stage 续跑；各 cmd 自身按实际产物幂等续跑。
 - SQLite 百分比不作完成依据，以实际产物为准。
 """
@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from events import Event, EventBus
+from worker_checkpoint import run_checkpointed_partial
 from repair_budget import REPAIR_EXHAUSTED, begin_retry_session
 from pipeline_state import STAGES, PipelineState
 from run_pipeline import (
@@ -218,6 +219,12 @@ class Orchestrator:
             if self._cancel.is_set():
                 self.emit("pipeline_cancelled")
                 return 2
+            if rc == 64:
+                # An unchanged context budget cannot be fixed by redispatching it.
+                self.state.last_error = "任务材料超出配置预算；完整材料已保留，请调整 max_pack_chars 后继续。"
+                self.state.save()
+                self.emit("hard_block", stage=stage, detail=self.state.last_error)
+                return 1
             if rc == REPAIR_EXHAUSTED:
                 # A failed logical task must not regain its model budget when
                 # the outer stage is redispatched. Explicit resume gets a new run.
@@ -442,8 +449,8 @@ class Orchestrator:
             worker_pack = write_fullbook_partial_worker_pack(
                 self.project_dir, manifest_path, pack_rel, i, pack_count, partial
             )
-            rc = run_worker(
-                self._worker_command(), self.project_dir, task,
+            rc = run_checkpointed_partial(
+                run_worker, self._worker_command(), self.project_dir, task,
                 worker_pack, partial, **wk,
             )
             if rc != 0:
@@ -493,13 +500,14 @@ class Orchestrator:
                 timeout=self.config.worker_timeout_seconds,
                 retries=self.config.worker_retries,
                 worker_window=self.config.worker_window,
+                repair_limit=self.config.max_repair_rounds,
             )
             if wrc != 0:
-                return 1
+                return wrc
             rc = cmd_commit_final_draft(self.project_dir)
             if rc == 0:
                 return 0
-        return 1
+        return REPAIR_EXHAUSTED
 
     def _stage_finalize(self) -> int:
         return cmd_finalize(self.project_dir)

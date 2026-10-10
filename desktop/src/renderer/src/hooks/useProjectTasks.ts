@@ -9,6 +9,7 @@
 // error strings. The renderer-level banner (in App.tsx) attaches the link to
 // the logs/artifact drawer.
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { eventRefresh } from './eventRefresh'
 import type { ArtifactStatusResponse, TaskType, WorkbenchTask } from '../types'
 
 const TASK_EVENT_PREFIX = 'task_'
@@ -103,24 +104,32 @@ export function useProjectTasks(projectId: number | null, manualArtifacts = fals
       return
     }
     refresh()
-    // 章节浏览期间仅同步任务控制状态，产物由手动刷新读取。
+    // Progress messages are already delivered over events; only lifecycle changes
+    // require task reads. Expensive artifact scans follow completed writes only.
+    const taskRefresh = eventRefresh(async () => {
+      try {
+        const items = await window.api.tasksList(projectId)
+        if (currentProject.current === projectId) setTasks(items)
+      } catch (error) {
+        if (currentProject.current === projectId) setError(messageForError(error, '加载任务失败'))
+      }
+    })
+    const artifactRefresh = eventRefresh(refreshArtifacts)
     const off = window.api.onEvent((ev) => {
       if (ev == null || typeof ev !== 'object') return
       const e = ev as { project_id?: number; type?: string }
-      if (e.project_id !== projectId) return
-      if (typeof e.type !== 'string') return
-      if (e.type.startsWith(TASK_EVENT_PREFIX)) {
-        if (!manualArtifactsRef.current) void refresh()
-        else void window.api.tasksList(projectId).then((items) => {
-          if (currentProject.current === projectId) setTasks(items)
-        }).catch((error) => {
-          if (currentProject.current === projectId) setError(messageForError(error, '加载任务失败'))
-        })
-      } else if (!manualArtifactsRef.current && PIPELINE_ARTIFACT_EVENTS.has(e.type)) {
-        void refreshArtifacts()
+      if (e.type === 'connection_restored') {
+        taskRefresh.request()
+        if (!manualArtifactsRef.current) artifactRefresh.request()
+        return
       }
+      if (e.project_id !== projectId || typeof e.type !== 'string') return
+      if (e.type.startsWith(TASK_EVENT_PREFIX) && e.type !== 'task_progress') taskRefresh.request()
+      const written = ['task_done', 'task_failed', 'task_cancelled'].includes(e.type)
+        || PIPELINE_ARTIFACT_EVENTS.has(e.type)
+      if (!manualArtifactsRef.current && written) artifactRefresh.request()
     })
-    return () => { artifactRequest.current++; off() }
+    return () => { artifactRequest.current++; taskRefresh.dispose(); artifactRefresh.dispose(); off() }
   }, [projectId, refresh, refreshArtifacts])
 
   const create = useCallback(async (type: TaskType, params: Record<string, unknown>) => {

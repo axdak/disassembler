@@ -322,9 +322,12 @@ def test_analysis_adapter_multi_pack_runs_partials_then_reduce(project, monkeypa
     """多包：逐包 run_worker 产 partial，再 run_multi_output_worker reduce。"""
     calls = _install_fake_workers(monkeypatch)
     adapter = AnalysisAdapter()
-    # 极小 max_pack_chars 强制 3 章切多包。
+    # Use real evidence volume to force multiple packs while leaving room for
+    # the complete output contract; a 50-character total budget is invalid.
+    for path in (project / "章节处理").glob("*.md"):
+        path.write_text(path.read_text(encoding="utf-8") + "\n完整分包证据" * 1000, encoding="utf-8")
     params = {"task": "summary", "chapters": "all", "include_original": "none",
-              "max_pack_chars": 50}
+              "max_pack_chars": 8000}
     ctx = _make_context(project, params)
     result = adapter.run(ctx, adapter.prepare(ctx))
 
