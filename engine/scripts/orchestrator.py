@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from events import Event, EventBus
+from repair_budget import REPAIR_EXHAUSTED, begin_retry_session
 from pipeline_state import STAGES, PipelineState
 from run_pipeline import (
     builtin_agent_worker_command,
@@ -105,6 +106,7 @@ class Orchestrator:
 
     def run(self) -> int:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
+        begin_retry_session(self.project_dir)
         set_cancel_event(self._cancel)
         try:
             self._reconcile_chapter_scope()
@@ -216,6 +218,13 @@ class Orchestrator:
             if self._cancel.is_set():
                 self.emit("pipeline_cancelled")
                 return 2
+            if rc == REPAIR_EXHAUSTED:
+                # A failed logical task must not regain its model budget when
+                # the outer stage is redispatched. Explicit resume gets a new run.
+                self.state.last_error = "自动修复已达本次运行上限；断点及失败产物已保留，查看质量治理/重试记录后可继续重试。"
+                self.state.save()
+                self.emit("hard_block", stage=stage, detail=self.state.last_error)
+                return 1
             if rc == 2:
                 # rc=2 是交接/检查点（cmd_run supervised checkpoint、worker 未配置等），
                 # 不是失败：产物由 worker/主控在下一次派发前补齐后重跑同一路由。

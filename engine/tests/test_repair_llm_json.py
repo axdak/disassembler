@@ -103,7 +103,10 @@ def test_commit_rejects_top_level_array_with_actionable_repair_context(tmp_path,
     paths["analysis"].write_text("# 合法章节分析\n", encoding="utf-8")
     paths["delta"].write_text('["修改元素"]\n', encoding="utf-8")
     sentinel = "ORIGINAL_DELTA_TASK_CONTEXT"
-    paths["delta_task"].write_text(sentinel, encoding="utf-8")
+    paths["delta_task"].write_text(
+        f"<!-- delta-contract:{run_pipeline.prompt_fingerprint('流水线/单章增量提取.j2')} -->\n{sentinel}",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(run_pipeline, "validate_chapter_analysis_file", lambda _path: (True, []))
 
     rc = run_pipeline.commit_chapter(project, 1)

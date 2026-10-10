@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -31,11 +32,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from chronology import chapter_time
+from governance_contract import normalize_governance_patch
+from merge_delta import save_json as save_atomic_json
 from story_schema_rules import COLLECTION_KEYS
 from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
-from prompt_loader import render_prompt
+from prompt_loader import render_prompt, prompt_fingerprint
+from repair_budget import REPAIR_EXHAUSTED, REPAIR_TASKS, reserve_repair, finish_repair
 from worker_artifacts import (
     capture_output_signatures,
     confined_project_path,
@@ -573,6 +577,7 @@ def run_worker(
     timeout: float = DEFAULT_WORKER_TIMEOUT_SECONDS,
     retries: int = 0,
     worker_window: str = DEFAULT_WORKER_WINDOW,
+    repair_limit: Optional[int] = None,
 ) -> int:
     """Run an external model/agent worker for exactly one task package."""
     if not command:
@@ -581,6 +586,12 @@ def run_worker(
     for attempt in range(1, attempts + 1):
         if wait_before_worker_retry(attempt):
             return 130
+        ticket = None
+        if task_type in REPAIR_TASKS:
+            ticket = reserve_repair(project_dir, expected_output, task_type,
+                                    repair_limit if repair_limit is not None else attempts)
+            if ticket is None:
+                return REPAIR_EXHAUSTED
         before_outputs = capture_output_signatures([expected_output])
         env = dict(os.environ)
         env.update({
@@ -612,6 +623,7 @@ def run_worker(
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(output, encoding="utf-8")
         if returncode != 0:
+            finish_repair(ticket, returncode)
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
             if returncode == 130:
                 return 130  # 用户取消，不重试
@@ -619,6 +631,7 @@ def run_worker(
                 continue
             return returncode
         if not expected_output.is_file() or expected_output.stat().st_size == 0:
+            finish_repair(ticket, 1)
             print(f"worker未写出期望产物: {expected_output}")
             print(f"worker日志: {log_path}")
             if attempt < attempts:
@@ -626,6 +639,7 @@ def run_worker(
             return 1
         invalid = invalid_output_artifacts([expected_output])
         if invalid:
+            finish_repair(ticket, 1)
             print(f"worker写出的产物格式无效: {expected_output}")
             print(f"worker日志: {log_path}")
             if attempt < attempts:
@@ -637,11 +651,13 @@ def run_worker(
             else []
         )
         if unchanged:
+            finish_repair(ticket, 1)
             print(f"worker未更新已存在的期望产物: {expected_output}")
             print(f"worker日志: {log_path}")
             if attempt < attempts:
                 continue
             return 1
+        finish_repair(ticket, 0)
         print(f"worker完成: task={task_type} output={expected_output} log={log_path}")
         return 0
     return 1
@@ -920,9 +936,8 @@ def load_json(path: Path, default: Any = None) -> Any:
 
 
 def save_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # State/receipts must survive interruption just like story JSON files.
+    save_atomic_json(path, data)
 
 
 # 进程内 normalize 去抖缓存：project_dir → (mtime_ns, size) of story after last normalize。
@@ -1540,6 +1555,7 @@ def write_audit_pack(
             isinstance(existing_context, dict)
             and existing_context.get("format_version") == AUDIT_CONTEXT_FORMAT_VERSION
             and existing_context.get("max_context_chars") == max_context_chars
+            and existing_context.get("prompt_fingerprint") == prompt_fingerprint("流水线/周期审计.j2")
         ):
             print(f"周期审计任务包已存在: {paths['pack']}")
             return paths["pack"]
@@ -1611,6 +1627,7 @@ def write_audit_pack(
 
     context = {
         "format_version": AUDIT_CONTEXT_FORMAT_VERSION,
+        "prompt_fingerprint": prompt_fingerprint("流水线/周期审计.j2"),
         "max_context_chars": max_context_chars,
         "current_evidence_chars": current_evidence_chars,
         "attempts": attempts,
@@ -1922,16 +1939,20 @@ def run_periodic_governance(
             action="读取治理校验报告，修复 correction Delta，然后再次运行 run_pipeline.py run。",
         )
         print(f"周期审计 {start:03d}-{end:03d} 治理补丁未通过；待Agent修复后重试。")
-        if not audit_command or attempt >= worker_retries:
+        if not audit_command:
             return 2
+        if attempt >= worker_retries:
+            update_audit_status(paths, status="repair_exhausted", action="本次运行修复次数已耗尽；保留断点，可从当前补丁继续重试。")
+            return REPAIR_EXHAUSTED
         rc = run_worker(
             audit_command,
             project_dir,
             "audit_repair",
-            paths["pack"],
+            paths["correction"].with_suffix(".repair.md"),
             paths["correction"],
             timeout=worker_timeout_seconds,
             retries=0,
+            repair_limit=max(1, worker_retries),
             worker_window=worker_window,
         )
         if rc != 0:
@@ -2008,7 +2029,9 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
         print("章节分析MD结构不合格，已交接重新生成；不会生成Delta任务。")
         return 2
     p["analysis_regenerate_task"].unlink(missing_ok=True)
-    if p["delta_task"].exists() and not force:
+    contract_marker = f"<!-- delta-contract:{prompt_fingerprint('流水线/单章增量提取.j2')} -->"
+    if (p["delta_task"].exists() and not force
+            and p["delta_task"].read_text(encoding="utf-8").startswith(contract_marker)):
         print(f"Delta提取任务包已存在: {p['delta_task']}")
         print(f"请只填写本章Delta JSON: {p['delta']}")
         return 0
@@ -2031,7 +2054,7 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
     )
 
     p["delta_task"].parent.mkdir(parents=True, exist_ok=True)
-    p["delta_task"].write_text(content, encoding="utf-8")
+    p["delta_task"].write_text(contract_marker + "\n" + content, encoding="utf-8")
     print(f"已生成Delta提取任务包: {p['delta_task']}")
     print(f"请填写本章Delta JSON: {p['delta']}")
     return 0
@@ -2057,12 +2080,14 @@ def prepare_chapter(project_dir: Path, seq: Optional[int] = None, force: bool = 
 
 def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_paths: List[Path]) -> None:
     p = artifact_paths(project_dir, chapter)
+    # Refresh cached contracts after an upgrade, keeping valid analysis intact.
+    prepare_chapter_delta(project_dir, chapter)
     reports: List[Dict[str, str]] = []
     for rp in report_paths:
         if rp.is_file():
             reports.append({
                 "name": rp.name,
-                "excerpt": rp.read_text(encoding="utf-8", errors="ignore")[:30000],
+                "excerpt": rp.read_text(encoding="utf-8", errors="ignore"),
             })
     # Repair workers need the original chapter material and Delta contract, not
     # only a terse validator report.  Without this context a worker can produce
@@ -2078,6 +2103,7 @@ def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_path
         reason=reason,
         reports=reports,
         base_task=base_task,
+        failed_delta=p["delta"].read_text(encoding="utf-8") if p["delta"].is_file() else "",
     )
     p["repair"].parent.mkdir(parents=True, exist_ok=True)
     p["repair"].write_text(content, encoding="utf-8")
@@ -2970,48 +2996,103 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     )
     governance_dir = audit_dir if is_periodic_patch else project_dir / "质量治理" / "按需治理"
     governance_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     before = project_dir / "故事结构版本" / f"story_before_governance_{ts}.json"
     after = project_dir / "故事结构版本" / f"story_after_governance_{ts}.json"
     diff = project_dir / "结构变更日志" / f"diff_governance_{ts}.json"
     report_delta = governance_dir / f"validate_delta_governance_{ts}.txt"
     report_schema = governance_dir / f"validate_schema_governance_{ts}.txt"
     report_repair_json = governance_dir / f"repair_json_governance_{ts}.json"
+    def failed(reason: str, report: Path) -> int:
+        # Each repair sees this attempt's actual failure, never an old audit
+        # task alone or a glob of unrelated historical validation reports.
+        base_pack = governance_dir / f"audit_{patch.stem.removeprefix('correction_')}.md"
+        # audit_paths is the authoritative naming convention for periodic packs.
+        match = re.match(r"^correction_(\d+)-(\d+)\.json$", patch.name)
+        if is_periodic_patch and match:
+            base_pack = audit_paths(project_dir, int(match[1]), int(match[2]))["pack"]
+        content = render_prompt(
+            "流水线/治理修复.j2", reason=reason,
+            report=report.read_text(encoding="utf-8", errors="replace") if report.is_file() else reason,
+            failed_patch=patch.read_text(encoding="utf-8", errors="replace"),
+            base_task=base_pack.read_text(encoding="utf-8") if base_pack.is_file() else "",
+            output_path=patch,
+        )
+        patch.with_suffix(".repair.md").write_text(content, encoding="utf-8")
+        return 1
+
     rc = repair_llm_json(patch, report_repair_json, backup=True)
     if rc != 0:
         print(f"治理补丁 LLM JSON 语法修复失败: {report_repair_json}")
-        return 1
+        return failed("治理补丁 JSON 语法修复失败", report_repair_json)
+    patch_doc = load_json(patch)
+    range_match = re.fullmatch(r"correction_(\d+)-(\d+)\.json", patch.name) if is_periodic_patch else None
+    known_range = f"第{range_match[1]}章-第{range_match[2]}章" if range_match else ""
+    normalized, changes = normalize_governance_patch(patch_doc, known_range)
+    if changes:
+        # Keep the complete original before any reversible shape correction.
+        shutil.copy2(patch, governance_dir / f"original_contract_{ts}.json")
+        save_atomic_json(patch, normalized)
+    save_json(governance_dir / f"normalize_contract_{ts}.json", {"changes": changes})
+    receipt_path = patch.with_suffix(".commit.json")
+    receipt = load_json(receipt_path, {})
+    patch_digest = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    # Recover a crash after publishing the story but before recording success.
+    # Both content hashes must match; stale receipts cannot skip new work.
+    if (isinstance(receipt, dict) and receipt.get("patch_sha256") == patch_digest
+            and receipt.get("story_sha256") == hashlib.sha256(story.read_bytes()).hexdigest()):
+        recovered = [confined_project_path(project_dir, receipt[key]) for key in ("before", "after", "diff")]
+        if all(path.is_file() for path in recovered):
+            mark_periodic_audit_committed(project_dir, patch, *recovered)
+            print("治理内容已完整落盘，已恢复提交状态，无需重复合并。")
+            return 0
     report_compress = governance_dir / f"compress_governance_{ts}.json"
     rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(patch), "--report", str(report_compress)])
     if rc != 0:
         print(f"治理补丁标签压缩失败: {report_compress}")
-        return 1
+        return failed("治理补丁标签处理失败", report_compress)
     rc = run_cmd([sys.executable, str(script_path("validate_delta.py")), "--mode", "governance", str(story), str(patch)], report_delta)
     if rc != 0:
         print(f"治理补丁Delta校验失败: {report_delta}")
-        return 1
+        return failed("治理补丁入库前校验失败", report_delta)
     # validate_delta is read-only — only persist the before snapshot once it
     # has passed, so a validation-only failure leaves no snapshot artifacts.
     shutil.copy2(story, before)
-    rc = run_cmd([sys.executable, str(script_path("merge_delta.py")), str(story), str(patch)], governance_dir / f"merge_governance_{ts}.txt")
-    if rc != 0:
-        shutil.copy2(before, story); print("治理新增/修改合并失败，已回滚。") ; return 1
-    rc = run_cmd([sys.executable, str(script_path("apply_governance_ops.py")), str(story), str(patch), "--backup"], governance_dir / f"apply_ops_{ts}.txt")
-    if rc not in (0,2):
-        shutil.copy2(before, story); print("治理操作失败，已回滚。") ; return 1
-    normalize_cmd = [sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place"]
-    if is_periodic_patch:
-        normalize_cmd.append("--quarantine-invalid-refs")
-    normalize_cmd.extend(["--report", str(project_dir / "质量治理" / "规范化" / f"normalize_governance_{ts}.txt")])
-    run_cmd(normalize_cmd)
-    rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--mode", "governance", str(story)], report_schema)
-    if rc != 0:
-        shutil.copy2(before, story); print(f"治理后结构校验失败，已回滚: {report_schema}") ; return 1
-    shutil.copy2(story, after)
-    run_cmd([sys.executable, str(script_path("diff_structure.py")), str(before), str(after), str(diff)])
-    mark_periodic_audit_committed(project_dir, patch, before, after, diff)
-    print(f"治理补丁提交完成。before={before} after={after} diff={diff}")
-    return 0
+    candidate = before.with_name(f".governance_candidate_{ts}.json")
+    shutil.copy2(story, candidate)
+    try:
+        rc = run_cmd([sys.executable, str(script_path("merge_delta.py")), str(candidate), str(patch)], governance_dir / f"merge_governance_{ts}.txt")
+        if rc != 0:
+            return failed("治理新增/修改合并失败，原结构未修改", governance_dir / f"merge_governance_{ts}.txt")
+        rc = run_cmd([sys.executable, str(script_path("apply_governance_ops.py")), str(candidate), str(patch)], governance_dir / f"apply_ops_{ts}.txt")
+        if rc != 0:
+            return failed("治理操作失败，原结构未修改", governance_dir / f"apply_ops_{ts}.txt")
+        normalize_cmd = [sys.executable, str(script_path("normalize_story_schema.py")), str(candidate), "--in-place"]
+        if is_periodic_patch:
+            normalize_cmd.append("--quarantine-invalid-refs")
+        normalize_cmd.extend(["--report", str(project_dir / "质量治理" / "规范化" / f"normalize_governance_{ts}.txt")])
+        rc = run_cmd(normalize_cmd)
+        if rc != 0:
+            return failed("治理结构规范化失败，原结构未修改", project_dir / "质量治理" / "规范化" / f"normalize_governance_{ts}.txt")
+        rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--mode", "governance", str(candidate)], report_schema)
+        if rc != 0:
+            return failed("治理后结构校验失败，原结构未修改", report_schema)
+        shutil.copy2(candidate, after)
+        rc = run_cmd([sys.executable, str(script_path("diff_structure.py")), str(before), str(after), str(diff)])
+        if rc != 0:
+            return failed("治理变更记录生成失败，原结构未修改", diff)
+        save_json(receipt_path, {
+            "patch_sha256": hashlib.sha256(json.dumps(load_json(patch), ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
+            "story_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "before": str(before.resolve()), "after": str(after.resolve()), "diff": str(diff.resolve()),
+        })
+        os.replace(candidate, story)  # Publish only the fully validated result.
+        mark_periodic_audit_committed(project_dir, patch, before, after, diff)
+        print(f"治理补丁提交完成。before={before} after={after} diff={diff}")
+        return 0
+
+    finally:
+        candidate.unlink(missing_ok=True)
 
 
 def cmd_final_pack(project_dir: Path, force: bool = False) -> int:

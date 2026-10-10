@@ -304,7 +304,11 @@ def test_queue_runs_projects_sequentially(client, auth, tmp_path):
         return any(e["type"] == "run_status" and e["detail"] == "done" for e in ev)
 
     deadline = time.time() + 10
-    while time.time() < deadline and not (run_done(p1) and run_done(p2)):
+    # Run completion and queue consumption are separate asynchronous steps.
+    # Wait for both within the same deadline instead of racing the queue thread.
+    while time.time() < deadline and not (
+        run_done(p1) and run_done(p2) and client.get("/queue", headers=auth).json() == []
+    ):
         time.sleep(0.1)
     assert run_done(p1) and run_done(p2)
     assert client.get("/queue", headers=auth).json() == []  # 队列耗尽

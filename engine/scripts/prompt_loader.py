@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -115,3 +116,8 @@ def list_prompts() -> List[Dict[str, Any]]:
             "inputs": meta.get("inputs", []),
         })
     return result
+
+
+def prompt_fingerprint(name: str) -> str:
+    """Invalidate cached task contracts when their source template changes."""
+    return hashlib.sha256((PROMPTS_DIR / name).read_bytes()).hexdigest()

@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import pytest
 
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, HERE)
@@ -371,14 +372,15 @@ def test_modified_only_partial_fields():
 def test_lookup_index():
     items = [
         {"名称": "甲", "别名": ["甲哥"]},
-        {"名称": "乙", "别名": ["甲哥"]},  # 别名冲突，保留第一个
+        {"名称": "乙", "别名": ["甲哥"]},  # 别名冲突必须显式消歧。
     ]
     name_idx, alias_idx = build_lookup_index(items)
     assert find_index(name_idx, alias_idx, "甲") == 0
-    assert find_index(name_idx, alias_idx, "甲哥") == 0  # 别名命中第一个
+    with pytest.raises(ValueError, match="匹配多个元素"):
+        find_index(name_idx, alias_idx, "甲哥")
     assert find_index(name_idx, alias_idx, "乙") == 1
     assert find_index(name_idx, alias_idx, "不存在") == -1
-    print("[OK] 名称/别名查找索引（冲突别名保留第一个）")
+    print("[OK] 名称/别名查找索引（冲突别名不猜测）")
 
 
 def test_ensure_skeleton():

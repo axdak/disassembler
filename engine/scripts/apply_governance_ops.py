@@ -3,8 +3,10 @@
 from __future__ import annotations
 import argparse, copy, json, os, shutil, sys, datetime as dt, tempfile
 from typing import Any, Dict, List, Set
+from element_identity import build_lookup_index, find_index
+from chronology import parse_chapter_numbers, format_chapter
 from story_schema_rules import (
-    COLLECTION_KEYS, TYPE_TO_COLLECTION, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
+    COLLECTION_KEYS, TYPE_TO_COLLECTION, STRUCTURAL_REF_FIELDS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
     dump_supplementary_tags, is_cumulative_detail_field, parse_supplementary_tags,
 )
 
@@ -41,10 +43,25 @@ def names(item):
         if isinstance(a,str): s.add(a)
     return {x for x in s if x}
 def find_idx(data, typ, name):
-    key=TYPE_TO_COLLECTION[typ]
-    for i,it in enumerate(data.get(key,[]) or []):
-        if isinstance(it,dict) and name in names(it): return i
-    return -1
+    """Use the same canonical-name-first rules as ordinary chapter merging."""
+    return find_index(*build_lookup_index(data.get(TYPE_TO_COLLECTION[typ], []) or []), name)
+
+
+def source_names(data, typ, item):
+    """Only rewrite identities that currently resolve to this source object."""
+    items = data.get(TYPE_TO_COLLECTION[typ], [])
+    resolved = set()
+    for name in names(item):
+        try:
+            index = find_idx(data, typ, name)
+        except ValueError:
+            # Shared aliases cannot identify a source. Keep them as metadata;
+            # after an explicit canonical merge they may become unambiguous.
+            continue
+        if index >= 0 and items[index] is item:
+            resolved.add(name)
+    return resolved
+
 def append_unique(a,b):
     a=list(a or [])
     for x in b or []:
@@ -69,6 +86,11 @@ def dump_json_string_array(items):
 def append_detail_value(existing, incoming, detail_key=''):
     if incoming in (None,'',[],{}):
         return existing
+    if detail_key == '补充标签':
+        # This field is one serialized JSON array, never two concatenated
+        # strings. Preserve and deduplicate both sides without changing format.
+        old_tags = parse_supplementary_tags(existing) if existing not in (None, '') else []
+        return dump_supplementary_tags(append_unique(old_tags, parse_supplementary_tags(incoming)))
     if existing in (None,'',[],{}):
         if is_cumulative_detail_field(detail_key):
             return dump_json_string_array(parse_json_string_array_or_lines(incoming))
@@ -82,57 +104,61 @@ def append_detail_value(existing, incoming, detail_key=''):
     if isinstance(existing,list) and isinstance(incoming,list):
         return append_unique(existing,incoming)
     return incoming
+def rewrite_refs(data, typ, old, new):
+    """Rewrite typed references only; names, aliases and narrative text are data.
+
+    Structural reference fields have a known target collection. Free-form
+    details are changed only for explicit type:name values, never substrings.
+    A None replacement removes the reference, preserving unrelated content.
+    """
+    count = 0
+    target = TYPE_TO_COLLECTION[typ]
+
+    def replace(value, relation=False, explicit=False):
+        nonlocal count
+        if not isinstance(value, str):
+            return value
+        prefix, separator, name = value.partition(':')
+        match = (separator and name in old and (relation or TYPE_TO_COLLECTION.get(prefix) == target)) if (relation or explicit) else value in old
+        if not match:
+            return value
+        count += 1
+        return None if new is None else f'{prefix}:{new}' if (relation or explicit) else new
+
+    for collection, items in data.items():
+        if collection not in COLLECTION_KEYS or not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for field, field_target, kind in STRUCTURAL_REF_FIELDS[collection]:
+                if field_target != target or field not in item:
+                    continue
+                value = item[field]
+                if kind == 'scalar':
+                    item[field] = replace(value) or ''
+                elif isinstance(value, list):
+                    item[field] = append_unique([], [result for entry in value
+                        if (result := replace(entry, relation=kind == 'relation_list')) is not None])
+            details = item.get('详情')
+            if isinstance(details, dict):
+                for field, value in details.items():
+                    if isinstance(value, str):
+                        details[field] = replace(value, explicit=True) or ''
+                    elif isinstance(value, list):
+                        details[field] = append_unique([], [result for entry in value
+                            if (result := replace(entry, explicit=True)) is not None])
+    return count
+
+
 def replace_refs(obj, typ, old: Set[str], new: str):
-    count=0
-    def repl(v):
-        nonlocal count
-        if isinstance(v,str):
-            if v in old:
-                count+=1; return new
-            if ':' in v:
-                p,n=v.split(':',1)
-                if p==typ and n in old:
-                    count+=1; return f'{p}:{new}'
-        return v
-    def walk(x):
-        if isinstance(x,dict):
-            for k,v in list(x.items()):
-                if isinstance(v,(dict,list)): walk(v)
-                else: x[k]=repl(v)
-        elif isinstance(x,list):
-            newlist=[]
-            for v in x:
-                if isinstance(v,(dict,list)):
-                    walk(v); nv=v
-                else: nv=repl(v)
-                if nv not in newlist: newlist.append(nv)
-            x[:]=newlist
-    walk(obj); return count
+    """Redirect references without renaming any element declaration."""
+    return rewrite_refs(obj, typ, old, new)
+
+
 def remove_refs(obj, typ, old: Set[str]):
-    count=0
-    def should(v):
-        if isinstance(v,str):
-            if v in old: return True
-            if ':' in v:
-                p,n=v.split(':',1)
-                return p==typ and n in old
-        return False
-    def walk(x):
-        nonlocal count
-        if isinstance(x,dict):
-            for k,v in list(x.items()):
-                if isinstance(v,list): walk(v)
-                elif isinstance(v,dict): walk(v)
-                elif should(v): x[k]=''; count+=1
-        elif isinstance(x,list):
-            kept=[]
-            for v in x:
-                if should(v): count+=1
-                else:
-                    if isinstance(v,(dict,list)): walk(v)
-                    kept.append(v)
-            x[:]=kept
-    walk(obj); return count
+    """Remove references to an explicitly deleted element only."""
+    return rewrite_refs(obj, typ, old, None)
 
 def merge_items(target, source):
     for k,v in source.items():
@@ -145,7 +171,16 @@ def merge_items(target, source):
             target.setdefault('详情',{})
             if not isinstance(target['详情'],dict): target['详情']={}
             for dk,dv in v.items():
-                target['详情'][dk]=append_detail_value(target['详情'].get(dk),dv,dk)
+                if dk in {'首次章节', '最近章节'}:
+                    # Chronology metadata is a range, not an append-only paragraph.
+                    numbers = parse_chapter_numbers(target['详情'].get(dk)) + parse_chapter_numbers(dv)
+                    if numbers:
+                        target['详情'][dk] = format_chapter(min(numbers) if dk == '首次章节' else max(numbers))
+                    else:
+                        # Invalid chronology must reach validation, not vanish.
+                        target['详情'][dk] = append_detail_value(target['详情'].get(dk), dv, dk)
+                else:
+                    target['详情'][dk]=append_detail_value(target['详情'].get(dk),dv,dk)
         elif k=='介绍' and isinstance(v,str) and v.strip():
             if not target.get(k): target[k]=v
             elif v not in target[k]: target[k]+='\n'+v
@@ -153,6 +188,8 @@ def merge_items(target, source):
             if target.get(k) in (None,'',[],{}) and v not in (None,'',[],{}): target[k]=v
 
 def apply_ops(data, patch):
+    original = copy.deepcopy(data)  # Any invalid operation aborts the entire patch.
+    data = copy.deepcopy(data)
     logs=[]; warns=[]; ops=patch.get('治理操作',{}) if isinstance(patch,dict) else {}
     if not isinstance(ops,dict): return data,logs,['治理操作不是对象']
     # 合并
@@ -166,8 +203,12 @@ def apply_ops(data, patch):
             for s in sources:
                 si=find_idx(data,typ,s)
                 if si<0: warns.append(f'找不到待并入{typ}:{s}'); continue
-                src=data[key][si]; old=names(src); merge_items(target,src)
-                target['别名']=append_unique(target.get('别名',[]), list(old-{target.get('名称')}))
+                src=data[key][si]
+                if src is target:
+                    raise ValueError(f'禁止自合并{typ}:{s}')
+                old=source_names(data,typ,src)
+                merge_items(target,src)
+                target['别名']=append_unique(target.get('别名',[]), sorted(old-{target.get('名称')}))
                 c=replace_refs(data,typ,old,target['名称'])
                 for idx,candidate in enumerate(data[key]):
                     if candidate is src and candidate is not target:
@@ -180,7 +221,9 @@ def apply_ops(data, patch):
         try:
             typ=op['类型']; old=op['原名称']; new=op['新名称']; key=TYPE_TO_COLLECTION[typ]; idx=find_idx(data,typ,old)
             if idx<0: raise ValueError(f'找不到{typ}:{old}')
-            item=data[key][idx]; oldnames=names(item)|{old}; item['名称']=new; item['别名']=append_unique(item.get('别名',[]), [old])
+            other=find_idx(data,typ,new)
+            if other >= 0 and other != idx: raise ValueError(f'重命名目标已存在{typ}:{new}')
+            item=data[key][idx]; oldnames=source_names(data,typ,item)|{old}; item['名称']=new; item['别名']=append_unique(item.get('别名',[]), [old])
             c=replace_refs(data,typ,oldnames,new); logs.append(f'重命名{typ}:{old}->{new}，替换{c}处')
         except Exception as e: warns.append(f'重命名失败: {e}')
     # 替换引用
@@ -236,7 +279,8 @@ def apply_ops(data, patch):
             try:
                 typ=op['类型']; name=op['名称']; key=TYPE_TO_COLLECTION[typ]; idx=find_idx(data,typ,name)
                 if idx<0: warns.append(f'找不到{bucket}{typ}:{name}'); continue
-                item=data[key].pop(idx); old=names(item)|{name}; c=remove_refs(data,typ,old)
+                item=data[key][idx]; old=source_names(data,typ,item)|{name}
+                data[key].pop(idx); c=remove_refs(data,typ,old)
                 if degrade and op.get('挂载到'):
                     m=op['挂载到']; midx=find_idx(data,m['类型'],m['名称'])
                     if midx>=0:
@@ -246,7 +290,7 @@ def apply_ops(data, patch):
                         host['详情'][detail_key]=append_detail_value(host['详情'].get(detail_key),detail_value,detail_key)
                 logs.append(f'{bucket}{typ}:{name}，移除引用{c}处')
             except Exception as e: warns.append(f'{bucket}失败: {e}')
-    return data,logs,warns
+    return (original, [], warns) if warns else (data, logs, warns)
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument('story_json'); ap.add_argument('patch_json'); ap.add_argument('--out',default=''); ap.add_argument('--dry-run',action='store_true'); ap.add_argument('--backup',action='store_true')
@@ -254,7 +298,10 @@ def main():
     print('=== 治理操作执行结果 ===')
     for l in logs: print('  - '+l)
     for w in warns: print('  ! '+w)
-    if args.dry_run: return 0 if not warns else 2
+    if warns:
+        print('治理操作未完整通过，未写入任何修改。')
+        return 1
+    if args.dry_run: return 0
     out=args.out or args.story_json
     if args.backup and out==args.story_json:
         # 备份统一放到 源同级/故事结构版本/备份/，避免根目录被 .bak 堆积

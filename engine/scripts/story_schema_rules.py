@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from element_identity import build_lookup_index
+
 import json
 import re
 from pathlib import Path
@@ -221,15 +223,14 @@ def alias_to_name_maps(data: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     if not isinstance(data, dict):
         return maps
     for collection_key in COLLECTION_KEYS:
-        for item in data.get(collection_key, []) or []:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("名称")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            for alias in item.get("别名", []) or []:
-                if isinstance(alias, str) and alias.strip() and alias.strip() not in maps[collection_key]:
-                    maps[collection_key][alias.strip()] = name.strip()
+        items = data.get(collection_key, []) or []
+        names, aliases = build_lookup_index(items)
+        # A reference to a canonical name must never be redirected by another
+        # element's alias. Ambiguous aliases remain unresolved for validation.
+        maps[collection_key] = {
+            alias: items[index]["名称"] for alias, index in aliases.items()
+            if index is not None and alias not in names and items[index].get("名称")
+        }
     return maps
 
 

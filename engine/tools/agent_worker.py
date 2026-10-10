@@ -39,10 +39,11 @@ def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> st
     """Return the strictest native schema available for one JSON artifact."""
     if len(expected_outputs) != 1 or expected_outputs[0].suffix.lower() != ".json":
         return ""
-    if task_type not in {"delta", "repair_chapter"}:
+    if task_type not in JSON_TASK_TYPES:
         return JSON_OBJECT_SCHEMA
     try:
-        schema = json.loads(DELTA_SCHEMA_PATH.read_text(encoding="utf-8"))
+        schema_path = DELTA_SCHEMA_PATH if task_type in {"delta", "repair_chapter"} else DELTA_SCHEMA_PATH.with_name("audit_correction.schema.json")
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return JSON_OBJECT_SCHEMA
     # Provider validation does not need documentation-only metadata, and

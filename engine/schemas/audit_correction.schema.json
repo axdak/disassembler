@@ -3,6 +3,8 @@
   "$comment": "治理补丁顶层结构提示。用于任务包内引导 Agent 输出 governance-mode Delta。集合内元素字段、引用、章节/时间、受控标签等强校验以 scripts/validate_delta.py（规则源 scripts/story_schema_rules.py）为准。治理操作的确定性执行由 scripts/apply_governance_ops.py 负责。",
   "type": "object",
   "properties": {
+    "章节": { "type": "string" },
+    "介绍": { "type": "object" },
     "章节范围": {
       "type": "string",
       "description": "本次治理覆盖的章节范围，如 第001-005章"
@@ -184,6 +186,7 @@
       "description": "可选；本次治理的目标描述"
     }
   },
-  "required": ["章节范围", "新增元素", "修改元素"],
-  "additionalProperties": false
+  "required": ["新增元素", "修改元素"],
+  "anyOf": [{"required": ["章节范围"]}, {"required": ["章节"]}],
+  "additionalProperties": true
 }

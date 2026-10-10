@@ -192,6 +192,7 @@ def test_process_delta_modified_event_does_not_require_time_matching_involved_ch
 
 def test_process_delta_modified_event_does_not_require_involved_chapters():
     current = base_story()
+    current["事件集"] = [{"名称": "既有事件", "详情": {"涉及章节": "0001"}}]
     empty = {k: [] for k in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集"]}
     delta = {
         "章节": "第001章 测试",

@@ -12,6 +12,8 @@ Delta 入库前校验器。
 
 from __future__ import annotations
 
+from element_identity import build_lookup_index, find_index, missing_target_message
+
 import argparse
 import json
 import os
@@ -164,7 +166,7 @@ def issue_ref(
         errors.append(msg)
 
 
-def validate_types(collection_key: str, item: Dict[str, Any], label: str, errors: List[str], warnings: List[str]) -> None:
+def validate_types(collection_key: str, item: Dict[str, Any], label: str, errors: List[str], warnings: List[str], *, partial: bool = False) -> None:
     valid = VALID_FIELDS[collection_key]
     for field in item.keys():
         if field not in valid:
@@ -199,6 +201,10 @@ def validate_types(collection_key: str, item: Dict[str, Any], label: str, errors
             errors.append(f"{label}.详情 必须包含首次章节和最近章节")
         else:
             for field in TRACE_DETAIL_FIELDS:
+                # A modification inherits omitted metadata from the existing
+                # element; explicit invalid values must still fail validation.
+                if partial and field not in detail:
+                    continue
                 value = detail.get(field)
                 if not isinstance(value, str) or not value or normalize_chapter_value(value) != value:
                     errors.append(f"{label}.详情.{field} 必须是固定宽度章节序号，例如0001")
@@ -214,11 +220,13 @@ def validate_types(collection_key: str, item: Dict[str, Any], label: str, errors
                 errors.append(f"{label}.详情.首次章节 不得晚于 最近章节")
     if collection_key == "事件集":
         involved = detail.get("涉及章节") if isinstance(detail, dict) else None
+        if partial and isinstance(detail, dict) and "涉及章节" not in detail:
+            return
         if not isinstance(involved, str) or not involved or normalize_involved_chapters(involved) != involved:
             errors.append(f"{label}.详情.涉及章节 必须为固定宽度、升序、去重的字符串")
         else:
             expected_time = chapter_time(first_involved_chapter(item))
-            if item.get("时间") != expected_time:
+            if (not partial or "时间" in item) and item.get("时间") != expected_time:
                 errors.append(f"{label}.时间 必须等于最小涉及章节对应章节时间[{expected_time}]")
 
 
@@ -323,12 +331,7 @@ def validate_process_patch_item(
 
 
 def existing_event_by_name_or_alias(current: Dict[str, Any], name: str) -> Dict[str, Any] | None:
-    for event in current.get("事件集", []) or []:
-        if not isinstance(event, dict):
-            continue
-        if event.get("名称") == name or name in (event.get("别名") or []):
-            return event
-    return None
+    return _find_governed_item(current, "事件集", name)
 
 
 def validate_refs(collection_key: str, item: Dict[str, Any], label: str, name_sets: Dict[str, Set[str]], alias_maps: Dict[str, Dict[str, str]], errors: List[str], warnings: List[str], mode: str) -> None:
@@ -359,10 +362,18 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
     warnings: List[str] = []
     name_sets = merge_name_sets(current, delta)
     alias_maps = alias_to_name_maps(current)
-    existing_name_or_alias = {k: set(v) for k, v in name_sets.items()}
-    for k, mapping in alias_maps.items():
-        existing_name_or_alias[k].update(mapping.keys())
-
+    # Existing declarations remain authoritative when an explicit addition
+    # repeats them; new names in the same patch may also be modified.
+    additions = delta.get("新增元素")
+    additions = additions if isinstance(additions, dict) else {}
+    indexes = {}
+    for key in COLLECTION_KEYS:
+        items = list(current.get(key) or [])
+        declared = {item.get("名称") for item in items if isinstance(item, dict)}
+        new_items = additions.get(key)
+        if isinstance(new_items, list):
+            items.extend(item for item in new_items if isinstance(item, dict) and item.get("名称") not in declared)
+        indexes[key] = build_lookup_index(items)
     seen_in_delta = {k: set() for k in COLLECTION_KEYS}
     for section in ["新增元素", "修改元素"]:
         bucket = delta.get(section, {}) or {}
@@ -394,8 +405,12 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                     if name.strip() in exact_name_sets(current).get(collection_key, set()):
                         warnings.append(f"{label} 已存在于当前结构，建议放入修改元素")
                 else:
-                    if name.strip() not in existing_name_or_alias.get(collection_key, set()) and mode != "process":
-                        warnings.append(f"{label} 在当前结构中不存在，merge后会变成新增元素")
+                    names, aliases = indexes[collection_key]
+                    try:
+                        if find_index(names, aliases, name.strip()) < 0:
+                            errors.append(f"{label} {missing_target_message(name.strip(), names)}")
+                    except ValueError as exc:
+                        errors.append(f"{label} {exc}")
 
                 if mode == "process":
                     validate_process_patch_item(collection_key, item, label, name_sets, alias_maps, errors, warnings)
@@ -404,7 +419,7 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                     # 过程库；缺失时回填脚本或修复任务补齐，不得静默放行。
                     validate_evidence_detail(item, label, errors)
                 else:
-                    validate_types(collection_key, item, label, errors, warnings)
+                    validate_types(collection_key, item, label, errors, warnings, partial=section == "修改元素")
                     validate_evidence_detail(item, label, errors)
                     validate_refs(collection_key, item, label, name_sets, alias_maps, errors, warnings, mode)
                 if mode == "governance" and collection_key == "事件集":
@@ -434,12 +449,12 @@ def _validate_tag_list(value: Any, field: str, label: str, errors: List[str]) ->
 
 
 def _find_governed_item(current: Dict[str, Any], collection_key: str, name: str) -> Dict[str, Any] | None:
-    for item in current.get(collection_key, []) or []:
-        if not isinstance(item, dict):
-            continue
-        if item.get("名称") == name or name in (item.get("别名") or []):
-            return item
-    return None
+    items = current.get(collection_key, []) or []
+    try:
+        index = find_index(*build_lookup_index(items), name)
+    except ValueError:
+        return None  # Ambiguous identities are not valid operation targets.
+    return items[index] if index >= 0 else None
 
 
 def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], mode: str) -> List[str]:

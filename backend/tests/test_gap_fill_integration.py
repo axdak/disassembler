@@ -284,6 +284,8 @@ def test_maintenance_task_events_carry_task_id_and_project_id(app_client):
     ).json()
     _wait(lambda: _task_status(client, pid, done["id"]) == "done")
 
+    # Persistence precedes event delivery; wait for the observable event too.
+    _wait(lambda: any(e["type"] == "task_done" and e.get("task_id") == done["id"] for e in events))
     task_events = [e for e in events if e["type"].startswith("task_")]
     assert task_events
     for e in task_events:

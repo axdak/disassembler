@@ -30,6 +30,8 @@ Delta合并脚本 - 将单章Delta合并到增量JSON（字段级深度合并）
     ...
 """
 
+from element_identity import build_lookup_index, find_index, index_item, missing_target_message
+
 import sys
 import os
 import json
@@ -125,35 +127,6 @@ def ensure_skeleton(incremental):
         elif key != "介绍" and not isinstance(incremental[key], list):
             incremental[key] = []
     return incremental
-
-
-def build_lookup_index(existing_items):
-    """
-    构建 名称 + 别名 → 索引 的查找表。
-    返回:
-        name_index: {名称: 索引}
-        alias_index: {别名: 索引}  (别名命中时也指向同一元素)
-    同一个别名若被多个元素声明，保留第一个。
-    """
-    name_index = {}
-    alias_index = {}
-    for i, item in enumerate(existing_items):
-        name = item.get(NAME_FIELD, "")
-        if name and name not in name_index:
-            name_index[name] = i
-        for alias in item.get(ALIAS_FIELD, []) or []:
-            if alias and alias not in alias_index and alias not in name_index:
-                alias_index[alias] = i
-    return name_index, alias_index
-
-
-def find_index(name_index, alias_index, name):
-    """按名称→别名顺序查找元素索引，找不到返回 -1。"""
-    if name in name_index:
-        return name_index[name]
-    if name in alias_index:
-        return alias_index[name]
-    return -1
 
 
 def merge_list_field(existing_list, new_list):
@@ -377,12 +350,13 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
             if idx >= 0:
                 # 命中已有元素 → 字段级深度合并
                 deep_merge_item(existing_items[idx], item, collection_key, chapter_prefix)
-                # 合并后把可能新增的别名也登记进 alias_index
-                for alias in item.get(ALIAS_FIELD, []) or []:
-                    if alias and alias not in alias_index and alias not in name_index:
-                        alias_index[alias] = idx
+                # 新别名也必须保留冲突信息，不再静默选择第一个。
+                index_item(name_index, alias_index, existing_items[idx], idx)
                 updated += 1
             else:
+                if is_modified_bucket:
+                    raise ValueError(missing_target_message(name, name_index))
+                # 只有显式新增可以创建档案；未知修改不能改变操作语义。
                 # 真正的新元素 → 追加
                 # 先做一次自洽清洗（保证结构完整）
                 clean = {}
@@ -397,11 +371,7 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
                 else:
                     existing_items.append(clean)
                     new_idx = len(existing_items) - 1
-                if name not in name_index:
-                    name_index[name] = new_idx
-                for alias in clean.get(ALIAS_FIELD, []) or []:
-                    if alias and alias not in alias_index and alias not in name_index:
-                        alias_index[alias] = new_idx
+                    index_item(name_index, alias_index, clean, new_idx)
                 added += 1
 
     return existing_items, added, updated, skipped
