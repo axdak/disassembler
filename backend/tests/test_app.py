@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -78,6 +79,54 @@ def test_project_crud(client, auth, tmp_path):
     assert st["current_stage"]  # 新项目 -> 第一阶段
     assert client.delete(f"/projects/{pid}", headers=auth).status_code == 200
     assert client.get(f"/projects/{pid}", headers=auth).status_code == 404
+
+
+def test_run_range_is_saved_per_project_and_survives_database_reopen(client, auth, tmp_path):
+    first = client.post("/projects", json={"path": str(tmp_path / "first")}, headers=auth).json()["id"]
+    second = client.post("/projects", json={"path": str(tmp_path / "second")}, headers=auth).json()["id"]
+
+    saved = client.put(
+        f"/projects/{first}/run-range", json={"end_chapter_seq": 12}, headers=auth
+    )
+    assert saved.status_code == 200
+    assert saved.json()["run_end_chapter_seq"] == 12
+    assert client.get(f"/projects/{first}", headers=auth).json()["project"]["run_end_chapter_seq"] == 12
+    assert client.get(f"/projects/{second}", headers=auth).json()["project"]["run_end_chapter_seq"] == 0
+    assert client.put(f"/projects/{first}/run-range", json={"end_chapter_seq": -1}, headers=auth).status_code == 422
+    assert client.put("/projects/999999/run-range", json={"end_chapter_seq": 1}, headers=auth).status_code == 404
+
+    # A fresh connection models an app restart without interrupting the test backend.
+    reopened = Database(client.app.state.db.path)
+    try:
+        assert reopened.get_project(first)["run_end_chapter_seq"] == 12
+    finally:
+        reopened.close()
+
+
+def test_existing_project_table_gains_run_range_column(tmp_path):
+    db_path = tmp_path / "old.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+            "path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO projects(name, path, created_at, updated_at) VALUES ('旧项目', 'book', '', '')"
+        )
+        conn.execute(
+            "CREATE TABLE runs (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, "
+            "status TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, rc INTEGER, config_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO runs(id, project_id, status, started_at, config_json) "
+            "VALUES (1, 1, 'done', '', '{\"end_chapter_seq\": 7}')"
+        )
+    migrated = Database(db_path)
+    try:
+        assert migrated.get_project(1)["run_end_chapter_seq"] == 7
+        assert migrated.set_project_run_end_chapter_seq(1, 9)["run_end_chapter_seq"] == 9
+    finally:
+        migrated.close()
 
 
 def test_run_lifecycle_and_events(client, auth, tmp_path):

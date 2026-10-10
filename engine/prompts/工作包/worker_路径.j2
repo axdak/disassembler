@@ -20,3 +20,4 @@ inputs: [task_type, task_pack, expected_output_text, output_kind, guidance]
 5. 不要创建脚本、批处理器、调度器、提示词文件或额外产物。
 6. 不要处理任务包范围外的章节或审计区间。
 7. 修复任务只重写期望的目标产物内容。
+{% if output_kind == "JSON" %}8. JSON 顶层必须是单个对象（以 { 开始、以 } 结束），禁止输出数组、字符串、null、Markdown 代码块或解释文字。{% endif %}

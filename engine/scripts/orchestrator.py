@@ -34,11 +34,14 @@ from run_pipeline import (
     cmd_run,
     cmd_run_interleaved,
     cmd_visual_assets_auto,
+    chapter_files,
+    is_chapter_complete,
     latest_analysis_manifest,
     run_cmd,
     run_multi_output_worker,
     run_worker,
     script_path,
+    seq_from_file,
     set_cancel_event,
     write_fullbook_partial_worker_pack,
     write_fullbook_reduce_worker_pack,
@@ -66,6 +69,7 @@ class Config:
     analysis_concurrency: int = 1  # 分析阶段并行度（delta 仍串行）
     per_chapter_concurrency: int = 2  # 分章任务（章节结构/视觉资产）并行度；1=逐章串行（兼容旧行为）
     chapter_mode: str = "two_phase"  # two_phase | interleaved
+    end_chapter_seq: int = 0  # 0=全书；正数表示运行至该章节（含）
     fullbook_tasks: tuple = FULLBOOK_TASKS
     export_source: str = "final"
     # 任务包上下文压缩策略（可经设置页配置）
@@ -103,6 +107,7 @@ class Orchestrator:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
         set_cancel_event(self._cancel)
         try:
+            self._reconcile_chapter_scope()
             self._reconcile_recovery_state()
             self.emit("pipeline_start", stage=self.state.current_stage)
             while not self.state.is_done():
@@ -140,6 +145,25 @@ class Orchestrator:
         self.state.last_error = f"自动恢复回退到 {stage}: {reason}"
         self.state.save()
         self.emit("recovery_rewind", stage=stage, detail=reason)
+
+    def _reconcile_chapter_scope(self) -> None:
+        """运行范围变化后重走章节与下游阶段，已有单章产物由各阶段幂等跳过。"""
+        if self.state.end_chapter_seq == self.config.end_chapter_seq:
+            return
+        if self.config.end_chapter_seq:
+            # 过程故事结构已合入的后续章节不能仅靠改范围撤回；避免生成误称为
+            # “截止至 N 章”但仍包含 N 章以后内容的全书分析。
+            beyond = [seq_from_file(ch) for ch in chapter_files(self.project_dir)
+                      if seq_from_file(ch) > self.config.end_chapter_seq
+                      and is_chapter_complete(self.project_dir, ch)]
+            if beyond:
+                raise ValueError(
+                    f"第{min(beyond):03d}章已提交，无法直接把截止章改为"
+                    f"第{self.config.end_chapter_seq:03d}章；请在新项目中运行该范围"
+                )
+        self.state.end_chapter_seq = self.config.end_chapter_seq
+        self.state.fullbook_completed_tasks.clear()
+        self._rewind_to("chapter_analysis", "截止章节已变化")
 
     def _reconcile_recovery_state(self) -> None:
         """Verify terminal artifacts before trusting a late/done state checkpoint."""
@@ -270,7 +294,8 @@ class Orchestrator:
         return argparse.Namespace(
             project_dir=str(self.project_dir),
             max_pack_chars=self.config.max_pack_chars,
-            force_aggregate=False,
+            force_aggregate=False,  # 汇总阶段根据任务包范围与产物新鲜度自行判断复用
+            end_chapter_seq=self.config.end_chapter_seq,
             run_mode="worker",
             worker_provider="manual" if self.config.worker_command else self.config.worker_provider,
             worker_command=self.config.worker_command,
@@ -295,19 +320,25 @@ class Orchestrator:
             return self.config.worker_command
         return builtin_agent_worker_command(self.config.worker_provider)
 
+    def _chapter_spec(self) -> str:
+        """分析任务包使用与本次章节运行一致的范围。"""
+        return f"1-{self.config.end_chapter_seq}" if self.config.end_chapter_seq else "all"
+
     # ---- 阶段实现 ----
 
     def _stage_chapter_analysis(self) -> int:
         if self.config.chapter_mode == "interleaved":
             return cmd_run_interleaved(
                 self.project_dir, concurrency=self.config.analysis_concurrency,
-                emit=self.emit, **self._run_worker_kwargs(),
+                end_chapter_seq=self.config.end_chapter_seq, emit=self.emit, **self._run_worker_kwargs(),
             )
         return cmd_run(self.project_dir, phase="analysis",
-                        concurrency=self.config.analysis_concurrency, **self._run_worker_kwargs())
+                        concurrency=self.config.analysis_concurrency,
+                        end_chapter_seq=self.config.end_chapter_seq, **self._run_worker_kwargs())
 
     def _stage_chapter_delta(self) -> int:
-        return cmd_run(self.project_dir, phase="delta", **self._run_worker_kwargs())
+        return cmd_run(self.project_dir, phase="delta", end_chapter_seq=self.config.end_chapter_seq,
+                       **self._run_worker_kwargs())
 
     def _stage_chapter_structure(self) -> int:
         return cmd_chapter_structure_auto(self._auto_namespace())
@@ -351,7 +382,7 @@ class Orchestrator:
         # 1. 生成全书分析任务包（packs + manifest + reduce_prompt）
         rc = run_cmd([
             sys.executable, str(script_path("analysis_context_pack.py")), str(self.project_dir),
-            "--task", task, "--chapters", "all",
+            "--task", task, "--chapters", self._chapter_spec(),
             "--include-original", self.config.include_original,
             "--max-pack-chars", str(self.config.max_pack_chars),
             "--max-original-chars", str(self.config.max_original_chars),

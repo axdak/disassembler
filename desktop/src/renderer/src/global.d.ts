@@ -20,10 +20,12 @@ declare global {
       listProjects(): Promise<Project[]>
       createProject(path: string, name?: string): Promise<Project>
       projectStatus(id: number): Promise<Status>
+      updateProjectRunRange(id: number, endChapterSeq: number): Promise<Project>
       deleteProject(id: number): Promise<{ ok: boolean }>
       startRun(id: number, config?: Record<string, unknown>): Promise<{ run_id: number }>
       cancelRun(id: number): Promise<{ cancelled: boolean }>
       chapters(id: number): Promise<Chapter[]>
+      exportStoryer(id: number): Promise<{ path: string; chapter_count: number; missing_analysis: number }>
       artifact(id: number, path: string): Promise<Artifact>
       tasksCreate(id: number, type: string, params: Record<string, unknown>): Promise<WorkbenchTask>
       tasksList(id: number): Promise<WorkbenchTask[]>

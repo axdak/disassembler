@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     path TEXT NOT NULL UNIQUE,
+    run_end_chapter_seq INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -96,6 +97,30 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
+            # 旧数据库已有 projects 表时，CREATE TABLE 不会添加新列。
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(projects)")}
+            if "run_end_chapter_seq" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE projects ADD COLUMN run_end_chapter_seq INTEGER NOT NULL DEFAULT 0"
+                )
+                # 升级时用各项目最近一次运行的范围回填，已运行过的书无需重新填写。
+                rows = self._conn.execute(
+                    "SELECT project_id, config_json FROM runs ORDER BY id DESC"
+                ).fetchall()
+                restored: set[int] = set()
+                for row in rows:
+                    project_id = row["project_id"]
+                    if project_id in restored:
+                        continue
+                    restored.add(project_id)
+                    try:
+                        seq = json.loads(row["config_json"] or "{}").get("end_chapter_seq", 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if type(seq) is int and seq >= 0:
+                        self._conn.execute(
+                            "UPDATE projects SET run_end_chapter_seq=? WHERE id=?", (seq, project_id)
+                        )
             self._conn.commit()
 
     def close(self) -> None:
@@ -128,6 +153,16 @@ class Database:
         with self._lock:
             row = self._conn.execute("SELECT * FROM projects WHERE path=?", (path,)).fetchone()
             return dict(row) if row else None
+
+    def set_project_run_end_chapter_seq(self, project_id: int, seq: int) -> Optional[dict]:
+        """保存项目自己的运行截止章；0 表示全书。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE projects SET run_end_chapter_seq=?, updated_at=? WHERE id=?",
+                (seq, _now(), project_id),
+            )
+            self._conn.commit()
+            return self.get_project(project_id) if cur.rowcount else None
 
     def delete_project(self, project_id: int) -> None:
         with self._lock:

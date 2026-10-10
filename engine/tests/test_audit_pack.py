@@ -16,6 +16,7 @@ from run_pipeline import (
     artifact_paths,
     build_delta_story_context,
     cmd_run,
+    cmd_run_interleaved,
     commit_governance,
     prepare_audit_pack_or_split,
     run_periodic_governance,
@@ -111,6 +112,19 @@ def write_completed_chapter(project, seq):
         else:
             path.write_text("ok\n", encoding="utf-8")
     return chapter
+
+
+def write_no_change_correction(project, start, end):
+    """为指定已提交区间提供可校验的无变更治理补丁。"""
+    empty = {key: [] for key in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集", "其他事项集"]}
+    write_json(project / "质量治理" / "周期审计" / f"correction_{start:03d}-{end:03d}.json", {
+        "章节范围": f"第{start:03d}章-第{end:03d}章",
+        "治理类型": "no_change",
+        "质量说明": "已检查角色、事件、地点、线索、阵营、物品，无需合并或降级。",
+        "证据范围": [f"第{seq:03d}章" for seq in range(start, end + 1)],
+        "新增元素": empty,
+        "修改元素": empty,
+    })
 
 
 def test_audit_pack_cli_creates_review_package():
@@ -259,25 +273,79 @@ def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():
         assert load_status(status)["status"] == "awaiting_agent"
         assert not (project / "故事结构版本" / "story_after_ch006.json").is_file()
 
-        correction = project / "质量治理" / "周期审计" / "correction_001-005.json"
-        empty = {key: [] for key in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集"]}
-        write_json(correction, {
-            "章节范围": "第001章-第005章",
-            "治理类型": "no_change",
-            "质量说明": "已检查角色、事件、地点、线索、阵营、物品，无需合并或降级。",
-            "证据范围": ["第001章", "第002章", "第003章", "第004章", "第005章"],
-            "新增元素": empty,
-            "修改元素": empty,
-        })
+        write_no_change_correction(project, 1, 5)
 
+        rc = cmd_run(project)
+        assert rc == 2
+        tail_status = project / "质量治理" / "周期审计" / "audit_006-006.status.json"
+        assert load_status(tail_status)["status"] == "awaiting_agent"
+        write_no_change_correction(project, 6, 6)
         rc = cmd_run(project)
         assert rc == 0
         assert load_status(status)["status"] == "committed"
+        assert load_status(tail_status)["status"] == "committed"
         assert list((project / "质量治理" / "周期审计").glob("validate_*governance_*.txt"))
         assert not list((project / "质量治理" / "按需治理").glob("*governance_*.txt"))
         assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
 
     print("[OK] run 将周期审计交给Agent，提交真实补丁后继续下一章")
+
+
+def test_short_book_audits_final_partial_range_once():
+    """三章短书补审 001-003 尾段，续跑不重复提交。"""
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in range(1, 4):
+            write_completed_chapter(project, seq)
+
+        assert cmd_run(project) == 2
+        audit_dir = project / "质量治理" / "周期审计"
+        status = audit_dir / "audit_001-003.status.json"
+        assert load_status(status)["status"] == "awaiting_agent"
+
+        write_no_change_correction(project, 1, 3)
+        assert cmd_run(project) == 0
+        assert load_status(status)["status"] == "committed"
+        committed_diffs = list((project / "结构变更日志").glob("diff_governance_*.json"))
+
+        assert cmd_run(project) == 0
+        assert list((project / "结构变更日志").glob("diff_governance_*.json")) == committed_diffs
+
+
+def test_interleaved_run_audits_final_partial_range():
+    """交错流水线在全部章节提交后也补审不足一周期的尾段。"""
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in range(1, 4):
+            write_completed_chapter(project, seq)
+
+        rc = cmd_run_interleaved(
+            project, run_mode="worker", worker_provider="manual",
+            chapter_command="unused-worker", audit_command="",
+        )
+
+        assert rc == 2
+        status = project / "质量治理" / "周期审计" / "audit_001-003.status.json"
+        assert load_status(status)["status"] == "awaiting_agent"
+
+
+def test_full_periods_do_not_trigger_unbounded_whole_book_audit():
+    """十章书已有两个五章周期审计时，不再生成 001-010 大审计包。"""
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in range(1, 11):
+            write_completed_chapter(project, seq)
+        audit_dir = project / "质量治理" / "周期审计"
+        for start, end in ((1, 5), (6, 10)):
+            write_json(audit_dir / f"audit_{start:03d}-{end:03d}.status.json", {
+                "status": "committed", "range": f"{start:03d}-{end:03d}",
+            })
+
+        assert cmd_run(project) == 0
+        assert not (audit_dir / "audit_001-010.status.json").exists()
 
 
 def test_run_with_audit_worker_commits_periodic_audit_and_continues():
@@ -298,6 +366,7 @@ def test_run_with_audit_worker_commits_periodic_audit_and_continues():
             """
 import json
 import os
+import re
 from pathlib import Path
 
 task_type = os.environ["ND_TASK_TYPE"]
@@ -306,12 +375,16 @@ if task_type not in ("audit_correction", "audit_repair"):
 
 empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
 output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+match = re.fullmatch(r"correction_(\\d{3})-(\\d{3})\\.json", output.name)
+if match is None:
+    raise SystemExit(f"unexpected output: {output}")
+start, end = map(int, match.groups())
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps({
-    "章节范围": "第001章-第005章",
+    "章节范围": f"第{start:03d}章-第{end:03d}章",
     "治理类型": "no_change",
     "质量说明": "已检查角色、事件、地点、线索、阵营、物品，无需合并或降级。",
-    "证据范围": ["第001章", "第002章", "第003章", "第004章", "第005章"],
+    "证据范围": [f"第{seq:03d}章" for seq in range(start, end + 1)],
     "新增元素": empty,
     "修改元素": empty,
 }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -329,6 +402,8 @@ output.write_text(json.dumps({
         assert rc == 0
         status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
         assert load_status(status)["status"] == "committed"
+        tail_status = project / "质量治理" / "周期审计" / "audit_006-006.status.json"
+        assert load_status(tail_status)["status"] == "committed"
         assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
 
 
@@ -542,7 +617,8 @@ def test_chapter_delta_repairs_llm_json_before_validation():
 """
         (project / "章节处理" / "Delta" / f"{base}.json").write_text(malformed_delta, encoding="utf-8")
 
-        rc = cmd_run(project)
+        # 此用例只校验章节 Delta 的 JSON 修复，不启动独立的周期审计。
+        rc = cmd_run(project, audit_interval=0)
 
         assert rc == 0
         repaired = json.loads((project / "章节处理" / "Delta" / f"{base}.json").read_text(encoding="utf-8"))

@@ -44,6 +44,7 @@ class PipelineState:
     last_error: str = ""
     # 阶段5按分析维度落细粒度断点；崩溃恢复时只重跑缺失/损坏的维度。
     fullbook_completed_tasks: list[str] = field(default_factory=list)
+    end_chapter_seq: int = 0  # 上次运行范围；变更时编排器需从章节阶段续跑
 
     def _stage(self, stage: str) -> dict[str, Any]:
         return self.stages.setdefault(
@@ -101,6 +102,7 @@ class PipelineState:
             st.updated_at = d.get("updated_at", 0.0)
             st.last_error = d.get("last_error", "")
             st.fullbook_completed_tasks = list(d.get("fullbook_completed_tasks", []))
+            st.end_chapter_seq = d.get("end_chapter_seq", 0)
             return st
         st = cls(project_dir=str(project_dir))
         st.started_at = time.time()

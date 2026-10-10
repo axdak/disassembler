@@ -2,6 +2,7 @@ export interface Project {
   id: number
   name: string
   path: string
+  run_end_chapter_seq?: number
   created_at: string
   updated_at: string
 }

@@ -1,0 +1,71 @@
+/* Only the list body scrolls; the toolbar remains visible above it. */
+.chapters-workbench {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 190px);
+  min-height: 240px;
+}
+
+.chapters-toolbar {
+  flex: 0 0 auto;
+  padding: 8px 0;
+  background: #fff;
+}
+
+.chapters-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  /* Spacer replacement must not change the user's scroll position. */
+  overflow-anchor: none;
+  border: 1px solid #ddd;
+}
+
+.chapters-table {
+  width: 100%;
+  min-width: 1000px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.chapters-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #fafafa;
+  box-shadow: 0 1px 0 #ddd;
+}
+
+.chapters-table th {
+  height: 36px;
+  padding: 0 6px;
+}
+
+/* Fixed single-line cells preserve the virtualizer's 44px row geometry.
+   Full titles and errors remain available through native hover tooltips. */
+.chapters-table .chapter-row td {
+  padding: 0 6px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.chapter-cell {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 32px;
+  max-height: 32px;
+}
+
+/* Badge text must fit the cell even when its error message is very long. */
+.chapter-cell > span {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 20px;
+  vertical-align: middle;
+}

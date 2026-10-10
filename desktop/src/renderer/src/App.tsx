@@ -39,7 +39,8 @@ export function App() {
   const [ok, setOk] = useState('')
   const [drawer, setDrawer] = useState<ArtifactDrawerState>({ open: false, kind: 'artifact', path: '', content: '' })
 
-  const workbench = useProjectTasks(selected)
+  const workbench = useProjectTasks(selected, view === 'project' && tab === 'chapters')
+  const browsingChapters = view === 'project' && tab === 'chapters'
 
   async function refreshProjects() {
     try { setProjects((await window.api.listProjects()) as Project[]) } catch (e: any) { setErr(String(e)) }
@@ -64,25 +65,24 @@ export function App() {
 
   useEffect(() => {
     if (selected == null) { setStatus(null); return }
+    // 章节页使用已有项目概况；暂停会扫描全书的 1.5 秒状态轮询。
+    // 离开章节页后立即恢复查询，更新流水线概览。
+    if (browsingChapters) return
     let stop = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
       try { const s = (await window.api.projectStatus(selected)) as Status; if (!stop) setStatus(s) } catch { /* ignore */ }
-      if (!stop) setTimeout(poll, 1500)
+      if (!stop) timer = setTimeout(poll, 1500)
     }
     poll()
-    return () => { stop = true }
-  }, [selected])
+    return () => { stop = true; if (timer) clearTimeout(timer) }
+  }, [selected, browsingChapters])
 
   useEffect(() => {
     if (selected != null && tab === 'chapters') {
       window.api.chapters(selected).then((c) => setChapters(c as Chapter[])).catch(() => {})
-      // 章节卡片优先用 artifactStatus；legacy 编排器只发 stage_*/pipeline_*
-      // 事件（非 task_*），不触发 useProjectTasks 刷新，导致切回章节 tab 时
-      // delta 卡片停留在旧快照（明明文件已生成却显示未生成）。这里随章节
-      // 列表一起重拉 artifactStatus。
-      workbench.refresh().catch(() => {})
     }
-  }, [selected, tab, workbench.refresh])
+  }, [selected, tab])
 
   useEffect(() => {
     if (selected != null && tab === 'logs') {
@@ -116,9 +116,16 @@ export function App() {
       refreshProjects()
     } catch (e: any) { setErr(String(e)) }
   }
-  async function run() {
+  async function run(endChapterSeq: number) {
     if (selected == null) return
-    try { await window.api.startRun(selected) } catch (e: any) { setErr(String(e)) }
+    try { await window.api.startRun(selected, { end_chapter_seq: endChapterSeq }) } catch (e: any) { setErr(String(e)) }
+  }
+  async function saveRunRange(endChapterSeq: number) {
+    if (selected == null) return
+    // The returned project is the saved source of truth; keep the current view in sync.
+    const project = await window.api.updateProjectRunRange(selected, endChapterSeq)
+    setStatus((previous) => previous?.project.id === selected
+      ? { ...previous, project } : previous)
   }
   async function cancel() {
     if (selected == null) return
@@ -204,7 +211,7 @@ export function App() {
         <main style={{ flex: 1, padding: 12, overflowY: 'auto', position: 'relative' }}>
           {view === 'settings' ? (
             <SettingsView settings={settings} setSettings={setSettings} onSave={saveSettings} />
-          ) : status && selected != null ? (
+          ) : status && selected != null && status.project.id === selected ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
                 <h2 style={{ margin: 0 }}>{status.project.name}</h2>
@@ -216,12 +223,14 @@ export function App() {
               <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>{status.project.path}</div>
               {tab === 'overview' && (
                 <OverviewTab
+                  key={selected}
                   projectId={selected}
                   status={status}
                   events={visibleEvents}
                   tasks={workbench.tasks}
                   artifactStatus={workbench.artifactStatus}
                   onRun={run}
+                  onSaveRange={saveRunRange}
                   onCancel={cancel}
                   onDelete={del}
                   onOpenLogs={() => setTab('logs')}
@@ -229,8 +238,11 @@ export function App() {
               )}
               {tab === 'chapters' && (
                 <ChaptersTab
+                  key={selected}
                   chapters={chapters}
                   artifactStatus={workbench.artifactStatus}
+                  lastArtifactRefreshAt={workbench.lastArtifactRefreshAt}
+                  onRefreshStatus={workbench.refresh}
                   onCreateTask={createTask}
                   onOpenArtifact={loadArtifact}
                   runningTaskId={workbench.tasks.find((t) => t.status === 'running')?.id ?? null}
@@ -248,12 +260,14 @@ export function App() {
               {tab === 'governance' && (
                 <GovernanceTab
                   tasks={workbench.tasks}
+                  pipelineRunning={status.active_run?.status === 'running'}
                   onCreateTask={createTask}
                   onOpenArtifact={loadArtifact}
                 />
               )}
               {tab === 'export' && (
                 <ExportTab
+                  projectId={selected}
                   artifactStatus={workbench.artifactStatus}
                   onCreateTask={createTask}
                   onOpenArtifact={loadArtifact}

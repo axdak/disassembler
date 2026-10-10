@@ -50,11 +50,21 @@ function registerIpc(): void {
   ipcMain.handle('nd:projects:list', () => bget('/projects'))
   ipcMain.handle('nd:projects:create', (_e, body: { path: string; name?: string }) => bpost('/projects', body))
   ipcMain.handle('nd:projects:status', (_e, id: number) => bget(`/projects/${id}`))
+  // Keep each project's run limit in the backend database across desktop restarts.
+  ipcMain.handle('nd:projects:runRange', (_e, id: number, endChapterSeq: number) =>
+    fetch(`${backendBase}/projects/${id}/run-range`, {
+      method: 'PUT',
+      headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ end_chapter_seq: endChapterSeq }),
+    }).then(parseBackendResponse))
   ipcMain.handle('nd:projects:delete', (_e, id: number) => bdel(`/projects/${id}`))
   ipcMain.handle('nd:projects:run', (_e, id: number, config?: Record<string, unknown>) =>
     bpost(`/projects/${id}/run`, { config: config || {} }))
   ipcMain.handle('nd:projects:cancel', (_e, id: number) => bpost(`/projects/${id}/cancel`, {}))
   ipcMain.handle('nd:projects:chapters', (_e, id: number) => bget(`/projects/${id}/chapters`))
+  // Export keeps the final structure intact and writes a separate Storyer-ready JSON.
+  ipcMain.handle('nd:projects:exportStoryer', (_e, id: number) =>
+    bpost(`/projects/${id}/export/storyer`, {}))
   ipcMain.handle('nd:projects:artifact', (_e, id: number, path: string) =>
     bget(`/projects/${id}/artifact?path=${encodeURIComponent(path)}`))
   // Workbench tasks: create/list/get/cancel/retry

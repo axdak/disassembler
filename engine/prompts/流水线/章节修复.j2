@@ -1,6 +1,6 @@
 ---
 name: 章节修复
-description: 单章Delta修复任务包,按校验报告修复本章Delta
+description: 单章Delta修复任务包,按校验报告和原始任务上下文修复本章Delta
 inputs: [chapter_seq, reason, reports]
 ---
 # 第{{ "%03d" | format(chapter_seq) }}章修复任务
@@ -15,4 +15,10 @@ inputs: [chapter_seq, reason, reports]
 ```
 
 {% endfor %}
-请只修复本章 Delta JSON，不要重写完整故事结构JSON。
+## 原始 Delta 任务与章节上下文
+
+以下原始任务定义了完整输出结构、章节材料和故事结构上下文。请结合上方错误重新生成完整的本章 Delta JSON；不要只返回字段名、补丁片段或修复说明。
+
+{{ base_task | default("") }}
+
+请只修复本章 Delta JSON，不要重写完整故事结构JSON。最终输出必须是完整 JSON 对象。

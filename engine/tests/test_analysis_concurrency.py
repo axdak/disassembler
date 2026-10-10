@@ -1,6 +1,11 @@
 import json
+import os
+import subprocess
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 import run_pipeline
 from run_pipeline import cmd_run_analysis
@@ -72,9 +77,7 @@ def test_cmd_run_interleaved(tmp_path, monkeypatch):
 
 
 def test_stream_shell_command_cancel(tmp_path):
-    import os
     import threading
-    import run_pipeline
     ev = threading.Event()
     ev.set()  # 预先取消，避免定时器线程跨测试泄漏
     run_pipeline.set_cancel_event(ev)
@@ -84,3 +87,53 @@ def test_stream_shell_command_cancel(tmp_path):
         assert rc == 130
     finally:
         run_pipeline.set_cancel_event(threading.Event())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object regression")
+def test_worker_descendants_die_when_controller_is_terminated(tmp_path):
+    """Abrupt backend exit must not leave a provider able to write late output."""
+    marker = tmp_path / "late-output.txt"
+    ready = tmp_path / "child-ready.txt"
+    child = tmp_path / "child.py"
+    launcher = tmp_path / "launcher.py"
+    controller = tmp_path / "controller.py"
+    scripts_dir = Path(run_pipeline.__file__).resolve().parent
+
+    child.write_text(
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "ready, marker = map(Path, sys.argv[1:3])\n"
+        "ready.write_text('ready', encoding='utf-8')\n"
+        "time.sleep(1.0)\n"
+        "marker.write_text('late', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    launcher.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, *sys.argv[1:]])\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    # Keep the controller source explicit so quoting remains stable on Windows.
+    controller.write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(scripts_dir)!r})\n"
+        "import run_pipeline\n"
+        "run_pipeline.stream_shell_command(sys.argv[1], Path(sys.argv[2]), dict(os.environ), 30)\n",
+        encoding="utf-8",
+    )
+    command = subprocess.list2cmdline(
+        [sys.executable, str(launcher), str(child), str(ready), str(marker)]
+    )
+    proc = subprocess.Popen([sys.executable, str(controller), command, str(tmp_path)])
+    deadline = time.time() + 5
+    while time.time() < deadline and not ready.exists():
+        time.sleep(0.05)
+    assert ready.exists(), "provider child did not start"
+
+    proc.terminate()
+    proc.wait(timeout=5)
+    time.sleep(1.3)
+
+    assert not marker.exists(), "provider descendant survived the controller process"

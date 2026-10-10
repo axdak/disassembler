@@ -38,6 +38,7 @@ class Project(BaseModel):
     id: int
     name: str
     path: str
+    run_end_chapter_seq: int = 0  # 项目级自动运行截止章；0 表示全书
     created_at: str
     updated_at: str
 
@@ -59,6 +60,7 @@ class RunConfig(BaseModel):
     analysis_concurrency: int = Field(default=1, gt=0)
     per_chapter_concurrency: int = Field(default=2, gt=0)  # 分章任务并行度；1=逐章串行
     chapter_mode: Literal["two_phase", "interleaved"] = "two_phase"
+    end_chapter_seq: int = Field(default=0, ge=0)  # 0=全书；正数为本次运行包含的最后章节序号
     fullbook_tasks: list[str] = Field(default_factory=lambda: list(DEFAULT_FULLBOOK_TASKS))
     export_source: Literal["final", "process"] = "final"
     # 任务包上下文压缩策略（可经设置页配置）
@@ -74,6 +76,10 @@ class RunConfig(BaseModel):
 
 class RunStart(BaseModel):
     config: RunConfig = Field(default_factory=RunConfig)
+
+
+class RunRangeUpdate(BaseModel):
+    end_chapter_seq: int = Field(ge=0)
 
 
 class Run(BaseModel):

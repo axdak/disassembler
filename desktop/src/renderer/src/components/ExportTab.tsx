@@ -16,10 +16,12 @@ const KINDS = [
 ] as const
 
 export function ExportTab({
+  projectId,
   artifactStatus,
   onCreateTask,
   onOpenArtifact,
 }: {
+  projectId: number
   artifactStatus: ArtifactStatusResponse | null
   onCreateTask: (type: 'export', params: Record<string, unknown>) => Promise<void>
   onOpenArtifact: (path: string) => void
@@ -27,6 +29,9 @@ export function ExportTab({
   const [source, setSource] = useState('final')
   const [kinds, setKinds] = useState<string[]>([])
   const [force, setForce] = useState(false)
+  const [storyerExport, setStoryerExport] = useState<{ path: string; chapter_count: number; missing_analysis: number } | null>(null)
+  const [storyerError, setStoryerError] = useState('')
+  const [storyerBusy, setStoryerBusy] = useState(false)
 
   function toggleKind(key: string) {
     setKinds((prev) => prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key])
@@ -36,6 +41,19 @@ export function ExportTab({
     if (kinds.length === 0) return
     await onCreateTask('export', { source, kinds, force })
     setForce(false)
+  }
+
+  async function exportStoryer() {
+    setStoryerBusy(true)
+    setStoryerError('')
+    try {
+      setStoryerExport(await window.api.exportStoryer(projectId))
+    } catch (error) {
+      setStoryerExport(null)
+      setStoryerError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setStoryerBusy(false)
+    }
   }
 
   const exports = artifactStatus?.exports ?? {}
@@ -71,6 +89,20 @@ export function ExportTab({
       <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
         <button onClick={submit} disabled={kinds.length === 0}>创建导出任务</button>
       </div>
+
+      <section style={{ marginTop: 20, borderTop: '1px solid #555', paddingTop: 10 }}>
+        <h4 style={{ margin: '0 0 6px' }}>故事家完整 JSON</h4>
+        <p style={{ fontSize: 13, margin: '0 0 8px' }}>将最终故事结构、原文章节和单章分析态合并到独立文件；原故事结构 JSON 保持不变。</p>
+        <button onClick={exportStoryer} disabled={storyerBusy}>{storyerBusy ? '正在生成…' : '合并章节和分析态'}</button>
+        {storyerError && <p role="alert" style={{ color: 'crimson' }}>{storyerError}</p>}
+        {storyerExport && (
+          <p role="status" style={{ fontSize: 13 }}>
+            已生成 {storyerExport.chapter_count} 章；缺少分析态 {storyerExport.missing_analysis} 章。{' '}
+            <button onClick={() => window.api.openInFolder(storyerExport.path)}>打开文件位置</button>
+            <br />{storyerExport.path}
+          </p>
+        )}
+      </section>
 
       {Object.keys(exports).length > 0 && (
         <>

@@ -42,6 +42,7 @@ def runconfig_to_config(rc: RunConfig) -> Config:
         analysis_concurrency=rc.analysis_concurrency,
         per_chapter_concurrency=rc.per_chapter_concurrency,
         chapter_mode=rc.chapter_mode,
+        end_chapter_seq=rc.end_chapter_seq,
         fullbook_tasks=tuple(rc.fullbook_tasks),
         export_source=rc.export_source,
         # 任务包上下文压缩策略（透传至 orchestrator.Config，再经 CLI 喂给 run_pipeline）

@@ -23,7 +23,7 @@ from db import Database
 from hub import BroadcastHub
 from models import (
     AppendApply, AppendPreview, FromBook, Project, ProjectCreate, QueueAdd, RecoverSnapshot,
-    Run, RunConfig, RunStart, SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
+    Run, RunConfig, RunRangeUpdate, RunStart, SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
 )
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
@@ -44,6 +44,7 @@ from artifact_status import (
     task_summary,
 )
 from revisions import project_revisions
+from storyer_export import export_storyer_document
 
 ARTIFACT_MAX_CHARS = 200_000
 
@@ -264,6 +265,14 @@ def create_app(
             stale_task_count=stale_task_count(Path(project["path"]), tasks, revisions=revisions),
         )
 
+    @app.put("/projects/{pid}/run-range", dependencies=[Depends(require_token)], response_model=Project)
+    def update_project_run_range(pid: int, body: RunRangeUpdate):
+        """保存概览页的截止章；重启后仍按项目回填。"""
+        project = app.state.db.set_project_run_end_chapter_seq(pid, body.end_chapter_seq)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        return project
+
     @app.delete("/projects/{pid}", dependencies=[Depends(require_token)])
     def delete_project(pid: int):
         _project_or_404(pid)
@@ -387,6 +396,15 @@ def create_app(
                 "error": card_row.error if card_row is not None else None,
             })
         return out
+
+    @app.post("/projects/{pid}/export/storyer", dependencies=[Depends(require_token)])
+    def project_storyer_export(pid: int):
+        """按当前最终结构和章节产物生成可由故事家一次导入的完整 JSON。"""
+        project = _project_or_404(pid)
+        try:
+            return export_storyer_document(Path(project["path"]))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get(
         "/projects/{pid}/artifacts/status",

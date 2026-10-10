@@ -154,6 +154,98 @@ def _get_cancel_event() -> "Optional[threading.Event]":
     return getattr(_cancel_local, "event", None)
 
 
+def _create_windows_kill_on_close_job(proc: "subprocess.Popen") -> object | None:
+    """Attach a worker launcher to a Windows job that dies with this process.
+
+    ``taskkill /T`` handles ordinary timeout paths, but it cannot run when the
+    desktop backend itself is terminated or restarted.  A kill-on-close job is
+    enforced by Windows, so provider descendants cannot survive that abrupt
+    shutdown and write stale artifacts later.
+    """
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    limits.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    configured = kernel32.SetInformationJobObject(
+        job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+    )
+    assigned = configured and kernel32.AssignProcessToJobObject(
+        job, wintypes.HANDLE(proc._handle)  # noqa: SLF001 - required Windows process handle
+    )
+    if not assigned:
+        kernel32.CloseHandle(job)
+        return None
+    return job
+
+
+def _close_windows_job(job: object | None) -> None:
+    """Close a Windows job handle, terminating any descendants still in it."""
+    if job is None or sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle(job)
+
+
 def _kill_tree(proc: "subprocess.Popen") -> None:
     """杀掉 proc 及其整棵子进程树。
 
@@ -192,6 +284,9 @@ def stream_shell_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+    # The OS closes this handle automatically even if the backend is killed,
+    # which prevents a detached provider from completing against stale state.
+    windows_job = _create_windows_kill_on_close_job(proc)
     output_queue: "queue.Queue[str]" = queue.Queue()
 
     def read_output() -> None:
@@ -217,34 +312,41 @@ def stream_shell_command(
             sys.stdout.write(line)
             sys.stdout.flush()
 
-    while True:
-        drain_output()
-        _ce = _get_cancel_event()
-        if _ce is not None and _ce.is_set():
-            _kill_tree(proc)
-            reader.join(timeout=1)
+    try:
+        while True:
             drain_output()
-            message = "[cancelled by user]\n"
-            output_parts.append(message)
-            sys.stdout.write(message)
-            sys.stdout.flush()
-            return 130, "".join(output_parts)
-        if proc.poll() is not None:
-            break
-        if deadline is not None and time.monotonic() >= deadline:
-            _kill_tree(proc)
-            reader.join(timeout=1)
-            drain_output()
-            message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=""), timeout)
-            output_parts.append(message)
-            sys.stdout.write(message)
-            sys.stdout.flush()
-            return 124, "".join(output_parts)
-        time.sleep(0.1)
+            _ce = _get_cancel_event()
+            if _ce is not None and _ce.is_set():
+                _close_windows_job(windows_job)
+                windows_job = None
+                _kill_tree(proc)
+                reader.join(timeout=1)
+                drain_output()
+                message = "[cancelled by user]\n"
+                output_parts.append(message)
+                sys.stdout.write(message)
+                sys.stdout.flush()
+                return 130, "".join(output_parts)
+            if proc.poll() is not None:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                _close_windows_job(windows_job)
+                windows_job = None
+                _kill_tree(proc)
+                reader.join(timeout=1)
+                drain_output()
+                message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=""), timeout)
+                output_parts.append(message)
+                sys.stdout.write(message)
+                sys.stdout.flush()
+                return 124, "".join(output_parts)
+            time.sleep(0.1)
 
-    reader.join(timeout=1)
-    drain_output()
-    return proc.returncode or 0, "".join(output_parts)
+        reader.join(timeout=1)
+        drain_output()
+        return proc.returncode or 0, "".join(output_parts)
+    finally:
+        _close_windows_job(windows_job)
 
 
 def ps_single_quote(value: str) -> str:
@@ -310,44 +412,52 @@ def run_visible_powershell_command(
             env=env,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
+        windows_job = _create_windows_kill_on_close_job(proc)
         deadline = time.monotonic() + timeout + 10 if timeout else None
-        while proc.poll() is None:
-            cancel_event = _get_cancel_event()
-            if cancel_event is not None and cancel_event.is_set():
-                _kill_tree(proc)
-                proc.wait()
-                return 130, "[cancelled by user]\n"
-            if deadline is not None and time.monotonic() >= deadline:
-                _kill_tree(proc)
-                proc.wait()
-                launcher_output = ""
-                message = timeout_output(
-                    subprocess.TimeoutExpired(command, timeout, output=launcher_output), timeout
-                )
-                previous = (
-                    log_path.read_text(encoding="utf-8", errors="replace")
-                    if log_path.exists() else ""
-                )
-                log_path.write_text(previous + message, encoding="utf-8")
-                return 124, message
-            time.sleep(0.1)
-        launcher_output = ""
-        output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else (launcher_output or "")
-        if launcher_output:
-            output = launcher_output + output
-        rc_path = log_path.with_suffix(".rc")
-        if rc_path.exists():
-            try:
-                returncode = int(rc_path.read_text(encoding="utf-8", errors="replace").strip())
-            except ValueError:
-                returncode = proc.returncode or 1
-            try:
-                rc_path.unlink()
-            except OSError:
-                pass
-        else:
-            returncode = proc.returncode or 0
-        return returncode, output
+        try:
+            while proc.poll() is None:
+                cancel_event = _get_cancel_event()
+                if cancel_event is not None and cancel_event.is_set():
+                    _close_windows_job(windows_job)
+                    windows_job = None
+                    _kill_tree(proc)
+                    proc.wait()
+                    return 130, "[cancelled by user]\n"
+                if deadline is not None and time.monotonic() >= deadline:
+                    _close_windows_job(windows_job)
+                    windows_job = None
+                    _kill_tree(proc)
+                    proc.wait()
+                    launcher_output = ""
+                    message = timeout_output(
+                        subprocess.TimeoutExpired(command, timeout, output=launcher_output), timeout
+                    )
+                    previous = (
+                        log_path.read_text(encoding="utf-8", errors="replace")
+                        if log_path.exists() else ""
+                    )
+                    log_path.write_text(previous + message, encoding="utf-8")
+                    return 124, message
+                time.sleep(0.1)
+            launcher_output = ""
+            output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else (launcher_output or "")
+            if launcher_output:
+                output = launcher_output + output
+            rc_path = log_path.with_suffix(".rc")
+            if rc_path.exists():
+                try:
+                    returncode = int(rc_path.read_text(encoding="utf-8", errors="replace").strip())
+                except ValueError:
+                    returncode = proc.returncode or 1
+                try:
+                    rc_path.unlink()
+                except OSError:
+                    pass
+            else:
+                returncode = proc.returncode or 0
+            return returncode, output
+        finally:
+            _close_windows_job(windows_job)
     finally:
         try:
             script_path.unlink()
@@ -546,6 +656,7 @@ def build_run_foreground_command(
     *,
     phase: str = "",
     max_chapters: int = 0,
+    end_chapter_seq: int = 0,
     audit_interval: int = 5,
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
     run_mode: str = "worker",
@@ -560,6 +671,8 @@ def build_run_foreground_command(
     args: List[str] = [sys.executable, str(Path(__file__).resolve()), "run", str(project_dir)]
     if max_chapters:
         args.extend(["--max-chapters", str(max_chapters)])
+    if end_chapter_seq:
+        args.extend(["--end-chapter-seq", str(end_chapter_seq)])
     if audit_interval != 5:
         args.extend(["--audit-interval", str(audit_interval)])
     if phase:
@@ -589,6 +702,7 @@ def build_analysis_auto_foreground_command(args: argparse.Namespace, task: str, 
     command_name = "visual-assets-auto" if task == "visual_assets" else "chapter-structure-auto"
     command: List[str] = [sys.executable, str(Path(__file__).resolve()), command_name, str(args.project_dir)]
     for name, flag, default in [
+        ("end_chapter_seq", "--end-chapter-seq", 0),
         ("include_original", "--include-original", "auto"),
         ("max_pack_chars", "--max-pack-chars", 70000),
         ("max_original_chars", "--max-original-chars", 6000),
@@ -1950,11 +2064,20 @@ def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_path
                 "name": rp.name,
                 "excerpt": rp.read_text(encoding="utf-8", errors="ignore")[:30000],
             })
+    # Repair workers need the original chapter material and Delta contract, not
+    # only a terse validator report.  Without this context a worker can produce
+    # a syntactically valid but meaningless fragment and repeat forever.
+    base_task = (
+        p["delta_task"].read_text(encoding="utf-8", errors="ignore")
+        if p["delta_task"].is_file()
+        else ""
+    )
     content = render_prompt(
         "流水线/章节修复.j2",
         chapter_seq=seq_from_file(chapter),
         reason=reason,
         reports=reports,
+        base_task=base_task,
     )
     p["repair"].parent.mkdir(parents=True, exist_ok=True)
     p["repair"].write_text(content, encoding="utf-8")
@@ -2017,6 +2140,26 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     if rc != 0:
         print(f"Delta LLM JSON 语法修复失败，见: {repair_json_report}")
         write_repair_pack(project_dir, chapter, "repair_llm_json.py失败", [repair_json_report])
+        return 1
+
+    # JSON arrays/strings are syntactically legal, so repair_llm_json cannot
+    # reject them.  Delta is contractually an object; fail here with an explicit
+    # report before generic coercion/compression obscures the real cause.
+    delta_payload = load_json(p["delta"], None)
+    if not isinstance(delta_payload, dict):
+        save_json(
+            p["delta_report"],
+            {
+                "passed": False,
+                "mode": "process",
+                "errors": [
+                    f"Delta顶层必须是对象，当前为{type(delta_payload).__name__}"
+                ],
+                "warnings": [],
+            },
+        )
+        print(f"Delta 顶层类型无效，见: {p['delta_report']}")
+        write_repair_pack(project_dir, chapter, "Delta顶层必须是对象", [p["delta_report"]])
         return 1
 
     # 入库前先做机械纠错：把 LLM 写错的类型/格式（bool/int、数组↔标量、章节号宽度、
@@ -2143,6 +2286,7 @@ def cmd_run_analysis(
     story_summary_max_items: int = 0,
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
+    end_chapter_seq: int = 0,
 ) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow.
 
@@ -2155,7 +2299,8 @@ def cmd_run_analysis(
     if not guard_single_unit_artifacts(project_dir):
         return 1
     ensure_story(project_dir)
-    files = chapter_files(project_dir)
+    files = [ch for ch in chapter_files(project_dir)
+             if not end_chapter_seq or seq_from_file(ch) <= end_chapter_seq]
     if not files:
         print("原文拆解目录中没有章节。先执行 split。")
         return 1
@@ -2265,6 +2410,43 @@ def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeo
     return 1
 
 
+def run_final_partial_governance(
+    project_dir: Path,
+    audit_interval: int,
+    audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    audit_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
+    rerun_command: str = "",
+    end_chapter_seq: int = 0,
+) -> int:
+    """全书提交后只补审不足一个周期的尾段，避免大书产生无界审计包。"""
+    if audit_interval <= 0:
+        return 0
+    chapters = [ch for ch in chapter_files(project_dir)
+                if not end_chapter_seq or seq_from_file(ch) <= end_chapter_seq]
+    if not chapters:
+        return 0
+    end = seq_from_file(chapters[-1])
+    remainder = end % audit_interval
+    if remainder == 0:
+        return 0
+    start = end - remainder + 1
+    if audit_range_is_resolved(project_dir, start, end):
+        return 0
+    return run_periodic_governance(
+        project_dir, start, end, audit_max_context_chars,
+        audit_command=audit_command,
+        worker_timeout_seconds=worker_timeout_seconds,
+        worker_retries=worker_retries,
+        worker_window=worker_window,
+        worker_loop=worker_loop,
+        rerun_command=rerun_command,
+    )
+
+
 def cmd_run_interleaved(
     project_dir: Path,
     run_mode: str = "auto",
@@ -2286,6 +2468,7 @@ def cmd_run_interleaved(
     story_summary_max_items: int = 0,
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
+    end_chapter_seq: int = 0,
 ) -> int:
     """交错流水线：N 个并行分析 worker 产出分析MD；1 个串行 delta worker 按章序消费。
 
@@ -2298,7 +2481,8 @@ def cmd_run_interleaved(
     if not guard_single_unit_artifacts(project_dir):
         return 1
     ensure_story(project_dir)
-    files = chapter_files(project_dir)
+    files = [ch for ch in chapter_files(project_dir)
+             if not end_chapter_seq or seq_from_file(ch) <= end_chapter_seq]
     if not files:
         print("原文拆解目录中没有章节。先执行 split。")
         return 1
@@ -2437,6 +2621,18 @@ def cmd_run_interleaved(
     if err["rc"]:
         print(f"交错流水线失败 rc={err['rc']}")
         return err["rc"]
+    # 满周期在逐章提交时审计；不足一周期的末尾章节在全书提交后补审。
+    rc = run_final_partial_governance(
+        project_dir, audit_interval, audit_max_context_chars,
+        end_chapter_seq=end_chapter_seq,
+        audit_command=audit_command,
+        worker_timeout_seconds=worker_timeout_seconds,
+        worker_retries=worker_retries,
+        worker_window=worker_window,
+        worker_loop="continuous",
+    )
+    if rc != 0:
+        return rc
     print("交错流水线完成：所有章节分析+delta 提交完成。")
     return 0
 
@@ -2456,13 +2652,15 @@ def cmd_run_delta(
     rerun_command: str = "",
     cancel_event: Optional["threading.Event"] = None,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
+    end_chapter_seq: int = 0,
 ) -> int:
     """Require all chapter analyses before entering the existing serial Delta flow."""
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
     ensure_story(project_dir)
-    files = chapter_files(project_dir)
+    files = [ch for ch in chapter_files(project_dir)
+             if not end_chapter_seq or seq_from_file(ch) <= end_chapter_seq]
     if not files:
         print("原文拆解目录中没有章节。先执行 split。")
         return 1
@@ -2514,6 +2712,7 @@ def cmd_run_delta(
         p["analysis_regenerate_task"].unlink(missing_ok=True)
     return cmd_run(
         project_dir,
+        end_chapter_seq=end_chapter_seq,
         max_chapters=max_chapters,
         audit_interval=audit_interval,
         audit_max_context_chars=audit_max_context_chars,
@@ -2551,6 +2750,7 @@ def cmd_run(
     story_summary_max_items: int = 0,
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
+    end_chapter_seq: int = 0,
 ) -> int:
     if cancel_event is not None:
         set_cancel_event(cancel_event)
@@ -2561,6 +2761,7 @@ def cmd_run(
         project_dir,
         phase=phase,
         max_chapters=max_chapters,
+        end_chapter_seq=end_chapter_seq,
         audit_interval=audit_interval,
         audit_max_context_chars=audit_max_context_chars,
         run_mode=mode,
@@ -2577,6 +2778,7 @@ def cmd_run(
     if phase == "analysis":
         return cmd_run_analysis(
             project_dir,
+            end_chapter_seq=end_chapter_seq,
             chapter_command=chapter_command,
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
@@ -2589,6 +2791,7 @@ def cmd_run(
     if phase == "delta":
         return cmd_run_delta(
             project_dir,
+            end_chapter_seq=end_chapter_seq,
             max_chapters=max_chapters,
             audit_interval=audit_interval,
             audit_max_context_chars=audit_max_context_chars,
@@ -2625,8 +2828,21 @@ def cmd_run(
     processed = 0
     while True:
         nxt = next_incomplete(project_dir)
-        if not nxt:
-            print("所有章节均已完成。")
+        if not nxt or (end_chapter_seq and seq_from_file(nxt) > end_chapter_seq):
+            # 本次范围处理完毕后，只补审范围内不足一个周期的尾段。
+            rc = run_final_partial_governance(
+                project_dir, audit_interval, audit_max_context_chars,
+                end_chapter_seq=end_chapter_seq,
+                audit_command=audit_command,
+                worker_timeout_seconds=worker_timeout_seconds,
+                worker_retries=worker_retries,
+                worker_window=worker_window,
+                worker_loop=worker_loop,
+                rerun_command=rerun_command,
+            )
+            if rc != 0:
+                return rc
+            print("本次范围内章节均已完成。")
             return 0
         seq = seq_from_file(nxt)
         p = artifact_paths(project_dir, nxt)
@@ -3202,6 +3418,9 @@ def run_analysis_context_pack_for_auto(args: argparse.Namespace, task: str, seq:
     ]
     if aggregate:
         cmd.append("--aggregate")
+        end_seq = getattr(args, "end_chapter_seq", 0)
+        if end_seq:
+            cmd.extend(["--chapters", f"1-{end_seq}"])
     else:
         cmd.extend([
             "--chapters", str(seq),
@@ -3272,7 +3491,9 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
     )
     rerun_command = build_analysis_auto_foreground_command(args, task, mode)
     print(f"{task} route: mode={mode} worker_provider={getattr(args, 'worker_provider', 'manual')}")
-    eligible = chapters_eligible_for_visual(project_dir)
+    end_seq = getattr(args, "end_chapter_seq", 0)
+    eligible = [seq for seq in chapters_eligible_for_visual(project_dir)
+                if not end_seq or seq <= end_seq]
     if not eligible:
         print("尚无任何章节具备章节分析MD；请先完成章节分析后再运行分章分析自动流程。")
         return 1
@@ -3362,8 +3583,21 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
 
     aggregate_marker = project_dir / "全书分析" / "视觉资产" / "视觉资产清单.md"
     if aggregate_marker.is_file() and aggregate_marker.stat().st_size > 0 and not getattr(args, "force_aggregate", False):
-        print("all per-chapter visual assets and top-level aggregate already exist.")
-        return 0
+        # 仅复用同一章节范围且晚于任务包生成的汇总；范围变化须重新汇总。
+        manifest_path = latest_analysis_manifest(project_dir, "visual_assets_aggregate")
+        desired_range = f"1-{end_seq}" if end_seq else "all"
+        if manifest_path is None:
+            reusable = not end_seq  # 兼容旧版全书产物未附带 manifest 的项目
+        else:
+            manifest = load_json(manifest_path, {}) or {}
+            reusable = (
+                isinstance(manifest, dict)
+                and manifest.get("chapter_range", "all") == desired_range
+                and aggregate_marker.stat().st_mtime_ns >= manifest_path.stat().st_mtime_ns
+            )
+        if reusable:
+            print("all per-chapter visual assets and top-level aggregate already exist.")
+            return 0
     rc = run_analysis_context_pack_for_auto(args, "visual_assets", aggregate=True)
     if rc != 0:
         return rc
@@ -3873,6 +4107,7 @@ def main() -> int:
     p_run = sub.add_parser("run", help="持续提交已具备产物的章节；周期审计任务由主控Agent处理后续提交")
     p_run.add_argument("project_dir")
     p_run.add_argument("--max-chapters", type=int, default=0)
+    p_run.add_argument("--end-chapter-seq", type=non_negative_int, default=0, help="包含的最后章节序号；0 表示全书")
     p_run.add_argument("--audit-interval", type=int, default=5, help="每N章执行一次自动周期治理；0表示关闭")
     p_run.add_argument("--audit-max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认 524288 = 512×1024，适配长上下文模型")
     p_run.add_argument("--phase", choices=["auto", "analysis", "delta"], default="auto", help="运行阶段：auto=旧逐章流程；analysis=只循环生成/校验章节分析MD；delta=先要求全部MD合格，再循环生成/提交结构JSON")
@@ -3935,6 +4170,7 @@ def main() -> int:
 
     p_vauto = sub.add_parser("visual-assets-auto", help="按章自主推进视觉资产生成（每次返回2交接一章，全部完成后交接aggregate）")
     p_vauto.add_argument("project_dir")
+    p_vauto.add_argument("--end-chapter-seq", type=non_negative_int, default=0, help="包含的最后章节序号；0 表示全书")
     p_vauto.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto")
     p_vauto.add_argument("--max-pack-chars", type=int, default=70000)
     p_vauto.add_argument("--max-original-chars", type=int, default=6000)
@@ -3954,6 +4190,7 @@ def main() -> int:
     p_vauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: hidden by default, powershell, or powershell-keep")
 
     p_sauto.add_argument("project_dir")
+    p_sauto.add_argument("--end-chapter-seq", type=non_negative_int, default=0, help="包含的最后章节序号；0 表示全书")
     p_sauto.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto")
     p_sauto.add_argument("--max-pack-chars", type=int, default=70000)
     p_sauto.add_argument("--max-original-chars", type=int, default=6000)
@@ -3999,6 +4236,7 @@ def main() -> int:
             project_dir,
             args.max_chapters,
             args.audit_interval,
+            end_chapter_seq=args.end_chapter_seq,
             phase=args.phase,
             audit_max_context_chars=args.audit_max_context_chars,
             chapter_command=args.chapter_command,

@@ -23,12 +23,33 @@ from prompt_loader import render_prompt
 from worker_artifacts import (
     capture_output_signatures,
     invalid_output_artifacts,
+    output_signature,
     unchanged_existing_outputs,
 )
 
 
 PROVIDER_ORDER = ["agy", "codebuddy"]
 UNSUPPORTED_NODE_OPTIONS = ("--use-system-ca",)
+JSON_TASK_TYPES = {"delta", "repair_chapter", "audit_correction", "audit_repair"}
+JSON_OBJECT_SCHEMA = json.dumps({"type": "object"}, separators=(",", ":"))
+DELTA_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "delta.schema.json"
+
+
+def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> str:
+    """Return the strictest native schema available for one JSON artifact."""
+    if len(expected_outputs) != 1 or expected_outputs[0].suffix.lower() != ".json":
+        return ""
+    if task_type not in {"delta", "repair_chapter"}:
+        return JSON_OBJECT_SCHEMA
+    try:
+        schema = json.loads(DELTA_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return JSON_OBJECT_SCHEMA
+    # Provider validation does not need documentation-only metadata, and
+    # omitting it keeps the Windows command line compact.
+    schema.pop("$schema", None)
+    schema.pop("$comment", None)
+    return json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
 
 
 def default_agy_bin() -> str:
@@ -59,15 +80,22 @@ def command_available(parts: List[str]) -> bool:
     return shutil.which(executable) is not None
 
 
-def provider_command(provider: str, project_dir: Path, timeout: str) -> List[str]:
+def provider_command(
+    provider: str,
+    project_dir: Path,
+    timeout: str,
+    json_schema: str = "",
+) -> List[str]:
+    """Build a provider command, including native structured-output constraints."""
     model = os.environ.get("ND_AGENT_MODEL", "").strip()
     if provider == "auto":
         provider = select_provider()
     if provider == "codebuddy":
+        output_format = "json" if json_schema else "text"
         parts = split_command(os.environ.get("ND_CODEBUDDY_BIN", default_codebuddy_bin())) + [
             "-p",
             "--output-format",
-            "text",
+            output_format,
             # bypassPermissions: 非交互(-p)模式下必须真正绕过权限检查,worker 才能用 Write 落盘产物。
             # dontAsk 仅表示"不弹窗",询问不了时会直接拒绝 Write/Bash,导致模型准备好内容却写不进文件。
             "--permission-mode",
@@ -80,6 +108,19 @@ def provider_command(provider: str, project_dir: Path, timeout: str) -> List[str
             parts.extend(split_command(extra_args))
         if os.environ.get("ND_CODEBUDDY_SKIP_PERMISSIONS", "1") != "0":
             parts.append("--dangerously-skip-permissions")
+        if json_schema:
+            # CodeBuddy validates the model response against this schema before
+            # returning it as structured_output in the JSON result envelope.
+            parts.extend(["--json-schema", json_schema])
+            # Some provider/model combinations need more than two turns to
+            # submit StructuredOutput. Only apply a turn cap when deployment
+            # configuration explicitly requests one; an implicit low cap can
+            # otherwise terminate with an empty result before tool submission.
+            structured_max_turns = os.environ.get(
+                "ND_CODEBUDDY_STRUCTURED_MAX_TURNS", ""
+            ).strip()
+            if structured_max_turns and "--max-turns" not in parts:
+                parts.extend(["--max-turns", structured_max_turns])
         if model:
             parts.extend(["--model", model])
         return parts
@@ -148,7 +189,15 @@ def build_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path], 
     if capture_stdout and len(expected_outputs) == 1:
         expected_output_text = str(expected_outputs[0])
         output_kind = "JSON" if expected_outputs[0].suffix.lower() == ".json" else "Markdown"
-        output_rule = f"只输出期望 {output_kind} 产物的完整内容。不要直接编辑文件;stdout 会被管线捕获。"
+        if output_kind == "JSON":
+            output_rule = (
+                "必须调用 CodeBuddy 提供的 StructuredOutput 工具一次，提交期望 JSON 产物的完整对象；"
+                "顶层必须是单个对象，禁止提交数组、字符串或 null。"
+                "不要在普通回复中打印 JSON、Markdown 代码块或解释文字，也不要直接编辑文件；"
+                "管线只会提取 StructuredOutput 的结构化参数。"
+            )
+        else:
+            output_rule = "只输出期望 Markdown 产物的完整内容。不要直接编辑文件;stdout 会被管线捕获。"
     else:
         expected_output_text = "\n".join(f"- {path}" for path in expected_outputs)
         output_kind = "项目文件"
@@ -210,6 +259,15 @@ def is_unsupported_node_option(option: str) -> bool:
 
 def provider_env() -> dict[str, str]:
     env = dict(os.environ)
+    if env.get("ND_TASK_TYPE") in JSON_TASK_TYPES and not env.get(
+        "CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"
+    ):
+        # Custom CodeBuddy models may omit maxOutputTokens from their catalog
+        # entry, which makes the CLI fall back to a small server-side default
+        # and can truncate a valid Delta halfway through a JSON string.
+        env["CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"] = env.get(
+            "ND_CODEBUDDY_JSON_MAX_OUTPUT_TOKENS", "32768"
+        )
     node_options = env.get("NODE_OPTIONS", "")
     if node_options:
         options = split_command(node_options)
@@ -247,6 +305,116 @@ def run_provider(
     if provider_captures_stdout(provider):
         return run_provider_command(command, prompt, project_dir)
     return run_provider_command([*command, "-p", prompt], "", project_dir)
+
+
+def _captured_output_is_valid(path: Path, content: str) -> bool:
+    """Validate captured stdout before it may replace an output artifact."""
+    if not content.strip():
+        return False
+    if path.suffix.lower() != ".json":
+        return True
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict)
+
+
+def _extract_captured_artifact(
+    provider: str,
+    raw_content: str,
+    *,
+    structured: bool,
+) -> str:
+    """Extract the artifact body from a provider-specific result envelope."""
+    if provider != "codebuddy" or not structured:
+        return raw_content
+    try:
+        envelope = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return raw_content
+    if isinstance(envelope, list):
+        # Some CodeBuddy builds emit the complete message transcript even for
+        # --output-format json.  The result message containing structured_output
+        # is the last matching object in that transcript.
+        result_messages = [
+            item
+            for item in envelope
+            if isinstance(item, dict)
+            and ("structured_output" in item or item.get("type") == "result")
+        ]
+        if not result_messages:
+            return raw_content
+        envelope = result_messages[-1]
+    if not isinstance(envelope, dict):
+        return raw_content
+    structured_output = envelope.get("structured_output")
+    if structured_output is not None:
+        return json.dumps(structured_output, ensure_ascii=False, indent=2)
+    # Older CodeBuddy builds may serialize structured JSON into result while
+    # omitting structured_output; accept that field only as a string candidate.
+    result = envelope.get("result")
+    return result if isinstance(result, str) else raw_content
+
+
+def _structured_result_diagnostic(raw_content: str) -> str:
+    """Summarize a structured provider envelope without logging prompt content."""
+    try:
+        envelope = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return f"raw_chars={len(raw_content)} envelope=invalid_json"
+    if isinstance(envelope, list):
+        candidates = [
+            item
+            for item in envelope
+            if isinstance(item, dict)
+            and ("structured_output" in item or item.get("type") == "result")
+        ]
+        if not candidates:
+            return f"raw_chars={len(raw_content)} envelope=list messages={len(envelope)} result=missing"
+        result = candidates[-1]
+        prefix = f"raw_chars={len(raw_content)} envelope=list messages={len(envelope)}"
+    elif isinstance(envelope, dict):
+        result = envelope
+        prefix = f"raw_chars={len(raw_content)} envelope=object"
+    else:
+        return f"raw_chars={len(raw_content)} envelope={type(envelope).__name__}"
+    fields = []
+    for key in ("subtype", "is_error", "num_turns", "duration_ms", "duration_api_ms"):
+        if key in result:
+            fields.append(f"{key}={result[key]!r}")
+    structured_output = result.get("structured_output")
+    result_text = result.get("result")
+    fields.append(f"structured_output={type(structured_output).__name__}")
+    if isinstance(result_text, str):
+        fields.append(f"result_chars={len(result_text)}")
+    return " ".join([prefix, *fields])
+
+
+def _write_captured_output_atomically(path: Path, content: str) -> None:
+    """Publish validated stdout while preserving the prior file on failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            suffix=path.suffix,
+            prefix=f".{path.stem}.",
+            dir=path.parent,
+            delete=False,
+        ) as stream:
+            stream.write(content.rstrip() + "\n")
+            temp_path = Path(stream.name)
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _dump_provider_log_tail(log_path: str) -> None:
@@ -305,7 +473,13 @@ def main() -> int:
                 prompt = build_path_prompt(task_type, task_pack, expected_outputs)
             else:
                 prompt = build_prompt(task_type, task_pack, expected_outputs, capture_stdout)
-            command = provider_command(provider, project_dir, args.print_timeout)
+            json_schema = structured_output_schema(task_type, expected_outputs)
+            command = provider_command(
+                provider,
+                project_dir,
+                args.print_timeout,
+                json_schema=json_schema,
+            )
             if not command_available(command):
                 continue
             attempted = True
@@ -336,22 +510,53 @@ def main() -> int:
                 return result.returncode
 
             if capture_stdout:
-                content = (result.stdout or "").strip()
+                raw_content = (result.stdout or "").strip()
+                content = _extract_captured_artifact(
+                    provider,
+                    raw_content,
+                    structured=bool(json_schema),
+                ).strip()
+                expected_output = expected_outputs[0]
+                direct_output_changed = (
+                    output_signature(expected_output) != before_outputs.get(expected_output)
+                )
+                direct_output_valid = (
+                    direct_output_changed
+                    and expected_output.is_file()
+                    and not invalid_output_artifacts([expected_output])
+                )
+                if direct_output_valid:
+                    # Some CLIs ignore the stdout-only contract, write the
+                    # artifact directly, then print a prose completion summary.
+                    # The fresh valid file is authoritative in that situation.
+                    print(
+                        f"provider 已直接写入有效产物，忽略 stdout 摘要: {expected_output.name}",
+                        file=sys.stderr,
+                    )
+                    return 0
                 if not content:
                     print(f"provider 输出为空: {provider}", file=sys.stderr)
                     if args.provider == "auto":
                         last_returncode = 1
                         continue
                     return 1
-                expected_output = expected_outputs[0]
-                expected_output.parent.mkdir(parents=True, exist_ok=True)
-                expected_output.write_text(content + "\n", encoding="utf-8")
-                if invalid_output_artifacts([expected_output]):
+                if not _captured_output_is_valid(expected_output, content):
                     print(f"provider 写出的 JSON 格式无效: {expected_output}", file=sys.stderr)
+                    # Keep a bounded diagnostic because structured-output CLIs
+                    # may return an envelope or prose despite a JSON schema.
+                    # Never persist this preview into the target artifact.
+                    preview = content[:2000].replace("\x00", "")
+                    if json_schema:
+                        print(
+                            f"provider 结构化输出诊断: {_structured_result_diagnostic(raw_content)}",
+                            file=sys.stderr,
+                        )
+                    print(f"provider stdout 预览:\n{preview}", file=sys.stderr)
                     if args.provider == "auto":
                         last_returncode = 1
                         continue
                     return 1
+                _write_captured_output_atomically(expected_output, content)
                 # capture_stdout 模式下 stdout 否则为空（产物已写文件、不回显内容），
                 # 留一行摘要给 worker 日志，便于判断该章是否真完成。
                 print(f"provider 已通过 stdout 捕获写入: {expected_output.name}（{len(content)} 字符）")

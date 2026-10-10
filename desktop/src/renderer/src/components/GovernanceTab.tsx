@@ -18,10 +18,12 @@ function chaptersFor(mode: RangeMode, range: string): string {
 
 export function GovernanceTab({
   tasks,
+  pipelineRunning,
   onCreateTask,
   onOpenArtifact,
 }: {
   tasks: WorkbenchTask[]
+  pipelineRunning: boolean
   onCreateTask: (type: 'governance', params: Record<string, unknown>) => Promise<void>
   onOpenArtifact: (path: string) => void
 }) {
@@ -87,7 +89,12 @@ export function GovernanceTab({
                   <td>{t.id}</td>
                   <td>{String(t.params?.chapters ?? '-')}</td>
                   <td style={{ textAlign: 'center' }}><TaskStatus status={t.status} error={t.error} /></td>
-                  <td style={{ fontSize: 12, color: t.error ? 'crimson' : '#666' }}>{t.error ?? (result.report ? '已生成报告' : '-')}</td>
+                  {/* 自动管线持有同项目写入锁时，说明主动审计排队的具体原因。 */}
+                  <td style={{ fontSize: 12, color: t.error ? 'crimson' : '#666' }}>
+                    {t.error ?? (t.status === 'queued' && pipelineRunning
+                      ? '等待当前自动管线结束后执行'
+                      : result.report ? '已生成报告' : '-')}
+                  </td>
                   <td>
                     {result.before && <button onClick={() => onOpenArtifact(result.before as string)} style={{ fontSize: 12, marginRight: 4 }}>before</button>}
                     {result.after && <button onClick={() => onOpenArtifact(result.after as string)} style={{ fontSize: 12, marginRight: 4 }}>after</button>}

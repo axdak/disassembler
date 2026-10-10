@@ -26,9 +26,11 @@ def test_confined_project_path_rejects_parent_escape(tmp_path):
 def test_invalid_output_artifacts_validates_json_syntax(tmp_path):
     valid = tmp_path / "valid.json"
     invalid = tmp_path / "invalid.json"
+    array = tmp_path / "array.json"
     markdown = tmp_path / "report.md"
     valid.write_text(json.dumps({"ok": True}), encoding="utf-8")
     invalid.write_text("{broken", encoding="utf-8")
+    array.write_text(json.dumps(["修改元素"], ensure_ascii=False), encoding="utf-8")
     markdown.write_text("# result\n", encoding="utf-8")
 
-    assert invalid_output_artifacts([valid, invalid, markdown]) == [invalid]
+    assert invalid_output_artifacts([valid, invalid, array, markdown]) == [invalid, array]

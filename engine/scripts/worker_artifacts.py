@@ -45,7 +45,12 @@ def unchanged_existing_outputs(
 
 
 def invalid_output_artifacts(expected_outputs: Iterable[Path]) -> list[Path]:
-    """Return outputs that are empty/whitespace or invalid JSON by extension."""
+    """Return outputs that are empty or are not top-level JSON objects.
+
+    Worker-owned ``.json`` artifacts in this pipeline are schema documents or
+    Delta documents, so arrays, strings, numbers and ``null`` are never valid
+    deliverables even though they are legal JSON values.
+    """
     invalid: list[Path] = []
     for path in expected_outputs:
         try:
@@ -58,7 +63,10 @@ def invalid_output_artifacts(expected_outputs: Iterable[Path]) -> list[Path]:
             continue
         if path.suffix.lower() == ".json":
             try:
-                json.loads(content)
+                payload = json.loads(content)
             except json.JSONDecodeError:
+                invalid.append(path)
+                continue
+            if not isinstance(payload, dict):
                 invalid.append(path)
     return invalid

@@ -6,7 +6,7 @@
 // preview / conflict / apply). The append flow is local to this tab; the
 // backend `chaptersAppendPreview` / `chaptersApply` calls surface concise
 // Chinese errors with a link into the logs tab.
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { StageEvent, Status, WorkbenchTask, ArtifactStatusResponse, AppendPlan } from '../types'
 import { TaskStatus } from './TaskStatus'
 
@@ -14,6 +14,14 @@ const STAGES = [
   'chapter_analysis', 'chapter_delta', 'chapter_structure', 'visual_assets',
   'fullbook_analysis', 'final_pack', 'commit_final_draft', 'finalize', 'export',
 ]
+
+/** Empty input means the whole book; invalid or fractional chapter numbers stay unsaved. */
+function parseEndChapter(value: string): number | null {
+  const trimmed = value.trim()
+  if (trimmed === '') return 0
+  const seq = Number(trimmed)
+  return Number.isSafeInteger(seq) && seq > 0 ? seq : null
+}
 
 function Timeline({ current, completed }: { current: string | null; completed: string[] }) {
   return (
@@ -71,6 +79,7 @@ export function OverviewTab({
   tasks,
   artifactStatus,
   onRun,
+  onSaveRange,
   onCancel,
   onDelete,
   onOpenLogs,
@@ -80,7 +89,8 @@ export function OverviewTab({
   events: StageEvent[]
   tasks: WorkbenchTask[]
   artifactStatus: ArtifactStatusResponse | null
-  onRun: () => void
+  onRun: (endChapterSeq: number) => Promise<void> | void
+  onSaveRange: (endChapterSeq: number) => Promise<void>
   onCancel: () => void
   onDelete: () => void
   onOpenLogs: () => void
@@ -88,6 +98,53 @@ export function OverviewTab({
   const [sourceFile, setSourceFile] = useState('')
   const [preview, setPreview] = useState<AppendPlan | null>(null)
   const [appendErr, setAppendErr] = useState('')
+  const [endChapterInput, setEndChapterInput] = useState(() =>
+    status.project.run_end_chapter_seq ? String(status.project.run_end_chapter_seq) : '')
+  const [runErr, setRunErr] = useState('')
+  const [rangeSaveState, setRangeSaveState] = useState<'saved' | 'saving' | 'invalid' | 'failed'>('saved')
+  const saveVersion = useRef(0)
+  const saveTail = useRef<Promise<void>>(Promise.resolve())
+
+  // Serialize writes so rapid typing cannot leave an older chapter number in the database.
+  function queueRangeSave(seq: number): Promise<void> {
+    const version = ++saveVersion.current
+    setRangeSaveState('saving')
+    const request = saveTail.current.catch(() => {}).then(() => onSaveRange(seq))
+    saveTail.current = request
+    void request.then(
+      () => { if (saveVersion.current === version) setRangeSaveState('saved') },
+      () => { if (saveVersion.current === version) setRangeSaveState('failed') },
+    )
+    return request
+  }
+
+  function changeRunRange(value: string) {
+    setEndChapterInput(value)
+    setRunErr('')
+    const seq = parseEndChapter(value)
+    if (seq == null) {
+      saveVersion.current++
+      setRangeSaveState('invalid')
+      return
+    }
+    void queueRangeSave(seq)
+  }
+
+  async function startRun() {
+    const seq = parseEndChapter(endChapterInput)
+    if (seq == null) {
+      setRunErr('截止章请填写正整数，留空表示全书')
+      return
+    }
+    try {
+      // Verify persistence before starting, including a retry after an earlier save failure.
+      await queueRangeSave(seq)
+      setRunErr('')
+      await onRun(seq)
+    } catch (e) {
+      setRunErr(`保存截止章失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
 
   async function checkAppend() {
     if (!sourceFile) { setAppendErr('请先填写源书路径'); return }
@@ -129,10 +186,23 @@ export function OverviewTab({
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
-        <button onClick={onRun} disabled={!!status.active_run}>运行全流程</button>
+        <label htmlFor="end-chapter-seq">分析至第</label>
+        <input id="end-chapter-seq" type="number" min={1} step={1} placeholder="全书"
+          value={endChapterInput} onChange={(e) => changeRunRange(e.target.value)}
+          disabled={!!status.active_run} style={{ width: 72 }} />
+        <span>章（含）</span>
+        <span role="status" style={{ fontSize: 12, color: rangeSaveState === 'failed' ? 'crimson' : '#666' }}>
+          {rangeSaveState === 'saved' ? '范围已保存' : rangeSaveState === 'saving' ? '保存中…'
+            : rangeSaveState === 'failed' ? '保存失败，请重试' : '请输入正整数'}
+        </span>
+        <button onClick={startRun} disabled={!!status.active_run}>
+          运行全流程（{parseEndChapter(endChapterInput) == null ? '范围无效'
+            : endChapterInput.trim() === '' ? '全书' : `至第 ${endChapterInput.trim()} 章`}）
+        </button>
         <button onClick={onCancel} disabled={!status.active_run}>取消</button>
         <button onClick={onDelete} style={{ color: 'crimson' }}>删除</button>
       </div>
+      {runErr && <div style={{ color: 'crimson', fontSize: 12 }}>{runErr}</div>}
       <Timeline current={status.current_stage} completed={status.completed} />
       <div style={{ margin: '8px 0' }}>
         活动运行: {status.active_run ? status.active_run.status : '无'}

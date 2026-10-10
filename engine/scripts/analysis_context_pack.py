@@ -824,7 +824,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     all_seq = [int(ch["seq"]) for ch in index]
 
     if args.aggregate:
-        return _build_visual_aggregate_pack(project_dir, args, index, all_seq)
+        # 汇总使用显式章节范围；默认 all 保持原有全书行为。
+        selected_seq = set(parse_chapter_spec(args.chapters, all_seq))
+        return _build_visual_aggregate_pack(
+            project_dir, args,
+            [ch for ch in index if int(ch["seq"]) in selected_seq], all_seq,
+        )
 
     selected_seq = set(parse_chapter_spec(args.chapters, all_seq))
     chapters = [ch for ch in index if int(ch["seq"]) in selected_seq and not ch.get("is_preface")]
@@ -1088,6 +1093,7 @@ def _build_visual_aggregate_pack(project_dir: Path, args: argparse.Namespace, in
         "created_at": timestamp,
         "task": "visual_assets",
         "mode": "aggregate",
+        "chapter_range": args.chapters,
         "chapters_available": available,
         "chapters_missing": missing,
         "inventory": str(inventory_path.relative_to(project_dir)),

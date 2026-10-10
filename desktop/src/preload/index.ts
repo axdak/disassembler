@@ -5,11 +5,15 @@ const api = {
   createProject: (path: string, name?: string) =>
     ipcRenderer.invoke('nd:projects:create', { path, name }),
   projectStatus: (id: number) => ipcRenderer.invoke('nd:projects:status', id),
+  updateProjectRunRange: (id: number, endChapterSeq: number) =>
+    ipcRenderer.invoke('nd:projects:runRange', id, endChapterSeq),
   deleteProject: (id: number) => ipcRenderer.invoke('nd:projects:delete', id),
   startRun: (id: number, config?: Record<string, unknown>) =>
     ipcRenderer.invoke('nd:projects:run', id, config),
   cancelRun: (id: number) => ipcRenderer.invoke('nd:projects:cancel', id),
   chapters: (id: number) => ipcRenderer.invoke('nd:projects:chapters', id),
+  exportStoryer: (id: number): Promise<{ path: string; chapter_count: number; missing_analysis: number }> =>
+    ipcRenderer.invoke('nd:projects:exportStoryer', id),
   artifact: (id: number, path: string) => ipcRenderer.invoke('nd:projects:artifact', id, path),
   tasksCreate: (id: number, type: string, params: Record<string, unknown>) =>
     ipcRenderer.invoke('nd:projects:tasks:create', id, type, params),

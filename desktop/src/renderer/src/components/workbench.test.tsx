@@ -6,7 +6,7 @@
 // governance range, export options, append preview/conflict/apply, task-event
 // refresh scoped to the selected project, and artifact/log drawer open.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react'
 import { App } from '../App'
 import type {
   Project,
@@ -104,6 +104,7 @@ interface FakeApi {
     tasksList: number
     artifactsStatus: number
     tasksCreate: { type: string; params: Record<string, unknown> }[]
+    storyerExport: number
     appendPreview: number
     apply: number
     artifact: number
@@ -112,30 +113,37 @@ interface FakeApi {
   }
   emit: (ev: unknown) => void
   setAppendPreview: (plan: AppendPlan) => void
+  setArtifactStatus: (status: ArtifactStatusResponse) => void
 }
 
 function mountFakeApi(opts: { appendPreview?: AppendPlan } = {}): FakeApi {
   const handlers: ((ev: unknown) => void)[] = []
   const calls = {
     tasksList: 0, artifactsStatus: 0, tasksCreate: [] as { type: string; params: Record<string, unknown> }[],
-    appendPreview: 0, apply: 0, artifact: 0, log: 0, recoverSnapshots: 0,
+    appendPreview: 0, apply: 0, artifact: 0, log: 0, recoverSnapshots: 0, storyerExport: 0,
   }
   let appendPreview: AppendPlan = opts.appendPreview ?? { appended: [{ seq: 3, filename: '003.md', title: '第三章 转' }] }
+  let artifactStatus = ARTIFACT_STATUS
   const api: Window['api'] = {
     listProjects: async () => [PROJECT],
     createProject: async () => PROJECT,
     projectStatus: async () => STATUS,
+    updateProjectRunRange: async (_id, endChapterSeq) => ({ ...PROJECT, run_end_chapter_seq: endChapterSeq }),
     deleteProject: async () => ({ ok: true }),
     startRun: async () => ({ run_id: 1 }),
     cancelRun: async () => ({ cancelled: true }),
     chapters: async () => CHAPTERS,
+    exportStoryer: async () => {
+      calls.storyerExport++
+      return { path: 'C:/proj/测试书/导出/故事家完整.json', chapter_count: 2, missing_analysis: 0 }
+    },
     artifact: async () => { calls.artifact++; return { path: 'p', size: 0, truncated: false, content: '产物内容预览' } },
     tasksCreate: async (_id, type, params) => { calls.tasksCreate.push({ type, params }); return { ...TASKS[0], type, params } },
     tasksList: async () => { calls.tasksList++; return TASKS },
     taskGet: async () => TASKS[0],
     taskCancel: async () => ({ ...TASKS[0], status: 'cancelled' }),
     taskRetry: async () => ({ ...TASKS[0], status: 'queued' }),
-    artifactsStatus: async () => { calls.artifactsStatus++; return ARTIFACT_STATUS },
+    artifactsStatus: async () => { calls.artifactsStatus++; return artifactStatus },
     chaptersAppendPreview: async () => { calls.appendPreview++; return appendPreview },
     chaptersApply: async () => { calls.apply++; return { applied: true } },
     recoverSnapshots: async () => { calls.recoverSnapshots++; return SNAPSHOTS },
@@ -159,6 +167,7 @@ function mountFakeApi(opts: { appendPreview?: AppendPlan } = {}): FakeApi {
     calls,
     emit: (ev) => { act(() => { for (const h of handlers) h(ev) }) },
     setAppendPreview: (p) => { appendPreview = p },
+    setArtifactStatus: (status) => { artifactStatus = status },
   }
 }
 
@@ -284,6 +293,15 @@ describe('workbench seven-tab UI', () => {
     })
   })
 
+  it('export tab: merges chapters and analysis into a Storyer JSON', async () => {
+    await selectProject()
+    goTab('导出')
+    fireEvent.click(screen.getByRole('button', { name: '合并章节和分析态' }))
+    await waitFor(() => expect(fake.calls.storyerExport).toBe(1))
+    expect(await screen.findByText(/已生成 2 章；缺少分析态 0 章/)).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('C:/proj/测试书/导出/故事家完整.json')
+  })
+
   it('overview: append preview / conflict / apply', async () => {
     await selectProject()
     goTab('概览')
@@ -323,6 +341,45 @@ describe('workbench seven-tab UI', () => {
     fake.emit({ type: 'task_done', project_id: 1, task_id: 10 })
     await waitFor(() => expect(fake.calls.tasksList).toBe(listBefore + 1))
     expect(fake.calls.artifactsStatus).toBe(statusBefore + 1)
+  })
+
+  it('chapter browsing pauses scans until manual refresh while task controls stay current', async () => {
+    await selectProject()
+    // Install the clock before entering the tab so a reintroduced polling
+    // effect is also caught by this regression test.
+    vi.useFakeTimers()
+    await act(async () => { goTab('章节') })
+    const secondRow = screen.getByText('第二章 承').closest('tr') as HTMLTableRowElement
+    expect(within(secondRow).getAllByText('未生成')).toHaveLength(3)
+    const statusBefore = fake.calls.artifactsStatus
+    const tasksBefore = fake.calls.tasksList
+    const projectStatus = vi.spyOn(fake.api, 'projectStatus')
+
+    const withDelta = structuredClone(ARTIFACT_STATUS)
+    withDelta.chapters[1].cards.delta = {
+      status: 'latest', artifact_present: true, latest_task_id: null,
+      latest_task_status: null, error: null, paths: ['章节处理/002.json'],
+    }
+    fake.setArtifactStatus(withDelta)
+    fake.emit({ type: 'chapter_progress', project_id: 1, stage: 'chapter_delta' })
+    fake.emit({ type: 'task_done', project_id: 1, task_id: 10 })
+    await act(async () => {})
+    expect(fake.calls.tasksList).toBe(tasksBefore + 1)
+    // Advancing beyond both former polling intervals must not scan the book.
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
+      expect(fake.calls.artifactsStatus).toBe(statusBefore)
+      expect(projectStatus).not.toHaveBeenCalled()
+      expect(within(secondRow).getAllByText('未生成')).toHaveLength(3)
+    } finally {
+      vi.useRealTimers()
+    }
+    fireEvent.click(screen.getByRole('button', { name: '刷新状态' }))
+    await waitFor(() => expect(within(secondRow).getAllByText('最新')).toHaveLength(1))
+    expect(fake.calls.artifactsStatus).toBe(statusBefore + 1)
+    goTab('概览')
+    await waitFor(() => expect(projectStatus).toHaveBeenCalled())
+    projectStatus.mockRestore()
   })
 
   it('artifact and log paths open in the drawer', async () => {
