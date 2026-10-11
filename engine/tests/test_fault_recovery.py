@@ -322,3 +322,73 @@ def test_analysis_recovery_receives_complete_fresh_contract(tmp_path, monkeypatc
     assert retained in paths["analysis"].read_text(encoding="utf-8")
     assert observed[-1] == "修复验收通过，继续流水线"
     assert not (tmp_path / "故事结构_增量.json").exists()
+
+
+@pytest.mark.parametrize("command,strategies", [("local-fake", 3), ("", 0)])
+def test_program_repair_succeeds_without_model_or_model_budget(tmp_path, command, strategies):
+    """A deterministic type correction needs no model repair or semantic review."""
+    output, pack, _, calls, published, options = scenario(tmp_path)
+    before = json.loads(output.read_text(encoding="utf-8"))
+    before["数量"] = "2"
+    save_json(output, before)
+
+    def normalize_and_validate(root):
+        target = root / output.name
+        value = json.loads(target.read_text(encoding="utf-8"))
+        value["数量"] = int(value["数量"])
+        save_json(target, value)
+        return 0, "原规则校验通过"
+
+    def publish(candidate):
+        published.append(candidate)
+        shutil.copy2(candidate, output)
+        return 0
+
+    options.update(command=command, strategies=strategies, validate=normalize_and_validate, publish=publish)
+    assert invoke(tmp_path, output, pack, options) == 0
+    assert not calls
+    after = json.loads(output.read_text(encoding="utf-8"))
+    assert after == {**before, "数量": 2}
+    assert state(tmp_path)["calls"] == []
+    assert state(tmp_path)["attempts"] == []
+    assert state(tmp_path)["mechanical"]["status"] == "accepted"
+    assert invoke(tmp_path, output, pack, options) == 0
+    assert len(published) == 1
+
+
+@pytest.mark.parametrize("provider_rc", [0, 1])
+def test_malformed_governance_uses_real_program_repair_before_regeneration(tmp_path, monkeypatch, provider_rc):
+    """Exercise the actual JSON repair, normalization, validation and commit path."""
+    import run_pipeline as pipeline
+    from test_audit_pack import empty_story
+    save_json(tmp_path / "故事结构_增量.json", empty_story())
+    patch = tmp_path / "质量治理/周期审计/correction_001-001.json"
+    patch.parent.mkdir(parents=True)
+    pack = patch.with_suffix(".md")
+    pack.write_text("按原治理契约生成补丁", encoding="utf-8")
+    calls = []
+
+    def worker(command, directory, env, timeout):
+        calls.append(env["ND_TASK_TYPE"])
+        assert env["ND_TASK_TYPE"] == "audit_correction"
+        value = {"章节范围": "第001章-第001章", "新增元素": {}, "修改元素": {},
+                 "治理类型": "no_change", "质量说明": "本周期已完整检查，无需变更", "证据范围": ["0001"]}
+        text = json.dumps(value, ensure_ascii=False)
+        Path(env["ND_EXPECTED_OUTPUT"]).write_text(text[:-1] + ",}", encoding="utf-8")
+        return provider_rc, "模拟模型产出的多余尾逗号"
+
+    monkeypatch.setattr(pipeline, "stream_shell_command", worker)
+    assert pipeline.run_generation_worker("local-fake", tmp_path, "audit_correction", pack, patch, retries=2) == 0
+    assert calls == ["audit_correction"]
+    assert state(tmp_path)["calls"] == []
+    assert pipeline.audit_status(tmp_path, 1, 1)["status"] == "committed"
+
+
+def test_failed_generation_cannot_reuse_unchanged_valid_draft(tmp_path, monkeypatch):
+    """Passing validation on yesterday's draft cannot hide today's worker failure."""
+    import run_pipeline as pipeline
+    draft = tmp_path / "故事结构_草稿.json"
+    save_json(draft, {"existing": "valid JSON from an earlier task"})
+    monkeypatch.setattr(pipeline, "run_worker", lambda *a, **kw: 1)
+    monkeypatch.setattr(pipeline, "run_repair_worker", lambda *a, **kw: pytest.fail("不应验收未更新草稿"))
+    assert pipeline.run_generation_worker("local-fake", tmp_path, "final_draft", tmp_path / "task.md", draft) == 1

@@ -112,8 +112,6 @@ def recover_artifact(
     strategies: int = 3, observe: Callable[[str, dict], None] | None = None,
 ) -> int:
     """Repair one logical output; retries, strategy changes and publication persist."""
-    if not command:
-        return 2
     project, output = project.resolve(), output.resolve()
     relative = output.relative_to(project)
     inputs = evidence_files(project, chapter_seq, output)
@@ -185,6 +183,46 @@ def recover_artifact(
         except (OSError, ValueError):
             return {}
 
+    def prepare_candidate(workspace: Path):
+        """Copy evidence once per candidate, retaining immutable original bytes."""
+        workspace.mkdir(parents=True, exist_ok=True)
+        manifest = []
+        for source in inputs:
+            target = workspace / source.relative_to(project)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            manifest.append({"path": str(source.relative_to(project)), "sha256": digest(source)})
+        candidate = workspace / relative
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(baseline, candidate)
+        original = workspace / f"original{output.suffix}"
+        shutil.copy2(baseline, original)
+        return candidate, original, manifest
+
+    def publish_candidate(candidate: Path, manifest: list, record: dict) -> int:
+        """Use identical fencing and crash recovery for program and model repairs."""
+        if stopped():
+            return 130
+        if digest(output) != state["input_sha256"] or any(digest(project / item["path"]) != item["sha256"] for item in manifest):
+            record.update(status="inputs_changed", feedback="正式输入已变化，拒绝发布旧候选")
+            persist()
+            return REPAIR_EXHAUSTED
+        state.update(status="publishing", candidate=str(candidate.relative_to(directory)),
+                     candidate_sha256=digest(candidate), published_dependency=validated_dependency)
+        persist()
+        rc = publish(candidate)
+        state["input_sha256"] = digest(output)
+        if rc == 0:
+            record.update(status="accepted")
+            state.update(status="succeeded", dependency=dependencies())
+            persist()
+            emit("修复验收通过，继续流水线", strategy=record["strategy"])
+            return 0
+        record.update(status="publication_failed", returncode=rc)
+        state["status"] = "repairing"
+        persist()
+        return rc
+
     # Publication is an idempotent callback. Its prepared receipt must be handled
     # before checking dependency hashes, because publishing changes the story hash.
     if state.get("status") == "publishing" and digest(output) in {state.get("input_sha256"), state.get("candidate_sha256")}:
@@ -222,10 +260,26 @@ def recover_artifact(
         persist()
     if state.get("status") == "succeeded":
         return 0
+    baseline = directory / state["baseline"]
+    if stopped():
+        return 130
+    # Existing deterministic normalization and validators are authoritative.
+    # Run them before model availability/budget/backoff checks; purely mechanical
+    # repairs require neither a model repair nor a model review.
+    workspace = Path(tempfile.mkdtemp(prefix="mechanical_", dir=directory))
+    candidate, _, manifest = prepare_candidate(workspace)
+    emit("先执行程序纠错与校验")
+    rc, feedback = evaluate(workspace)
+    state["mechanical"] = {"strategy": "mechanical", "returncode": rc,
+                           "candidate": str(candidate.relative_to(directory))}
+    persist()
+    if rc == 0:
+        return publish_candidate(candidate, manifest, state["mechanical"])
+    if not command:
+        return 2
     delay = max(0, state.get("next_retry_at", 0) - time.time())
     if delay and (cancel.wait(delay) if cancel is not None else _sleep(delay)):
         return 130
-    baseline = directory / state["baseline"]
     limit = min(max(strategies, 0), len(STRATEGIES))
     # Seven distinct operations at most: 3 candidates, 3 reviews, 1 diagnosis.
     # A transport retry does not silently recreate this allowance on restart.
@@ -279,18 +333,7 @@ def recover_artifact(
             return 130
         name, instruction = STRATEGIES[index]
         workspace = directory / f"attempt_{state['generation']:04d}_{len(state['attempts']) + 1:02d}"
-        workspace.mkdir(parents=True, exist_ok=True)
-        manifest = []
-        for source in inputs:
-            target = workspace / source.relative_to(project)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            manifest.append({"path": str(source.relative_to(project)), "sha256": digest(source)})
-        candidate = workspace / relative
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(baseline, candidate)
-        original = workspace / f"original{output.suffix}"
-        shutil.copy2(baseline, original)
+        candidate, original, manifest = prepare_candidate(workspace)
         # Validation happens in the copied project, and refreshes its exact error
         # reports/repair package without touching the authoritative project.
         rc, feedback = evaluate(workspace)
@@ -393,25 +436,9 @@ def recover_artifact(
             state["next_strategy"] = index
             persist()
             return 130
-        if digest(output) != state["input_sha256"] or any(digest(project / item["path"]) != item["sha256"] for item in manifest):
-            attempt.update(status="inputs_changed", feedback="正式输入已变化，拒绝发布旧候选")
-            persist()
-            return REPAIR_EXHAUSTED
-        state.update(status="publishing", candidate=str(candidate.relative_to(directory)),
-                     candidate_sha256=candidate_hash, published_dependency=validated_dependency)
-        persist()
-        rc = publish(candidate)
-        state["input_sha256"] = digest(output)
-        if rc == 0:
-            attempt.update(status="accepted")
-            state["status"] = "succeeded"
-            state["dependency"] = dependencies()
-            persist()
-            emit("修复验收通过，继续流水线", strategy=name)
-            return 0
-        attempt.update(status="publication_failed", returncode=rc)
-        state["status"] = "repairing"
-        persist()
+        rc = publish_candidate(candidate, manifest, attempt)
+        if rc in {0, 130, REPAIR_EXHAUSTED}:
+            return rc
     state["status"] = "exhausted"
     persist()
     emit("本故障的不同修复策略已用尽，保留证据与断点", ledger=str(ledger))

@@ -147,8 +147,9 @@ def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path)
     assert "无 worker_command" in msg
 
 
-def test_finalize_adapter_caps_transport_retries_by_repair_allowance(tmp_path, monkeypatch):
-    """Desktop maintenance uses the same budget as the pipeline entry point."""
+@pytest.mark.parametrize("needs_model", [False, True])
+def test_finalize_adapter_uses_program_before_bounded_model_repair(tmp_path, monkeypatch, needs_model):
+    """Valid drafts bypass models; unresolved semantic gaps share a bounded budget."""
     import task_adapters
     import run_pipeline
     project = _seed_project(tmp_path)
@@ -162,7 +163,9 @@ def test_finalize_adapter_caps_transport_retries_by_repair_allowance(tmp_path, m
 
     def worker(command, directory, env, timeout):
         if env["ND_TASK_TYPE"] == "final_draft":
-            _write_json(Path(env["ND_EXPECTED_OUTPUT"]), EMPTY_STORY)
+            # Missing prose cannot be fabricated by the deterministic normalizer.
+            draft = {**EMPTY_STORY, "介绍": {"标题": "", "描述": ""}} if needs_model else EMPTY_STORY
+            _write_json(Path(env["ND_EXPECTED_OUTPUT"]), draft)
             return 0, "local initial draft"
         calls.append(env["ND_TASK_TYPE"])
         return 9, "local transport failure"
@@ -170,6 +173,10 @@ def test_finalize_adapter_caps_transport_retries_by_repair_allowance(tmp_path, m
     monkeypatch.setattr(run_pipeline, "stream_shell_command", worker)
     context = _make_context(project, {"worker_command": "local-fake", "worker_retries": 5,
                                       "max_repair_rounds": 2})
-    with pytest.raises(RuntimeError, match="rc=65"):
+    if needs_model:
+        with pytest.raises(RuntimeError, match="rc=65"):
+            FinalizeAdapter().run(context)
+        assert calls == ["auto_repair_final", "auto_repair_final"]
+    else:
         FinalizeAdapter().run(context)
-    assert calls == ["auto_repair_final", "auto_repair_final"]
+        assert calls == []

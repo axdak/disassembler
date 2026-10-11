@@ -609,6 +609,7 @@ def run_worker(
     retries: int = 0,
     worker_window: str = DEFAULT_WORKER_WINDOW,
     repair_limit: Optional[int] = None,
+    defer_artifact_repair: bool = False,
 ) -> int:
     """Run an external model/agent worker for exactly one task package."""
     if not command:
@@ -661,6 +662,9 @@ def run_worker(
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
             if returncode == 130:
                 return 130  # 用户取消，不重试
+            if (defer_artifact_repair and returncode == 1 and expected_output.is_file()
+                    and expected_output.stat().st_size and invalid_output_artifacts([expected_output])):
+                return 1  # Give deterministic repair the malformed artifact first.
             if attempt < attempts:
                 continue
             return returncode
@@ -676,6 +680,8 @@ def run_worker(
             finish_repair(ticket, 1)
             print(f"worker写出的产物格式无效: {expected_output}")
             print(f"worker日志: {log_path}")
+            if defer_artifact_repair:
+                return 1
             if attempt < attempts:
                 continue
             return 1
@@ -755,11 +761,16 @@ def run_generation_worker(
     A missing artifact or cancelled worker is not semantic repair input. Existing
     partial artifacts remain inspectable, and original validators retain authority.
     """
-    rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
-                    chapter_seq, **worker_options)
     repair_task = {"analysis": "analysis_regenerate", "delta": "repair_chapter",
                    "audit_correction": "audit_repair", "final_draft": "repair_final"}.get(task_type)
+    before_outputs = capture_output_signatures([expected_output])
+    rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
+                    chapter_seq, defer_artifact_repair=bool(repair_task), **worker_options)
     if rc != 1 or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
+        return rc
+    if unchanged_existing_outputs(before_outputs, [expected_output]) and not invalid_output_artifacts([expected_output]):
+        # A pre-existing valid draft is not proof that a failed generation ran.
+        # Do not turn an unchanged artifact into successful task completion.
         return rc
     if task_type in {"analysis", "delta"}:
         chapter = chapter_by_seq(project_dir, chapter_seq)
