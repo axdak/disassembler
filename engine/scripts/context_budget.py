@@ -10,10 +10,13 @@ import hashlib
 import json
 import math
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 CONTEXT_EXCEEDED = 64
+_active_budget = ContextVar("model_context_budget", default=None)
 
 
 def estimate_tokens(text: str) -> int:
@@ -31,7 +34,10 @@ class ContextBudget:
 
     @classmethod
     def from_env(cls):
-        """Read per-process limits without mutating shared backend environment."""
+        """Prefer the immutable task snapshot; CLI processes fall back to environment."""
+        active = _active_budget.get()
+        if active is not None:
+            return active
         values = {}
         for key, default in asdict(cls()).items():
             raw = os.environ.get("ND_CONTEXT_" + key.upper(), str(default))
@@ -44,6 +50,28 @@ class ContextBudget:
             raise ValueError("上下文容量不足以容纳输出和预留空间")
         return result
 
+    @classmethod
+    def from_settings(cls, settings):
+        """Resolve persisted settings once at task start, independent of other tasks."""
+        values = {}
+        for key, default in asdict(cls()).items():
+            raw = settings.get("model_" + key, default)
+            # Task overrides are untyped dictionaries; do not silently truncate floats.
+            if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+                raise ValueError(f"模型容量必须为整数：model_{key}")
+            values[key] = int(raw)
+        if any(value < 0 or (key in {"input_tokens", "output_tokens"} and value == 0)
+               for key, value in values.items()):
+            raise ValueError("模型容量必须为非负整数，输入和输出必须大于零")
+        budget = cls(**values)
+        if budget.usable_input <= 0:
+            raise ValueError("模型容量不足：扣除输出和安全预留后，可用输入必须大于零")
+        return budget
+
+    def to_env(self):
+        """Serialize only into a child-process environment, never os.environ."""
+        return {"ND_CONTEXT_" + key.upper(): str(value) for key, value in asdict(self).items()}
+
     @property
     def usable_input(self) -> int:
         shared = self.context_tokens - self.output_tokens if self.context_tokens else self.input_tokens
@@ -51,6 +79,16 @@ class ContextBudget:
 
     def fits(self, text: str) -> bool:
         return estimate_tokens(text) <= self.usable_input
+
+
+@contextmanager
+def capacity_scope(settings):
+    """Restore the previous context even when execution fails or is cancelled."""
+    token = _active_budget.set(ContextBudget.from_settings(settings))
+    try:
+        yield
+    finally:
+        _active_budget.reset(token)
 
 
 def inspect_pack(pack: Path, extra: str = "", sources=()) -> dict:

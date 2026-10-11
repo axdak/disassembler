@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_FULLBOOK_TASKS = [
     "summary", "characters", "plot", "style", "worldview", "settings",
@@ -54,6 +54,11 @@ class RunConfig(BaseModel):
     worker_window: Literal["hidden", "powershell", "powershell-keep"] = "hidden"
     worker_retries: int = Field(default=2, ge=0)
     worker_timeout_seconds: int = Field(default=1200, gt=0)
+    # Token 容量与下面的字符分包阈值独立；运行时固定快照，不热改活跃任务。
+    model_input_tokens: int = Field(default=300000, gt=0, strict=True)
+    model_output_tokens: int = Field(default=20000, gt=0, strict=True)
+    model_context_tokens: int = Field(default=300000, ge=0, strict=True)
+    model_reserve_tokens: int = Field(default=30000, ge=0, strict=True)
     max_attempts: int = Field(default=10, gt=0)
     stagnant_limit: int = Field(default=3, gt=0)
     max_repair_rounds: int = Field(default=3, ge=0)
@@ -73,9 +78,19 @@ class RunConfig(BaseModel):
     audit_max_context_chars: int = Field(default=524288, gt=0)
     max_pack_chars: int = Field(default=70000, gt=0)  # 全书分析任务包单包最大字符数
 
+    @model_validator(mode="after")
+    def validate_capacity(self):
+        """Reject impossible budgets before saving settings or scheduling a run."""
+        shared = (self.model_context_tokens - self.model_output_tokens
+                  if self.model_context_tokens else self.model_input_tokens)
+        if min(self.model_input_tokens, shared) <= self.model_reserve_tokens:
+            raise ValueError("模型容量不足：扣除输出和安全预留后，可用输入必须大于零")
+        return self
+
 
 class RunStart(BaseModel):
-    config: RunConfig = Field(default_factory=RunConfig)
+    # Only overrides are supplied here; validate after merging saved settings.
+    config: dict = Field(default_factory=dict)
 
 
 class RunRangeUpdate(BaseModel):
@@ -127,13 +142,13 @@ class StageEvent(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    # RunConfig 全部字段都有默认值；接口使用 exclude_unset，仅保存调用方显式传入项。
-    settings: RunConfig
+    # PATCH 语义：先与已保存设置合并，再用 RunConfig 校验，避免拿默认窗口误判局部更新。
+    settings: dict
 
 
 class QueueAdd(BaseModel):
     project_id: int
-    config: Optional[RunConfig] = None
+    config: Optional[dict] = None
 
 
 class FromBook(BaseModel):

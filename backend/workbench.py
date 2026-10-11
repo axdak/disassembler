@@ -19,6 +19,7 @@ if _ENGINE_SCRIPTS not in sys.path:
     sys.path.insert(0, _ENGINE_SCRIPTS)
 from run_pipeline import set_cancel_event  # noqa: E402
 from repair_budget import begin_retry_session  # noqa: E402
+from context_budget import capacity_scope  # noqa: E402
 
 
 WRITER_TASK_TYPES = frozenset({
@@ -393,6 +394,7 @@ class WorkbenchTaskManager:
             project = self.db.get_project(task["project_id"])
             if not project:
                 raise KeyError(f"项目 {task['project_id']} 未找到")
+            settings_snapshot = self.db.all_settings()
             context = TaskContext(
                 task_id=task["id"],
                 project_id=task["project_id"],
@@ -402,21 +404,24 @@ class WorkbenchTaskManager:
                 _progress_callback=lambda percent, detail: self._progress(
                     task["id"], percent, detail
                 ),
-                worker_provider=str(self.db.get_setting("worker_provider", "agy")),
-                settings=self.db.all_settings(),
+                worker_provider=str(settings_snapshot.get("worker_provider", "agy")),
+                settings=settings_snapshot,
             )
             # A user-created writer task owns one allowance across all nested retries.
             if writer_owner is not None:
                 begin_retry_session(context.project_path)
-            prepare = getattr(adapter, "prepare", None)
-            if callable(prepare):
-                prepared_input = prepare(context)
-                self.writer_coordinator.release_reader(task["project_id"], reader_owner)
-                reader_released = True
-                self._wake.set()
-                result = adapter.run(context, prepared_input)
-            else:
-                result = adapter.run(context)
+            # Freeze one budget across pack building, recovery and nested workers.
+            # Explicit task overrides win; saving new settings cannot alter this task.
+            with capacity_scope({**context.settings, **context.params}):
+                prepare = getattr(adapter, "prepare", None)
+                if callable(prepare):
+                    prepared_input = prepare(context)
+                    self.writer_coordinator.release_reader(task["project_id"], reader_owner)
+                    reader_released = True
+                    self._wake.set()
+                    result = adapter.run(context, prepared_input)
+                else:
+                    result = adapter.run(context)
             if not isinstance(result, dict):
                 raise TypeError("task adapter result 必须是 dict")
             if cancellation_event.is_set() or self.db.get_task(task["id"])["cancel_requested"]:

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ModelLimitsSettings, modelLimitsState } from './components/ModelLimitsSettings'
 import type { Project, StageEvent, Status, Chapter, LogEntry, QueueItem, TaskType, RecoverSnapshot } from './types'
 import { eventRefresh } from './hooks/eventRefresh'
 import { useProjectTasks } from './hooks/useProjectTasks'
@@ -315,7 +316,7 @@ export function App() {
   )
 }
 
-function SettingsView({ settings, setSettings, onSave }: {
+export function SettingsView({ settings, setSettings, onSave }: {
   settings: Record<string, unknown>
   setSettings: (s: Record<string, unknown>) => void
   onSave: () => void
@@ -330,6 +331,7 @@ function SettingsView({ settings, setSettings, onSave }: {
   return (
     <div style={{ maxWidth: 520 }}>
       <h3>设置</h3>
+      <ModelLimitsSettings settings={settings} onChange={setSettings} />
 
       {/* 第一组：运行调度 —— 影响流水线怎么跑（worker/并发/章节编排），与压缩无关 */}
       <div style={sectionStyle}>
@@ -369,7 +371,7 @@ function SettingsView({ settings, setSettings, onSave }: {
 
       {/* 第二组：分析任务包 —— 全书分析/章节结构分析/视觉资产三类任务共用 build_pack 的打包参数 */}
       <div style={sectionStyle}>
-        <h4 style={{ margin: '0 0 6px' }}>分析任务包</h4>
+        <h4 style={{ margin: '0 0 6px' }}>分析任务包（字符阈值）</h4>
         <div style={groupHintStyle}>以下参数作用于所有分析任务（全书分析、章节结构分析、视觉资产）的任务包打包。</div>
         <div style={{ marginTop: 8 }}>
           <label>原文策略: </label>
@@ -401,7 +403,7 @@ function SettingsView({ settings, setSettings, onSave }: {
           <span style={{ fontSize: 12, color: '#888' }}> 故事结构摘要每集合列出元素的上限条数；0=不限（全名称索引，默认，避免大书遗漏）</span>
         </div>
         <div style={{ marginTop: 8 }}>
-          <label>上下文预算: </label>
+          <label>任务包字符预算: </label>
           <input type="number" min={10000} style={{ width: 80 }}
             value={String((settings.context_budget_chars as number) ?? 160000)}
             onChange={(e) => setSettings({ ...settings, context_budget_chars: Math.max(10000, Number(e.target.value) || 160000) })}
@@ -421,7 +423,7 @@ function SettingsView({ settings, setSettings, onSave }: {
       {/* 第三组：Delta 与周期治理 —— 两个独立子系统的上下文压缩阈值，与分析任务包互不影响 */}
       <div style={sectionStyle}>
         <h4 style={{ margin: '0 0 6px' }}>Delta 与周期治理</h4>
-        <div style={groupHintStyle}>Delta 提取与周期审计各自独立的上下文压缩阈值，与分析任务包参数互不影响。</div>
+        <div style={groupHintStyle}>这些是材料组织阈值（KB / 字符），不是模型 Token 上限。所有调用仍受上方统一容量控制。</div>
         <div style={{ marginTop: 8 }}>
           <label>Delta故事阈值: </label>
           <input type="number" min={10} style={{ width: 70 }}
@@ -441,9 +443,9 @@ function SettingsView({ settings, setSettings, onSave }: {
       </div>
 
       <p style={{ fontSize: 12, color: '#888' }}>
-        其他参数（worker_timeout_seconds、worker_retries、fullbook_tasks 等）可通过后端 <code>/settings</code> 设置。
+        全书分析任务类型等其他参数可通过后端 <code>/settings</code> 设置。
       </p>
-      <button onClick={onSave}>保存</button>
+      <button onClick={onSave} disabled={Boolean(modelLimitsState(settings).error)}>保存</button>
     </div>
   )
 }

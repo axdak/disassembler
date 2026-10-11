@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 def _now() -> str:
@@ -465,3 +465,21 @@ class Database:
         with self._lock:
             rows = self._conn.execute("SELECT key, value_json FROM settings").fetchall()
         return {r["key"]: json.loads(r["value_json"]) for r in rows}
+
+    def patch_settings(self, updates: dict, validate: Callable[[dict], dict]) -> dict:
+        """Validate the merged snapshot and publish it atomically to task readers.
+
+        The caller owns configuration rules; this layer only serializes concurrent
+        saves and prevents a task from observing half of a new budget.
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT key, value_json FROM settings").fetchall()
+            saved = {r["key"]: json.loads(r["value_json"]) for r in rows}
+            normalized = validate({**saved, **updates})
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT INTO settings(key, value_json) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json",
+                    [(key, json.dumps(normalized[key], ensure_ascii=False)) for key in updates],
+                )
+            return {**saved, **{key: normalized[key] for key in updates}}

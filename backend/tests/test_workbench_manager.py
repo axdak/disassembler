@@ -395,6 +395,8 @@ def test_legacy_queue_retries_after_workbench_writer_releases_project(tmp_path):
         for gate in gates.values():
             gate.set()
         manager.shutdown()
+        # stop() only signals the queue; let it persist completion before closing SQLite.
+        wait_for(lambda: not queue.is_running())
         db.close()
 
 
@@ -860,6 +862,10 @@ def test_runconfig_to_config_passes_compression_fields():
         delta_full_story_kb=66,
         audit_max_context_chars=111111,
         max_pack_chars=55555,
+        model_input_tokens=90000,
+        model_output_tokens=12000,
+        model_context_tokens=100000,
+        model_reserve_tokens=7000,
     )
     cfg = runconfig_to_config(rc)
     assert cfg.worker_window == "powershell"
@@ -871,3 +877,44 @@ def test_runconfig_to_config_passes_compression_fields():
     assert cfg.delta_full_story_kb == 66
     assert cfg.audit_max_context_chars == 111111
     assert cfg.max_pack_chars == 55555
+    assert cfg.model_input_tokens == 90000
+    assert cfg.model_output_tokens == 12000
+    assert cfg.model_context_tokens == 100000
+    assert cfg.model_reserve_tokens == 7000
+
+
+def test_saving_settings_does_not_change_running_task_budget(tmp_path):
+    """An active task keeps its capacity and timeout; a later task uses the new snapshot."""
+    from context_budget import ContextBudget
+    db = Database(tmp_path / 'capacity.db')
+    project = db.create_project(str(tmp_path))
+    started, release = threading.Event(), threading.Event()
+    seen = []
+
+    class Adapter:
+        def run(self, context):
+            first = (ContextBudget.from_env().usable_input, context.settings['worker_timeout_seconds'])
+            started.set()
+            assert release.wait(3)
+            seen.append((first, (ContextBudget.from_env().usable_input,
+                                 context.settings['worker_timeout_seconds'])))
+            return {}
+
+    db.patch_settings({'model_input_tokens': 90000, 'worker_timeout_seconds': 77},
+                      lambda value: RunConfig(**value).model_dump())
+    manager = WorkbenchTaskManager(db, BroadcastHub(), {'governance': Adapter()}, poll_interval=0.01)
+    try:
+        task = manager.create(project['id'], 'governance', {})
+        assert started.wait(3)
+        db.patch_settings({'model_input_tokens': 120000, 'worker_timeout_seconds': 88},
+                          lambda value: RunConfig(**value).model_dump())
+        release.set()
+        wait_for(lambda: db.get_task(task['id'])['status'] == 'done')
+        assert seen == [((60000, 77), (60000, 77))]
+        task = manager.create(project['id'], 'governance', {})
+        wait_for(lambda: db.get_task(task['id'])['status'] == 'done')
+        assert seen[-1] == ((90000, 88), (90000, 88))
+    finally:
+        release.set()
+        manager.shutdown()
+        db.close()

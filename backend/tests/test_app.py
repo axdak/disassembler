@@ -199,6 +199,35 @@ def test_settings(client, auth):
     assert client.get("/settings", headers=auth).json()["worker_provider"] == "codebuddy"
 
 
+def test_model_limits_validate_merged_settings_and_preserve_previous_on_error(client, auth):
+    """A partial save must use the stored window and reject the whole bad update."""
+    saved = dict(model_input_tokens=800000, model_context_tokens=900000,
+                 model_output_tokens=400000, model_reserve_tokens=10000,
+                 worker_timeout_seconds=77, worker_retries=0)
+    assert client.put('/settings', json={'settings': saved}, headers=auth).status_code == 200
+    # This output would be invalid against defaults, but valid against the saved window.
+    assert client.put('/settings', json={'settings': {'model_output_tokens': 600000}}, headers=auth).status_code == 200
+    before = client.get('/settings', headers=auth).json()
+    bad = client.put('/settings', json={'settings': {'model_context_tokens': 500000,
+                                                    'worker_retries': 9}}, headers=auth)
+    assert bad.status_code == 422
+    assert client.get('/settings', headers=auth).json() == before
+    assert client.put('/settings', json={'settings': {'model_input_tokens': 1.5}}, headers=auth).status_code == 422
+    assert client.put('/settings', json={'settings': {'unknown_capacity': 99}}, headers=auth).status_code == 422
+
+
+def test_run_capacity_override_uses_saved_window(client, auth, tmp_path):
+    client.put('/settings', json={'settings': {'model_context_tokens': 900000}}, headers=auth)
+    project = client.post('/projects', json={'path': str(tmp_path / 'large-window')}, headers=auth).json()
+    response = client.post(f"/projects/{project['id']}/run",
+                           json={'config': {'model_output_tokens': 400000}}, headers=auth)
+    assert response.status_code == 200
+    _wait_done(client, project['id'], auth)
+    response = client.post(f"/projects/{project['id']}/run",
+                           json={'config': {'unknown_capacity': 99}}, headers=auth)
+    assert response.status_code == 422
+
+
 def test_settings_reject_invalid_values_without_persisting(client, auth):
     """设置必须在落库前校验，避免无效 provider/负数参数延迟到运行期爆炸。"""
     invalid_provider = client.put(

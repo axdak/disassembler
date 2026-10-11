@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextvars import copy_context
 from functools import wraps
 from datetime import datetime
 from pathlib import Path
@@ -496,6 +497,7 @@ def run_cmd(
     timeout: float = INTERNAL_COMMAND_TIMEOUT_SECONDS,
 ) -> int:
     env = dict(os.environ)
+    env.update(ContextBudget.from_env().to_env())
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
     try:
@@ -650,6 +652,7 @@ def _run_worker(
                 return REPAIR_EXHAUSTED
         before_outputs = capture_output_signatures([expected_output])
         env = dict(os.environ)
+        env.update(ContextBudget.from_env().to_env())
         env.update({
             "PYTHONIOENCODING": "utf-8",
             "ND_TASK_TYPE": task_type,
@@ -960,6 +963,7 @@ def _run_multi_output_worker(
             return 130
         before_outputs = capture_output_signatures(expected_outputs)
         env = dict(os.environ)
+        env.update(ContextBudget.from_env().to_env())
         env.update({
             "PYTHONIOENCODING": "utf-8",
             "ND_TASK_TYPE": task_type,
@@ -2732,7 +2736,9 @@ def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeo
             return 2
         print(f"analysis 并行: {len(pending)} 章, concurrency={concurrency}")
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            rcs = list(ex.map(_do_one, pending))
+            # Each child gets a separate context copy of the same immutable budget.
+            futures = [ex.submit(copy_context().run, _do_one, item) for item in pending]
+            rcs = [future.result() for future in futures]
         failed = [r for r in rcs if r != 0]
         if failed:
             return failed[0]
@@ -2944,8 +2950,9 @@ def cmd_run_interleaved(
                 fail(1); return
 
     n_workers = min(max(1, concurrency), total)
-    producers = [threading.Thread(target=producer, name=f"analysis-{i}") for i in range(n_workers)]
-    cons = threading.Thread(target=consumer, name="delta")
+    producers = [threading.Thread(target=copy_context().run, args=(producer,),
+                                  name=f"analysis-{i}") for i in range(n_workers)]
+    cons = threading.Thread(target=copy_context().run, args=(consumer,), name="delta")
     for t in producers:
         t.start()
     cons.start()
@@ -3969,7 +3976,8 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
                     timeout=wk_timeout, retries=wk_retries, worker_window=wk_window,
                 )
             with ThreadPoolExecutor(max_workers=concurrency) as ex:
-                rcs = list(ex.map(_do_one, jobs))
+                futures = [ex.submit(copy_context().run, _do_one, job) for job in jobs]
+                rcs = [future.result() for future in futures]
             failed = [r for r in rcs if r != 0]
             if failed:
                 return failed[0]

@@ -165,15 +165,14 @@ def create_app(
     if app.state.queue.list():
         app.state.queue.start()
 
-    def resolve_run_config(override: Optional[RunConfig]) -> RunConfig:
+    def resolve_run_config(override: Optional[dict]) -> RunConfig:
         # 存档设置作为默认值，调用方显式传入的字段覆盖（前端通常传空 config，需靠这里注入设置）。
-        merged: dict = {**app.state.db.all_settings()}
-        # 只用调用方显式设置的字段覆盖；空 config(全默认实例)经 exclude_unset 后为空 dict，
-        # 不会把 settings 里的 chapter_mode/analysis_concurrency 等回退成 RunConfig 默认值。
-        override_cfg = override or RunStart().config
-        merged.update(override_cfg.model_dump(exclude_unset=True))
+        merged = {k: v for k, v in app.state.db.all_settings().items() if k in RunConfig.model_fields}
+        # 局部覆盖与完整配置分开：大窗口下仅修改输出，不能先用默认小窗口误拦截。
+        # 历史遗留键可忽略，但新传入的未知键必须交给 RunConfig 拒绝。
+        merged.update(override or {})
         try:
-            return RunConfig(**{k: v for k, v in merged.items() if k in RunConfig.model_fields})
+            return RunConfig(**merged)
         except ValidationError as exc:
             # 历史版本可能已保存无效配置；转换为可理解的 422，而不是在启动任务时返回 500。
             raise HTTPException(status_code=422, detail=f"已保存的运行设置无效: {exc}") from exc
@@ -518,10 +517,15 @@ def create_app(
 
     @app.put("/settings", dependencies=[Depends(require_token)])
     def update_settings(body: SettingsUpdate):
-        # 只落库本次显式提交的字段，避免部分更新把其余设置重置为默认值。
-        for k, v in body.settings.model_dump(exclude_unset=True).items():
-            app.state.db.set_setting(k, v)
-        return app.state.db.all_settings()
+        # 整组先验收，任何一项无效都不得部分落库；只持久化本次提交字段。
+        def validate(values):
+            # Ignore obsolete stored keys, while still rejecting unknown submitted keys.
+            known = {k: v for k, v in values.items() if k in RunConfig.model_fields}
+            return RunConfig(**{**known, **body.settings}).model_dump()
+        try:
+            return app.state.db.patch_settings(body.settings, validate)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # ---- 单任务队列 ----
 

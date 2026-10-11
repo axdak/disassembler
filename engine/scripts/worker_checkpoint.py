@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 from merge_delta import save_json
+from context_budget import ContextBudget
 
 
 def atomic_write_bytes(path: Path, content: bytes) -> None:
@@ -51,6 +52,7 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
         code_hash.update(path.read_bytes())
     settings = {key: value for key, value in os.environ.items()
                 if key.startswith(("ND_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
+    settings.update(ContextBudget.from_env().to_env())
     # Packs may explicitly ask the worker to inspect element details in this file.
     story = project / "故事结构_增量.json"
     story_digest = hashlib.sha256(story.read_bytes() if story.is_file() else b"").hexdigest()

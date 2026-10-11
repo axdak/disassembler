@@ -19,11 +19,12 @@ import argparse
 import json
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
 from events import Event, EventBus
+from context_budget import capacity_scope
 from worker_checkpoint import run_checkpointed_partial
 from repair_budget import REPAIR_EXHAUSTED, begin_retry_session
 from pipeline_state import STAGES, PipelineState
@@ -66,6 +67,11 @@ class Config:
     worker_loop: str = "continuous"
     worker_retries: int = 2
     worker_timeout_seconds: int = 1200
+    # Immutable per-run Token settings; subprocesses inherit this task's snapshot.
+    model_input_tokens: int = 300000
+    model_output_tokens: int = 20000
+    model_context_tokens: int = 300000
+    model_reserve_tokens: int = 30000
     worker_window: str = "hidden"
     max_attempts: int = 10  # 安全上限；真正硬阻塞由 stagnant_limit 触发
     stagnant_limit: int = 3
@@ -108,6 +114,11 @@ class Orchestrator:
         self.bus.emit(Event(type, stage=stage, detail=detail, data=data or {}))
 
     def run(self) -> int:
+        """Freeze this run's capacity without changing another project's environment."""
+        with capacity_scope(asdict(self.config)):
+            return self._run()
+
+    def _run(self) -> int:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
         begin_retry_session(self.project_dir)
         set_cancel_event(self._cancel)
