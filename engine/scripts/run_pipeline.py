@@ -808,9 +808,17 @@ def run_generation_worker(
             return run_bounded_final(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
     repair_task = {"analysis": "analysis_regenerate", "delta": "repair_chapter",
                    "audit_correction": "audit_repair", "final_draft": "repair_final"}.get(task_type)
+    final_before = expected_output.read_bytes() if task_type == "final_draft" and expected_output.is_file() else None
     before_outputs = capture_output_signatures([expected_output])
     rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
                     chapter_seq, defer_artifact_repair=bool(repair_task), **worker_options)
+    if rc == CONTEXT_EXCEEDED and task_type == "final_draft" and final_before is not None:
+        # Provider/tool usage may exceed the preflight estimate. Continue through
+        # the same checkpointed final-governance path instead of redispatching
+        # the unchanged oversized request.
+        from bounded_final import run_bounded_final
+        atomic_write_bytes(expected_output, final_before)
+        return run_bounded_final(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
     if rc == CONTEXT_EXCEEDED and task_type in {"analysis", "delta"}:
         from bounded_generation import run_bounded_chapter
         return run_bounded_chapter(command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options)
