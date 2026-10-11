@@ -231,7 +231,7 @@ describe('workbench seven-tab UI', () => {
     fireEvent.change(screen.getByLabelText('章节范围'), { target: { value: '1-10' } })
     fireEvent.change(screen.getByLabelText('目标元素'), { target: { value: '角色:林婉' } })
     fireEvent.change(screen.getByLabelText('自定义问题'), { target: { value: '关系如何' } })
-    expect(screen.getByText('完整保留，超限自动分层并复核跨片关联')).toBeInTheDocument()
+    expect(screen.getByText('按维度选择材料，必要原文不抽样；历史分级，超限分包')).toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('强制重跑'))
     fireEvent.click(screen.getByRole('button', { name: '创建分析任务' }))
     await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(1))

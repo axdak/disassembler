@@ -175,10 +175,10 @@ def test_audit_pack_pages_full_story_when_it_exceeds_budget():
 
         assert pack is not None
         text = pack.read_text(encoding="utf-8")
-        assert pack.with_suffix(".governance.json").is_file()
+        assert "## 当前故事结构索引" in text
         assert "## 完整故事结构" not in text
         status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
-        assert status["context"]["render_mode"] == "complete_evidence_tree"
+        assert status["context"]["render_mode"] == "story_index_relevant"
 
 
 def test_audit_pack_keeps_full_story_for_large_file_when_budget_allows():
@@ -210,8 +210,8 @@ def test_audit_pack_attempts_full_story_before_paging_very_large_file():
         assert pack is not None
         status = load_status(next(project.rglob("audit_001-001.status.json")))
         attempts = [attempt["render_mode"] for attempt in status["context"]["attempts"]]
-        assert attempts == ["full_story"]
-        assert status["context"]["render_mode"] == "complete_evidence_tree"
+        assert attempts == ["full_story", "story_index_relevant"]
+        assert status["context"]["render_mode"] == "story_index_relevant"
 
 
 def test_audit_pack_pages_single_chapter_without_truncating_evidence():
@@ -225,7 +225,7 @@ def test_audit_pack_pages_single_chapter_without_truncating_evidence():
 
         assert pack is not None and pack.with_suffix(".governance.json").is_file()
         status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
-        assert status["context"]["render_mode"] == "complete_evidence_tree"
+        assert status["context"]["render_mode"] == "tiered_evidence_tree"
         assert status["context"]["current_evidence_chars"] >= len("原文证据" * 10000)
         assert (project / "质量治理" / "周期审计" / "audit_001-001.md").exists()
 
@@ -251,8 +251,7 @@ def test_audit_pack_splits_multi_chapter_overflow_into_child_packs():
         assert {item["range"] for item in mid["child_ranges"]} == {"001-002", "003-003"}
         assert (audit_dir / "audit_001-002.md").is_file()
         assert (audit_dir / "audit_003-003.md").is_file()
-        assert (audit_dir / "audit_004-004.md").is_file()
-        assert (audit_dir / "audit_005-005.md").is_file()
+        assert (audit_dir / "audit_004-005.md").is_file()
         assert not (audit_dir / "audit_001-005.md").exists()
 
 
@@ -726,8 +725,8 @@ def test_delta_story_context_passes_full_story_when_small():
     print("[OK] 小故事(<256KB) Delta 上下文传完整 JSON")
 
 
-def test_delta_story_context_keeps_full_details_when_medium():
-    # 历史大小不再决定是否丢弃详情。
+def test_delta_story_context_uses_global_index_and_recent_deltas_when_medium():
+    # 达到阈值后采用全局索引和近期 Delta，完整档案仍保留。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -740,15 +739,15 @@ def test_delta_story_context_keeps_full_details_when_medium():
 
         ctx = build_delta_story_context(story, project, chapter_seq=1)
 
-        assert "FULL_ONLY_MARKER" in ctx
+        assert "FULL_ONLY_MARKER" not in ctx
         assert "主角A" in ctx
         assert "路人B" in ctx
 
-    print("[OK] 中故事保留完整历史详情")
+    print("[OK] 达到阈值使用全局索引，完整详情可查证")
 
 
-def test_delta_story_context_large_tier_keeps_all_details():
-    # 超过旧阈值时仍保留完整历史。
+def test_delta_story_context_large_tier_keeps_all_names_and_lookup_path():
+    # 超过阈值时恢复全局索引，不限制索引名称数量。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -761,7 +760,7 @@ def test_delta_story_context_large_tier_keeps_all_details():
 
         ctx = build_delta_story_context(story, project, chapter_seq=1)
 
-        assert "FULL_ONLY_MARKER" in ctx  # 故事详情不再省略
+        assert "FULL_ONLY_MARKER" not in ctx  # 完整档案通过原件入口读取
         assert "主角A" in ctx  # 全部名称都在
         assert "路人B" in ctx  # 全部名称都在（不只是主角）
         assert "故事结构_增量.json" in ctx  # 附文件路径
@@ -822,10 +821,10 @@ def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
         ctx = build_delta_story_context(story, project, chapter_seq=2)
 
         assert "前章角色C" in ctx  # 实际 Delta 内容被嵌入
-        assert "FULL_ONLY_MARKER" in ctx  # 故事详情不再省略
-        assert "第001章完整章节Delta" in ctx  # 实际 Delta 块标记
+        assert "FULL_ONLY_MARKER" not in ctx  # 完整档案通过原件入口读取
+        assert "第001章 Delta:" in ctx  # 实际 Delta 块标记
 
-    print("[OK] 超过旧阈值仍保留完整历史与此前 Delta")
+    print("[OK] 达到阈值使用全局索引与最近十章完整 Delta")
 
 
 if __name__ == "__main__":
@@ -839,7 +838,7 @@ if __name__ == "__main__":
     test_periodic_governance_skipped_when_no_committed_chapters()
     test_commit_governance_rejects_no_change_missing_metadata()
     test_delta_story_context_passes_full_story_when_small()
-    test_delta_story_context_keeps_full_details_when_medium()
-    test_delta_story_context_large_tier_keeps_all_details()
+    test_delta_story_context_uses_global_index_and_recent_deltas_when_medium()
+    test_delta_story_context_large_tier_keeps_all_names_and_lookup_path()
     test_delta_story_context_medium_tier_includes_actual_recent_deltas()
     print("\n全部测试通过 [PASS]")

@@ -373,7 +373,7 @@ export function SettingsView({ settings, setSettings, onSave }: {
       <div style={sectionStyle}>
         <h4 style={{ margin: '0 0 6px' }}>分析任务包（字符阈值）</h4>
         <div style={groupHintStyle}>以下参数作用于所有分析任务（全书分析、章节结构分析、视觉资产）的任务包打包。</div>
-        <p style={{ fontSize: 12 }}>原文、历史档案、章节分析和前置报告全部保留，容量不足时自动分层。旧版本的抽样、省略及截断设置不再生效。</p>
+        <p style={{ fontSize: 12 }}>按分析维度选择章节证据或全书结构资料，历史按容量使用全文或索引。选定的必要证据超限时完整分包，不硬截断；原件保留供查证。</p>
         <div style={{ marginTop: 8 }}>
           <label>单包字符上限: </label>
           <input type="number" min={10000} style={{ width: 80 }}
@@ -384,17 +384,25 @@ export function SettingsView({ settings, setSettings, onSave }: {
         </div>
       </div>
 
-      {/* 第三组：Delta 与周期治理 —— 治理分包阈值；不再按大小缩减历史 */}
+      {/* 第三组：历史表示分级与治理分包；独立于模型 Token 容量 */}
       <div style={sectionStyle}>
         <h4 style={{ margin: '0 0 6px' }}>Delta 与周期治理</h4>
-        <div style={groupHintStyle}>这是材料分包的字符阈值，不是模型 Token 上限。历史完整处理，所有调用仍受上方统一容量控制。</div>
+        <div style={groupHintStyle}>历史全文、全局索引和相关档案按预算选择，不逐章重读全部历史。KB 和字符阈值不是模型 Token 上限。</div>
+        <div style={{ marginTop: 8 }}>
+          <label>Delta 历史全文阈值: </label>
+          <input type="number" min={10} style={{ width: 80 }}
+            value={String((settings.delta_full_story_kb as number) ?? 256)}
+            onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 256) })}
+          />
+          <span style={{ fontSize: 12, color: '#888' }}> KB；达到阈值改用全局名称索引＋最近十章完整 Delta；统一容量不足时可提前切换。完整档案可按需核实。</span>
+        </div>
         <div style={{ marginTop: 8 }}>
           <label>周期审计上下文上限: </label>
           <input type="number" min={10000} style={{ width: 80 }}
             value={String((settings.audit_max_context_chars as number) ?? 524288)}
             onChange={(e) => setSettings({ ...settings, audit_max_context_chars: Math.max(10000, Number(e.target.value) || 524288) })}
           />
-          <span style={{ fontSize: 12, color: '#888' }}> 字符；超限先拆章节区间，单章仍超限时继续分片；完整复核后按原要求验收</span>
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；先尝试历史全文、索引＋相关详情、索引；仍超限才拆周期或单章证据，原严格校验不变</span>
         </div>
       </div>
 

@@ -54,7 +54,7 @@ def test_periodic_pack_uses_token_budget_and_invalidates_old_capacity(tmp_path, 
     monkeypatch.setenv("ND_CONTEXT_INPUT_TOKENS", "31000")
     assert write_audit_pack(tmp_path, 1, 1).with_suffix(".governance.json").is_file()
     status = json.loads(audit_paths(tmp_path, 1, 1)["status"].read_text(encoding="utf-8"))
-    assert status["context"]["render_mode"] == "complete_evidence_tree"
+    assert status["context"]["render_mode"] == "tiered_evidence_tree"
     assert chapter.read_text(encoding="utf-8") == "章节完整证据" * 3000
 
 

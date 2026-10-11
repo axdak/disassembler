@@ -307,3 +307,22 @@ def test_identical_evidence_has_one_canonical_read_with_all_roles(tmp_path, monk
     catalog = json.loads(next((tmp_path / "质量治理").rglob("catalog.json")).read_text(encoding="utf-8"))
     assert len(catalog) == 2  # draft plus one full evidence file, not three copies
     assert set(catalog[1]["roles"]) == {source.name, duplicate.name}
+
+
+def test_optional_originals_are_lookup_only_and_invalidate_cached_success(tmp_path, monkeypatch):
+    """Archives remain available without becoming mandatory model calls on every pass."""
+    pack, draft, _ = project_files(tmp_path, monkeypatch)
+    archive = tmp_path / '查证原文.md'
+    archive.write_text('仅供查证的全书历史原文' * 2000, encoding='utf-8')
+    save_json(pack.with_suffix('.references.json'), [str(archive)])
+    calls = []
+    worker = unchanged_worker(calls)
+    assert run_bounded_final('fake', tmp_path, pack, draft, worker) == 0
+    assert not any('仅供查证的全书历史原文' in prompt for prompt in calls)
+    assert list((tmp_path / '质量治理').rglob('references.json'))
+    count = len(calls)
+    assert run_bounded_final('fake', tmp_path, pack, draft, worker) == 0
+    assert len(calls) == count
+    archive.write_text('查证原件发生变化，旧复核不可复用', encoding='utf-8')
+    assert run_bounded_final('fake', tmp_path, pack, draft, worker) == 0
+    assert len(calls) > count

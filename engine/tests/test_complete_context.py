@@ -13,7 +13,7 @@ from test_capacity_tree import review_response
 
 @pytest.mark.parametrize('old_policy', ['auto', 'none', 'sample', 'full'])
 @pytest.mark.parametrize('task', ['summary', 'report', 'narrative_structure'])
-def test_every_legacy_policy_keeps_entire_original_history_and_reports(tmp_path, old_policy, task):
+def test_legacy_policies_keep_required_materials_and_complete_lookup_sources(tmp_path, old_policy, task):
     from analysis_context_pack import build_pack, split_rendered_pack
     from test_audit_pack import write_completed_chapter, empty_story
     chapter = write_completed_chapter(tmp_path, 1)
@@ -28,9 +28,15 @@ def test_every_legacy_policy_keeps_entire_original_history_and_reports(tmp_path,
     report.write_text(upstream, encoding='utf-8')
     content = build_pack(tmp_path, task, [{'seq': 1, 'filename': chapter.name}], [], '',
                          old_policy, 10, 10, 1, 1, story_summary_max_items=1, max_pack_chars=12000)
-    assert original in content and story['介绍']['描述'] in content
-    if task != 'summary':
+    assert ('唯一原文尾部' in content) == (task == 'summary')
+    assert '唯一历史尾部' not in content  # Story uses the explicit global index.
+    assert str(tmp_path / '故事结构_增量.json') in content
+    assert chapter.read_text(encoding='utf-8') == original
+    if task == 'narrative_structure':
         assert upstream in content
+    elif task == 'report':
+        assert str(report) in content  # Oversized summary is a lookup reference.
+        assert report.read_text(encoding='utf-8') == upstream
     pieces = split_rendered_pack(content, 12000)
     material = content.split('## 章节材料\n', 1)[1]
     assert ''.join(piece.split('## 章节材料\n', 1)[1] for piece in pieces) == material

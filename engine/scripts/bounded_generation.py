@@ -37,9 +37,9 @@ def review_complete_candidate(tree, text, sources, background, **options):
     atomic_write_bytes(candidate, text.encode())
     sources = list(dict.fromkeys(sources)) + [(candidate, "完整待复核候选；必须与原始证据区分")]
     review = CapacityTree(tree.root, tree.command, tree.worker,
-                          tree.contract + "\n独立复核全部原件与候选。尤其核对跨片名称、时序、伏笔、引用与遗漏。"
+                          tree.contract + "\n独立完整复核本次必读材料与候选。查证档案按关联读取，不逐章重读全部历史。尤其核对跨片名称、时序、伏笔、引用与遗漏。"
                           "区分历史背景、分析判断与本次新增事实。原文优先，不能用派生产物证明自己正确。",
-                          tree.target, sources, **options)
+                          tree.target, sources, **{**options, "reference_sources": tree.reference_sources})
     _, additions, _ = review.run(background=background, review=True)
     if not tree.unchanged() or not review.unchanged():
         raise TreeFailure(REPAIR_EXHAUSTED)
@@ -96,9 +96,10 @@ def combine_delta(contents, story, seq, resolve=None):
 
 
 def run_bounded_chapter(command, project, task_type, output, seq, worker, **options):
-    """Read all history in bounded pages, then analyze the one original chapter."""
-    from run_pipeline import chapter_by_seq, artifact_paths, render_prompt, chapter_time
-    from full_context import history_evidence
+    """Page only this chapter and its selected history tier; archives remain references."""
+    from run_pipeline import (chapter_by_seq, artifact_paths, render_prompt, chapter_time,
+                              build_delta_story_context, DELTA_FULL_STORY_KB)
+    from context_budget import ContextBudget, estimate_tokens
     from validate_chapter_analysis import validate_chapter_analysis_text
     chapter = chapter_by_seq(project, seq)
     if chapter is None:
@@ -119,21 +120,38 @@ def run_bounded_chapter(command, project, task_type, output, seq, worker, **opti
     try:
         background = ""
         history_tree = None
+        history_sources, references = [], []
         if task_type == "delta" and story.is_file():
-            history_tree = CapacityTree(project, command, worker,
-                                        "完整阅读历史档案，索引关键进展、正式名称与别名、未决线索和来源位置。禁止生成新事实。",
-                                        "历史关联索引.md", history_evidence(project, seq), **options)
-            background, _, refs = history_tree.run(overview_only=True)
-            background += f"\n完整历史入口：{refs[-1]}；原件目录：{history_tree.root / 'materials'}"
+            metadata_path = paths["delta_task"].with_suffix(".context.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+            history = paths["delta_task"].with_suffix(".history.md")
+            # Rebuild the selected representation locally, without a model call:
+            # changed chapter/analysis/recent Deltas must invalidate old evidence.
+            current = contract + chapter.read_text(encoding="utf-8") + paths["analysis"].read_text(encoding="utf-8")
+            background = build_delta_story_context(story, project, seq,
+                metadata.get("full_story_kb", DELTA_FULL_STORY_KB), current_material=current)
+            atomic_write_bytes(history, background.encode())
+            history_sources = [(history, "本章选定的历史上下文；不是本章新增事实")]
+            references = [(story, "完整历史故事档案；按正式名称核查"), *sources]
+            # Most selected tiers are inlined without another model call. Only
+            # an oversized index/recent-Delta package itself needs paging.
+            if estimate_tokens(background) > ContextBudget.from_env().usable_input // 3:
+                history_tree = CapacityTree(project, command, worker,
+                    "读取本章选定的历史上下文，索引身份与关联证据。禁止生成本章新增事实。",
+                    "历史关联索引.md", history_sources, reference_sources=references, **options)
+                background, _, refs = history_tree.run(overview_only=True)
+                background += f"\n选定历史完整入口：{refs[-1]}；原件目录：{history_tree.root / 'materials'}"
         protected = list(history_tree.root.rglob("*.json")) if history_tree else []
         tree = CapacityTree(project, command, worker, contract, output.name, sources,
-                            protected_materials=protected, **options)
+                            protected_materials=protected, reference_sources=references, **options)
+        if str(story.resolve()) in tree.reference_paths:
+            background = background.replace(str(story), str(tree.reference_paths[str(story.resolve())]))
         # The history identity is part of task text, so a changed story invalidates
         # content checkpoints even when the chapter itself stayed unchanged.
         overview, contents, _ = tree.run(background=background)
         preliminary = (json.dumps(combine_delta(contents, json.loads(story.read_text(encoding="utf-8")), seq, tree.resolve), ensure_ascii=False)
                        if task_type == "delta" else assemble(contents))
-        review_sources = sources + (history_evidence(project, seq) if task_type == "delta" else [])
+        review_sources = sources + history_sources
         contents += review_complete_candidate(tree, preliminary, review_sources, overview, **options)
         if task_type == "delta":
             value = combine_delta(contents, json.loads(story.read_text(encoding="utf-8")), seq, tree.resolve)
@@ -206,7 +224,9 @@ def run_bounded_governance(command, project, pack, output, worker, **options):
     sources = [(Path(path), role) for path, role in metadata["sources"]]
     before = digest(output)
     try:
-        tree = CapacityTree(project, command, worker, metadata["contract"], output.name, sources, **options)
+        references = [(Path(path), role) for path, role in metadata.get("references", [])]
+        tree = CapacityTree(project, command, worker, metadata["contract"], output.name, sources,
+                            reference_sources=references, **options)
 
         def combine(parts):
             result = None

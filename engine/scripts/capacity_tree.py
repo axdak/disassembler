@@ -131,13 +131,17 @@ class CapacityTree:
         self.protected_materials = options.get("protected_materials", [])
         self.overview_budget = min(2000, self.policy.output_tokens // 5, self.policy.usable_input // 16)
         self.sources = [(str(path.resolve()), digest(path), role) for path, role in sources]
+        # Reference archives are addressable evidence, not a mandatory reread
+        # queue. Their identity still invalidates stale checkpoints and receipts.
+        self.reference_sources = list(options.get("reference_sources", []))
+        references = [(str(path.resolve()), digest(path), role) for path, role in self.reference_sources]
         engine = Path(__file__).resolve().parents[1]
         code = [(str(path.relative_to(engine)), digest(path)) for path in sorted(
             [*engine.joinpath("scripts").glob("*.py"), *engine.joinpath("prompts").rglob("*.j2"),
              *engine.joinpath("schemas").glob("*.json"), engine / "tools/agent_worker.py"])]
         settings = {key: value for key, value in os.environ.items() if key.startswith(
             ("ND_", "CODEBUDDY_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
-        identity = json.dumps([self.sources, command, contract, target, self.policy.__dict__, code, settings],
+        identity = json.dumps([self.sources, references, command, contract, target, self.policy.__dict__, code, settings],
                               sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         self.root = project / "质量治理/容量分层" / key
@@ -150,11 +154,21 @@ class CapacityTree:
                 atomic_write_bytes(copy, source.read_bytes())
             self.materials.append((copy, role))
         save_json(self.root / "sources.json", self.sources)
+        self.references = references
+        self.reference_paths = {}
+        catalog = []
+        for index, (path, signature, role) in enumerate(references):
+            copy = self.root / "references" / f"{index:05d}{Path(path).suffix}"
+            if digest(copy) != signature:
+                atomic_write_bytes(copy, Path(path).read_bytes())
+            self.reference_paths[path] = copy
+            catalog.append({"path": str(copy), "role": role, "sha256": signature})
+        save_json(self.root / "references.json", catalog)
         self.coverage = []
         self.boundaries = {}
 
     def unchanged(self):
-        return all(digest(Path(path)) == signature for path, signature, _ in self.sources)
+        return all(digest(Path(path)) == signature for path, signature, _ in self.sources + self.references)
 
     def request(self, material: str, label: str, *, overview_only=False, decision=False, review=False):
         """Checkpoint only protocol-valid output; failure budgets survive restart."""
@@ -163,7 +177,9 @@ class CapacityTree:
             "完整原件位于 materials；分片可能跨段落或 JSON 边界，需要上下文时按来源与区间核对原件。"
             "概览只用于定位关联，不能取代原文证据。不得遗漏细节或降低原输出要求。\n"
             f"本次目标：{self.target}\n阶段：{label}\n"
-            f"概览最多估算 {self.overview_budget} token；本次输出总计最多 {self.policy.output_tokens} token。\n"
+            + (f"按需查证档案目录：{self.root / 'references.json'}。索引仅用于定位；涉及身份、合并、冲突时必须查对应完整档案，不能凭索引猜测。\n"
+               if self.references else "")
+            + f"概览最多估算 {self.overview_budget} token；本次输出总计最多 {self.policy.output_tokens} token。\n"
             '仅输出 JSON {"overview":"关联线索与证据位置索引", "content": "原格式 Markdown 片段或原格式 JSON 对象"}。'
             "Markdown content 是字符串；JSON content 是对象或数组；无新增内容时 content 为 null。\n"
             + ("本次只阅读历史背景，content 必须为 null，禁止把历史事实当本章新增。\n" if overview_only else
@@ -207,6 +223,7 @@ class CapacityTree:
             selected = (os.environ.get("ND_RECOVERY_COMMAND") or self.command) if state["attempts"] == 3 else self.command
             rc, changed = guarded_worker(self.worker, selected, directory, "bounded_fragment", pack, result,
                                          [pack, ledger, *(path for path, _ in self.materials),
+                                          *self.reference_paths.values(), self.root / "references.json",
                                           *self.protected_materials,
                                           *(path for path in self.root.rglob("result.json") if path != result)], self.options)
             if rc in {130, CONTEXT_EXCEEDED}:

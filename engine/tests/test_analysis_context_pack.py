@@ -287,8 +287,8 @@ def test_narrative_structure_per_chapter_does_not_inject_background(tmp_path):
     assert "## 全书背景资料" not in pack
 
 
-def test_structure_task_pack_keeps_global_and_per_chapter_material(tmp_path):
-    """结构类材料之外仍需保留完整原文与章节分析。"""
+def test_structure_task_pack_uses_global_material_and_chapter_references(tmp_path):
+    """恢复结构类任务的资料边界，章节原件保留供按需查证。"""
     from analysis_context_pack import build_pack
     project = tmp_path / "novel"
     (project / "原文拆解").mkdir(parents=True)
@@ -302,8 +302,8 @@ def test_structure_task_pack_keeps_global_and_per_chapter_material(tmp_path):
     pack = build_pack(project, "plot", chapters, [], "", "sample", 6000, 12000, 1, 1)
     assert "## 全书级分析材料" in pack
     assert "## 章节材料" in pack
-    # 结构类也必须覆盖每章完整分析。
-    assert "分析MD内容" in pack
+    assert "分析MD内容" not in pack
+    assert str(project / "章节处理") in pack
     assert "章节梗概汇总" in pack
     assert "上下文指引" in pack
 

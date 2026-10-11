@@ -108,7 +108,7 @@ export function AnalysisWorkbenchTab({
         <label htmlFor="aw-question">自定义问题</label>
         <input id="aw-question" aria-label="自定义问题" value={question} onChange={(e) => setQuestion(e.target.value)} style={{ padding: 4 }} />
         <span>原文处理</span>
-        <span>完整保留，超限自动分层并复核跨片关联</span>
+        <span>按维度选择材料，必要原文不抽样；历史分级，超限分包</span>
         <label htmlFor="aw-force">强制重跑</label>
         <input id="aw-force" aria-label="强制重跑" type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
       </div>
