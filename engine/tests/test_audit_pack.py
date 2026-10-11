@@ -462,9 +462,10 @@ output.write_text(json.dumps({
         assert rc == 0
         audit_dir = project / "质量治理" / "周期审计"
         parent = load_status(audit_dir / "audit_001-005.status.json")
-        assert parent["status"] == "covered_by_children"
+        assert parent["status"] == "committed"
+        assert parent["cross_range_committed"] is True
         assert {item["range"] for item in parent["child_ranges"]} == {"001-003", "004-005"}
-        assert load_status(audit_dir / "audit_001-003.status.json")["status"] == "covered_by_children"
+        assert load_status(audit_dir / "audit_001-003.status.json")["status"] == "committed"
         assert load_status(audit_dir / "audit_001-002.status.json")["status"] == "committed"
         assert load_status(audit_dir / "audit_003-003.status.json")["status"] == "committed"
         assert load_status(audit_dir / "audit_004-005.status.json")["status"] == "committed"

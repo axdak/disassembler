@@ -40,3 +40,42 @@ def test_invalid_limits_fail_explicitly(monkeypatch):
     monkeypatch.setenv("ND_CONTEXT_INPUT_TOKENS", "1")
     with pytest.raises(ValueError):
         ContextBudget.from_env()
+
+
+def test_periodic_pack_uses_token_budget_and_invalidates_old_capacity(tmp_path, monkeypatch):
+    from test_audit_pack import write_json, empty_story, write_completed_chapter
+    from run_pipeline import write_audit_pack, audit_paths
+    write_json(tmp_path / "故事结构_增量.json", empty_story())
+    chapter = write_completed_chapter(tmp_path, 1)
+    chapter.write_text("章节完整证据" * 3000, encoding="utf-8")
+    pack = write_audit_pack(tmp_path, 1, 1)
+    assert pack is not None
+    monkeypatch.setenv("ND_CONTEXT_INPUT_TOKENS", "31000")
+    assert write_audit_pack(tmp_path, 1, 1) is None
+    status = json.loads(audit_paths(tmp_path, 1, 1)["status"].read_text(encoding="utf-8"))
+    assert status["status"] == "blocked_context"
+    assert chapter.read_text(encoding="utf-8") == "章节完整证据" * 3000
+
+
+def test_cross_range_failure_never_marks_parent_complete(tmp_path, monkeypatch):
+    import run_pipeline as pipeline
+    from test_audit_pack import write_json, empty_story, write_no_change_correction
+    write_json(tmp_path / "故事结构_增量.json", empty_story())
+    for first, last in [(1, 2), (3, 5)]:
+        write_no_change_correction(tmp_path, first, last)
+        pipeline.update_audit_status(pipeline.audit_paths(tmp_path, first, last), status="committed")
+    monkeypatch.setattr(pipeline, "run_generation_worker", lambda *a, **k: 9)
+    rc = pipeline.run_child_periodic_governance(tmp_path, 1, 5, [(1, 2), (3, 5)],
+                                              200000, "fake", 10, 0, "hidden", "continuous")
+    assert rc == 9
+    assert pipeline.audit_status(tmp_path, 1, 5)["status"] == "cross_range_pending"
+
+
+def test_recovery_replays_children_before_parent(tmp_path):
+    import run_pipeline as pipeline
+    from test_audit_pack import write_json
+    for first, last in [(1, 5), (4, 5), (1, 3)]:
+        write_json(pipeline.audit_paths(tmp_path, first, last)["status"],
+                   {"status": "committed", "range": f"{first:03d}-{last:03d}"})
+    due = pipeline.committed_audits_due_for_recovery(tmp_path, 0, 5)
+    assert [(item["_start"], item["_end"]) for item in due] == [(1, 3), (4, 5), (1, 5)]

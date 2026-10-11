@@ -157,6 +157,9 @@ def test_finalize_adapter_uses_program_before_bounded_model_repair(tmp_path, mon
     repair.parent.mkdir(parents=True)
     repair.write_text("repair", encoding="utf-8")
     calls = []
+    pack = project / "质量治理/最终审计/final_task_pack.md"
+    pack.parent.mkdir(parents=True, exist_ok=True)
+    pack.write_text("完整离线终稿任务", encoding="utf-8")
     monkeypatch.setattr(task_adapters, "cmd_final_pack", lambda *a: 0)
     monkeypatch.setattr(task_adapters, "cmd_commit_final_draft", lambda *a: 1)
     monkeypatch.setattr(run_pipeline, "wait_before_worker_retry", lambda attempt: False)

@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack
+from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack, estimate_tokens
 
 import argparse
 import hashlib
@@ -1502,7 +1502,7 @@ def mark_audit_covered_by_children(project_dir: Path, start: int, end: int, chil
     paths = audit_paths(project_dir, start, end)
     update_audit_status(
         paths,
-        status="covered_by_children",
+        status="committed" if audit_status(project_dir, start, end).get("cross_range_committed") else "covered_by_children",
         range=audit_range_label(start, end),
         child_ranges=[
             {
@@ -1513,7 +1513,7 @@ def mark_audit_covered_by_children(project_dir: Path, start: int, end: int, chil
             for child_start, child_end in child_ranges
         ],
         covered_at=datetime.now().isoformat(),
-        action="父周期审计已由全部子区间真实审计补丁覆盖；恢复时只重放子区间 correction。",
+        action="父周期由子区间审计及跨区间复核共同覆盖；恢复时先重放子补丁，再重放父复核补丁。",
     )
 
 
@@ -1712,6 +1712,7 @@ def write_audit_pack(
     init_dirs(project_dir)
     story = ensure_story(project_dir)
     paths = audit_paths(project_dir, start, end)
+    capacity = ContextBudget.from_env()
     if paths["pack"].exists() and not force:
         existing_status = load_json(paths["status"], {}) if paths["status"].is_file() else {}
         existing_context = existing_status.get("context", {}) if isinstance(existing_status, dict) else {}
@@ -1720,6 +1721,7 @@ def write_audit_pack(
             and existing_context.get("format_version") == AUDIT_CONTEXT_FORMAT_VERSION
             and existing_context.get("max_context_chars") == max_context_chars
             and existing_context.get("prompt_fingerprint") == prompt_fingerprint("流水线/周期审计.j2")
+            and existing_context.get("capacity_policy") == capacity.__dict__
         ):
             print(f"周期审计任务包已存在: {paths['pack']}")
             return paths["pack"]
@@ -1783,8 +1785,9 @@ def write_audit_pack(
             chapters=chapters,
             taxonomy_json=taxonomy_json,
         )
-        attempts.append({"render_mode": mode, "rendered_chars": len(candidate)})
-        if len(candidate) <= max_context_chars:
+        attempts.append({"render_mode": mode, "rendered_chars": len(candidate),
+                         "estimated_tokens": estimate_tokens(candidate)})
+        if len(candidate) <= max_context_chars and capacity.fits(candidate):
             selected_content = candidate
             selected_mode = mode
             break
@@ -1794,6 +1797,7 @@ def write_audit_pack(
         "prompt_fingerprint": prompt_fingerprint("流水线/周期审计.j2"),
         "max_context_chars": max_context_chars,
         "current_evidence_chars": current_evidence_chars,
+        "capacity_policy": capacity.__dict__,
         "attempts": attempts,
     }
     if not selected_content:
@@ -1865,7 +1869,8 @@ def committed_audits_due_for_recovery(project_dir: Path, snapshot_seq: int, to_s
             data["_end"] = end
             data["_status_path"] = str(path)
             due.append(data)
-    return due
+    # Children with the same end chapter must replay before their parent reconciliation.
+    return sorted(due, key=lambda item: (item["_end"], item["_end"] - item["_start"]))
 
 
 def replay_committed_audits_after_recovery(project_dir: Path, seq: int, due_audits: List[Dict[str, Any]]) -> int:
@@ -1900,6 +1905,69 @@ def update_audit_status(paths: Dict[str, Path], **updates: Any) -> None:
     save_json(paths["status"], data)
 
 
+def run_cross_range_governance(project_dir: Path, start: int, end: int,
+                               child_ranges: List[Tuple[int, int]], max_context_chars: int,
+                               command: str, timeout: float, retries: int, window: str) -> int:
+    """Reconcile child decisions before declaring their parent cycle complete.
+
+    Leaf audits have read complete chapter evidence. This pass checks cross-range
+    identities/conflicts against the resulting story and preserves links to every
+    source for factual verification; it never replays child operations blindly.
+    """
+    paths = audit_paths(project_dir, start, end)
+    status = audit_status(project_dir, start, end)
+    if status.get("cross_range_committed"):
+        return 0
+    story = ensure_story(project_dir)
+    blocks = ["# 跨子区间治理复核", f"范围：第{start:03d}章-第{end:03d}章",
+              "子区间分别通过不代表本周期整体通过。核查跨区间重复实体、别名、引用和矛盾。",
+              "当前结构已经应用子补丁，禁止重复执行子操作；只输出新增发现的治理补丁。",
+              "补丁沿用原治理契约，新增/修改须有详情.提取理由；无修改时须输出 no_change、完整证据范围和非空质量说明。",
+              "完整证据保存在原文件，不得依据摘要补造事实；涉及合并或矛盾时须补读对应原文。",
+              "只写目标补丁，程序负责验证与提交，禁止直接修改故事库。",
+              f"目标：{paths['correction']}", f"完整故事结构：{story}",
+              "## 全部正式名称与别名", build_lightweight_index(story)]
+    def add_children(ranges):
+        for first, last in ranges:
+            child = audit_paths(project_dir, first, last)
+            if child["correction"].is_file():
+                blocks.extend([f"## 子区间结论 {first:03d}-{last:03d}",
+                               child["correction"].read_text(encoding="utf-8")])
+            else:
+                nested = audit_child_ranges_from_status(audit_status(project_dir, first, last))
+                if nested:
+                    add_children(nested)
+                else:
+                    raise ValueError("子区间缺少真实治理产物，不能标记整体完成")
+    add_children(child_ranges)
+    for seq in range(start, end + 1):
+        chapter = chapter_by_seq(project_dir, seq)
+        if chapter:
+            materials = artifact_paths(project_dir, chapter)
+            blocks.append(f"第{seq:03d}章原文：{chapter}；分析：{materials['analysis']}；Delta：{materials['delta']}")
+    content = "\n\n".join(blocks)
+    paths["pack"].write_text(content, encoding="utf-8")
+    update_audit_status(paths, status="cross_range_pending", cross_range_required=True)
+    if len(content) > max_context_chars or not admit_pack(paths["pack"]):
+        return CONTEXT_EXCEEDED
+    if not command:
+        return 2
+    # A crash after model output reuses it; commit_governance's receipt makes
+    # publication idempotent. No completion flag is written before validation.
+    if not paths["correction"].is_file():
+        rc = run_generation_worker(command, project_dir, "audit_correction", paths["pack"],
+                                   paths["correction"], timeout=timeout, retries=retries, worker_window=window)
+        if rc != 0:
+            return rc
+    rc = commit_governance(project_dir, str(paths["correction"]))
+    if rc != 0:
+        rc = run_repair_worker(command, project_dir, "audit_repair", paths["correction"].with_suffix(".repair.md"),
+                               paths["correction"], timeout=timeout, retries=retries, worker_window=window)
+    if rc == 0:
+        update_audit_status(paths, cross_range_committed=True)
+    return rc
+
+
 def run_child_periodic_governance(
     project_dir: Path,
     start: int,
@@ -1914,9 +1982,12 @@ def run_child_periodic_governance(
     rerun_command: str = "",
 ) -> int:
     if audit_children_resolved(project_dir, child_ranges):
-        mark_audit_covered_by_children(project_dir, start, end, child_ranges)
-        print(f"周期审计 {start:03d}-{end:03d} 已由子区间覆盖完成。")
-        return 0
+        rc = run_cross_range_governance(
+            project_dir, start, end, child_ranges, max_context_chars, audit_command,
+            worker_timeout_seconds, worker_retries, worker_window)
+        if rc == 0:
+            mark_audit_covered_by_children(project_dir, start, end, child_ranges)
+        return rc
 
     for child_start, child_end in child_ranges:
         if audit_range_is_resolved(project_dir, child_start, child_end):
@@ -1937,9 +2008,12 @@ def run_child_periodic_governance(
             return rc
 
     if audit_children_resolved(project_dir, child_ranges):
-        mark_audit_covered_by_children(project_dir, start, end, child_ranges)
-        print(f"周期审计 {start:03d}-{end:03d} 已由子区间覆盖完成。")
-        return 0
+        rc = run_cross_range_governance(
+            project_dir, start, end, child_ranges, max_context_chars, audit_command,
+            worker_timeout_seconds, worker_retries, worker_window)
+        if rc == 0:
+            mark_audit_covered_by_children(project_dir, start, end, child_ranges)
+        return rc
     return 2
 
 
