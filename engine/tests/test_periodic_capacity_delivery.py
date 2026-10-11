@@ -29,14 +29,34 @@ def test_stream_length_stops_before_consuming_fake_success():
     assert tools == "Read,StructuredOutput"
 
 
-def test_stream_counts_model_requests_not_only_conversation_ids():
+@pytest.mark.parametrize("task_type", ["audit_correction", "bounded_fragment"])
+def test_stream_allows_more_than_eight_requests_with_restricted_tools(task_type):
+    """Evidence-reading turns must not be mistaken for an exhausted response."""
+    patch = fake_patch(1, 5)
+    expected = patch if task_type == "audit_correction" else {"overview": "完整证据索引", "content": patch}
     events = [{"type": "stream_event", "_requestId": "same-conversation",
                "_messageId": f"model-{i}", "event": {"type": "message_start"}}
-              for i in range(9)]
-    rc, artifact, _ = invoke_cli("codebuddy", "ND_CODEBUDDY_BIN",
-                                 {"FAKE_CLI_STDOUT": "\n".join(json.dumps(e) for e in events)},
-                                 output_name="correction.json", task_type="audit_correction")
-    assert rc.returncode == 64 and artifact == ""
+              for i in range(12)]
+    events.append({"type": "result", "structured_output": expected})
+    rc, artifact, args = invoke_cli("codebuddy", "ND_CODEBUDDY_BIN",
+                                   {"FAKE_CLI_STDOUT": "\n".join(json.dumps(e) for e in events),
+                                    "ND_CODEBUDDY_STRUCTURED_MAX_TURNS": "", "ND_CODEBUDDY_ARGS": ""},
+                                   output_name="correction.json", task_type=task_type)
+    assert rc.returncode == 0 and json.loads(artifact) == expected
+    assert "CLI 模型请求第 12 轮" in rc.stdout
+    assert "--max-turns" not in args["argv"]
+    assert args["argv"][args["argv"].index("--tools") + 1] == "Read,StructuredOutput"
+
+
+def test_explicit_provider_turn_limit_is_not_clamped_or_treated_as_capacity():
+    """Legacy opt-in CLI limits retain their own protocol error classification."""
+    event = {"type": "result", "subtype": "error_max_turns", "is_error": True}
+    rc, artifact, args = invoke_cli("codebuddy", "ND_CODEBUDDY_BIN",
+                                   {"FAKE_CLI_STDOUT": json.dumps(event),
+                                    "ND_CODEBUDDY_STRUCTURED_MAX_TURNS": "20", "ND_CODEBUDDY_ARGS": ""},
+                                   output_name="correction.json", task_type="audit_correction")
+    assert args["argv"][args["argv"].index("--max-turns") + 1] == "20"
+    assert rc.returncode == 66 and artifact == ""
 
 
 def test_stream_does_not_treat_evidence_text_as_capacity_metadata():

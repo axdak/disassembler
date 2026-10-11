@@ -355,11 +355,9 @@ def run_structured_stream(command, prompt, project_dir):
             command[command.index("--tools") + 1] = "Read,StructuredOutput"
         else:
             command.extend(["--tools", "Read,StructuredOutput"])
-        if "--max-turns" in command:
-            index = command.index("--max-turns") + 1
-            command[index] = str(min(8, int(command[index])))
-        else:
-            command.extend(["--max-turns", "8"])
+        # Reading evidence can legitimately require multiple model turns. Do
+        # not impose a turn cap or reinterpret turn count as capacity exhaustion;
+        # explicit provider settings and the existing worker timeout still apply.
     capacity_log = CodeBuddyCapacityLog(project_dir)
     request_ids = set()
     last_log_check = 0
@@ -399,11 +397,15 @@ def run_structured_stream(command, prompt, project_dir):
             if time.monotonic() - last_log_check > 1 or event_type in {"message_delta", "message_stop"}:
                 exhausted = capacity_log.check(request_ids) or exhausted
                 last_log_check = time.monotonic()
-            turn_limit = bounded and (len(request_ids) > 8 or value.get("subtype") == "error_max_turns")
-            if exhausted or turn_limit:
+            if exhausted:
                 _kill_tree(proc)
-                print("模型生成达到容量或多轮执行上限；停止 CLI 自动续写，交由程序拆小并断点续跑。", file=sys.stderr)
+                print("模型生成达到容量上限；停止 CLI 自动续写，交由程序拆小并断点续跑。", file=sys.stderr)
                 return subprocess.CompletedProcess(command, CONTEXT_EXCEEDED, "", "")
+            if value.get("type") == "result" and value.get("subtype") == "error_max_turns":
+                # A separately configured CLI cap is a failed invocation, not
+                # evidence that materials exceed capacity or a valid patch.
+                print("CLI 达到显式配置的轮数上限，未交付产物；不按容量错误拆分。", file=sys.stderr)
+                return subprocess.CompletedProcess(command, CONTRACT_INVALID, "", "")
             if value.get("type") == "result" or "structured_output" in value:
                 result = line
             elif "type" not in value:
