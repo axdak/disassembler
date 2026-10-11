@@ -19,7 +19,7 @@ Delta合并脚本 - 将单章Delta合并到增量JSON（字段级深度合并）
         * 标量字段 (性别/年龄/是否主角/重量级/分组/发生地点/父级地点/父级阵营/座落地点):
           - Delta中该字段为非空值 → 覆盖
           - Delta中该字段为空值/缺省 → 跳过，保留原值
-    - 顶层"介绍"字段: 标题非空覆盖，描述追加去重
+    - 顶层"介绍"字段: 标题非空覆盖，描述默认追加去重；治理可显式替换完整简介
     - 增量JSON不存在或缺骨架时: 自动初始化顶层骨架（介绍 + 七类空集）
 
 输出示例:
@@ -377,8 +377,8 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
     return existing_items, added, updated, skipped
 
 
-def merge_toplevel_intro(incremental, delta_intro):
-    """合并顶层"介绍"字段: 标题非空覆盖, 描述追加去重。"""
+def merge_toplevel_intro(incremental, delta_intro, *, replace_description=False):
+    """标题非空覆盖；章节描述追加，治理的完整新版描述显式替换。"""
     if not isinstance(delta_intro, dict):
         return
     incremental.setdefault("介绍", {"标题": "", "描述": ""})
@@ -389,12 +389,11 @@ def merge_toplevel_intro(incremental, delta_intro):
         incremental["介绍"]["标题"] = new_title.strip()
     new_desc = delta_intro.get("描述", "")
     if isinstance(new_desc, str) and new_desc.strip():
-        incremental["介绍"]["描述"] = merge_intro_string(
-            incremental["介绍"].get("描述", ""), new_desc
-        )
+        incremental["介绍"]["描述"] = (new_desc.strip() if replace_description else
+            merge_intro_string(incremental["介绍"].get("描述", ""), new_desc))
 
 
-def merge_delta(incremental_path, delta_path):
+def merge_delta(incremental_path, delta_path, *, replace_description=False):
     """执行合并。增量JSON不存在或缺骨架时自动初始化。"""
     # 增量JSON: 不存在则用骨架初始化；存在则补全缺失的顶层键
     if not os.path.isfile(incremental_path):
@@ -441,7 +440,7 @@ def merge_delta(incremental_path, delta_path):
 
     # 顶层介绍
     if "介绍" in delta:
-        merge_toplevel_intro(incremental, delta["介绍"])
+        merge_toplevel_intro(incremental, delta["介绍"], replace_description=replace_description)
 
     save_json(incremental_path, incremental)
     return stats
@@ -491,7 +490,7 @@ def print_stats(stats, chapter_name=""):
 
 if __name__ == '__main__':
     if len(sys.argv) < 3:
-        print("用法: python merge_delta.py <增量JSON路径> <Delta JSON路径>")
+        print("用法: python merge_delta.py <增量JSON路径> <Delta JSON路径> [--replace-description]")
         print()
         print("功能: 将单章Delta字段级深度合并到增量JSON，实现边分析边提取边修改")
         print("      合并策略: 只增不删; 介绍追加, 列表去重合并, 详情键级合并, 标量非空覆盖")
@@ -513,7 +512,7 @@ if __name__ == '__main__':
         chapter_name = ""
 
     try:
-        stats = merge_delta(incremental_path, delta_path)
+        stats = merge_delta(incremental_path, delta_path, replace_description="--replace-description" in sys.argv[3:])
     except RuntimeError as exc:
         print(f"错误: {exc}")
         sys.exit(1)

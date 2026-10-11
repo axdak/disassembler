@@ -220,6 +220,7 @@ def run_hierarchical_reports(command, project, pack, outputs, worker, **options)
 def run_bounded_governance(command, project, pack, output, worker, **options):
     """Split within one real chapter/range; original strict commit remains authoritative."""
     from governance_contract import normalize_governance_patch
+    from governance_introduction import combine_introductions
     # Parent routing indices may exhaust output too. Shrink only their routing
     # overviews; retain all source bodies, leaf receipts and cross-range checks.
     from context_budget import ContextBudget
@@ -254,6 +255,7 @@ def run_bounded_governance(command, project, pack, output, worker, **options):
         def combine(parts):
             result = None
             no_change_seen = False
+            introductions = []
             for part in parts:
                 patch, _ = normalize_governance_patch(part, metadata["range"])
                 if not isinstance(patch, dict) or patch.get("章节范围") != metadata["range"]:
@@ -264,12 +266,16 @@ def run_bounded_governance(command, project, pack, output, worker, **options):
                 if patch.get("治理类型") == "no_change":
                     no_change_seen = True
                     patch.pop("治理类型")
+                if "介绍" in patch:
+                    introductions.append(patch.pop("介绍"))
                 result = merge_json(result, patch, resolve=tree.resolve)
             if not isinstance(result, dict):
                 raise ValueError("治理缺少真实补丁或有依据的 no_change")
             if any(not isinstance(result.get(key, {}), dict)
                    for key in ("新增元素", "修改元素", "治理操作")):
                 raise ValueError("治理分片的元素与操作必须为对象，不能丢弃异常内容")
+            if introductions:
+                result["介绍"] = combine_introductions(tree, introductions, **options)
             changed = any(any(items for items in result.get(key, {}).values())
                           for key in ("新增元素", "修改元素", "治理操作")) or bool(result.get("介绍"))
             if not changed and no_change_seen and "治理类型" not in result:

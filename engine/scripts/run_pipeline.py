@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from chronology import chapter_time
-from governance_contract import normalize_governance_patch
+from governance_contract import normalize_governance_patch, periodic_introduction_errors
 from merge_delta import save_json as save_atomic_json
 from story_schema_rules import COLLECTION_KEYS
 from validate_chapter_analysis import validate_chapter_analysis_file
@@ -1793,7 +1793,10 @@ def write_governance_route(project_dir, start, end, pack, extra_sources=()):
     story = ensure_story(project_dir)
     history = pack.with_suffix(".history.md")
     details = extract_relevant_elements_for_audit(load_json(story, {}), project_dir, start, end)
-    atomic_write_bytes(history, (build_lightweight_index(story) + "\n## 本周期相关完整档案\n" + details).encode())
+    # Synopsis is needed even in the lightest historical tier; never truncate it.
+    current_intro = json.dumps(load_json(story, {}).get("介绍", {}), ensure_ascii=False)
+    atomic_write_bytes(history, ("## 当前故事简介（需核对的旧版，不是原文证据）\n" + current_intro + "\n"
+                                + build_lightweight_index(story) + "\n## 本周期相关完整档案\n" + details).encode())
     sources = [(history, "全局索引及本周期相关完整档案")] + chapter_evidence(project_dir, start, end)
     taxonomy = Path(__file__).resolve().parent.parent / "schemas/narrative_taxonomy.json"
     sources += [(taxonomy, "完整标签规则；作为约束，不是故事事实")]
@@ -1875,6 +1878,13 @@ def write_audit_pack(
         "story_index": ("", story_index, ""),
         "story_index_relevant": ("", story_index, relevant_details),
     }
+    # Index tiers otherwise carry only the title, making synopsis updates blind
+    # to the existing description. Include it in the normal capacity accounting.
+    intro_context = "\n## 当前故事简介（需核对的旧版，不是原文证据）\n" + json.dumps(
+        story_data.get("介绍", {}), ensure_ascii=False)
+    for mode in ("story_index", "story_index_relevant"):
+        full, index, details = mode_contexts[mode]
+        mode_contexts[mode] = (full, index + intro_context, details)
     fallback_modes = ["full_story", "story_index_relevant", "story_index"]
     attempts: List[Dict[str, Any]] = []
     selected_content = ""
@@ -1956,7 +1966,7 @@ def unresolved_audits(project_dir: Path) -> List[Dict[str, Any]]:
         data = load_json(path, None)
         if isinstance(data, dict) and data.get("status") not in AUDIT_RESOLVED_STATUSES:
             data["_status_path"] = str(path)
-            m = re.match(r"^(\d{3})-(\d{3})$", str(data.get("range", "")))
+            m = re.match(r"^(\d{3,})-(\d{3,})$", str(data.get("range", "")))
             if m:
                 data["_start"] = int(m.group(1))
                 data["_end"] = int(m.group(2))
@@ -1973,9 +1983,9 @@ def committed_audits_due_for_recovery(project_dir: Path, snapshot_seq: int, to_s
         data = load_json(path, None)
         if not isinstance(data, dict) or data.get("status") != "committed":
             continue
-        m = re.match(r"^(\d{3})-(\d{3})$", str(data.get("range", "")))
+        m = re.match(r"^(\d{3,})-(\d{3,})$", str(data.get("range", "")))
         if not m:
-            m = re.match(r"^audit_(\d{3})-(\d{3})\.status\.json$", path.name)
+            m = re.match(r"^audit_(\d{3,})-(\d{3,})\.status\.json$", path.name)
         if not m:
             continue
         start = int(m.group(1))
@@ -2326,7 +2336,7 @@ def mark_periodic_audit_committed(project_dir: Path, patch: Path, before: Path, 
     audit_dir = (project_dir / "质量治理" / "周期审计").resolve()
     if resolved_patch.parent != audit_dir:
         return
-    m = re.match(r"^correction_(\d{3})-(\d{3})\.json$", resolved_patch.name)
+    m = re.match(r"^correction_(\d{3,})-(\d{3,})\.json$", resolved_patch.name)
     if not m:
         return
     status_path = audit_dir / f"audit_{m.group(1)}-{m.group(2)}.status.json"
@@ -3405,7 +3415,8 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     audit_dir = (project_dir / "质量治理" / "周期审计").resolve()
     is_periodic_patch = (
         patch.resolve().parent == audit_dir
-        and re.match(r"^correction_\d{3}-\d{3}\.json$", patch.name) is not None
+        # :03d is a minimum width; large books continue beyond chapter 999.
+        and re.match(r"^correction_\d{3,}-\d{3,}\.json$", patch.name) is not None
     )
     governance_dir = audit_dir if is_periodic_patch else project_dir / "质量治理" / "按需治理"
     governance_dir.mkdir(parents=True, exist_ok=True)
@@ -3468,13 +3479,21 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     if rc != 0:
         print(f"治理补丁Delta校验失败: {report_delta}")
         return failed("治理补丁入库前校验失败", report_delta)
+    if is_periodic_patch:
+        intro_errors = periodic_introduction_errors(load_json(story), load_json(patch))
+        if intro_errors:
+            report_delta.write_text("\n".join(intro_errors), encoding="utf-8")
+            return failed("周期治理故事简介缺失或更新不合法", report_delta)
     # validate_delta is read-only — only persist the before snapshot once it
     # has passed, so a validation-only failure leaves no snapshot artifacts.
     shutil.copy2(story, before)
     candidate = before.with_name(f".governance_candidate_{ts}.json")
     shutil.copy2(story, candidate)
     try:
-        rc = run_cmd([sys.executable, str(script_path("merge_delta.py")), str(candidate), str(patch)], governance_dir / f"merge_governance_{ts}.txt")
+        merge_command = [sys.executable, str(script_path("merge_delta.py")), str(candidate), str(patch)]
+        if is_periodic_patch:
+            merge_command.append("--replace-description")
+        rc = run_cmd(merge_command, governance_dir / f"merge_governance_{ts}.txt")
         if rc != 0:
             return failed("治理新增/修改合并失败，原结构未修改", governance_dir / f"merge_governance_{ts}.txt")
         rc = run_cmd([sys.executable, str(script_path("apply_governance_ops.py")), str(candidate), str(patch)], governance_dir / f"apply_ops_{ts}.txt")

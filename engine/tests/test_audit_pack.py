@@ -159,7 +159,7 @@ def test_audit_pack_cli_creates_review_package():
         assert "第005章_测试.json" in text
         assert "测试原文。" in text
         assert "顶层介绍" in text
-        assert "阶段性故事简介" in text
+        assert "每次周期治理都检查" in text
 
     print("[OK] audit-pack CLI 生成周期审计任务包")
 
@@ -176,10 +176,13 @@ def test_audit_pack_pages_full_story_when_it_exceeds_budget():
 
         assert pack is not None
         text = pack.read_text(encoding="utf-8")
-        assert "## 当前故事结构索引" in text
+        # A long existing synopsis is still required evidence; it must be paged,
+        # not omitted when historical material switches to a name index.
+        assert pack.with_suffix(".governance.json").is_file()
+        assert "结构详情" * 6000 in pack.with_suffix(".history.md").read_text(encoding="utf-8")
         assert "## 完整故事结构" not in text
         status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
-        assert status["context"]["render_mode"] == "story_index_relevant"
+        assert status["context"]["render_mode"] == "tiered_evidence_tree"
 
 
 def test_audit_pack_keeps_full_story_for_large_file_when_budget_allows():
@@ -202,7 +205,7 @@ def test_audit_pack_attempts_full_story_before_paging_very_large_file():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = empty_story()
-        story["padding"] = "x" * 250000
+        story["其他事项集"] = [{"名称": "历史档案", "介绍": "x" * 250000}]
         write_json(project / "故事结构_增量.json", story)
         write_completed_chapter(project, 1)
 

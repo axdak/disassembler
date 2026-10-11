@@ -167,7 +167,8 @@ def test_outer_orchestrator_does_not_redispatch_exhausted_repair(tmp_path, monke
 
 
 def test_governance_failure_keeps_story_and_supplies_current_patch_and_report(tmp_path):
-    story = {"介绍": {"标题": "测试", "描述": ""}, "角色集": []}
+    # Keep the synopsis valid so this test isolates a failing governance operation.
+    story = {"介绍": {"标题": "测试", "描述": "当前故事简介"}, "角色集": []}
     write_json(tmp_path / "故事结构_增量.json", story)
     # Normalize before capturing the authoritative bytes, as ordinary startup does.
     source = run_pipeline.ensure_story(tmp_path)

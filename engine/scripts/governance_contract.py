@@ -12,6 +12,25 @@ import re
 from story_schema_rules import COLLECTION_KEYS
 
 
+def periodic_introduction_errors(story, patch):
+    """Reject missing/invalid synopses without inventing narrative in program repair.
+
+    An omitted field retains the reviewed existing value; an explicit blank or
+    wrong type is an invalid update. This does not tighten chapter Delta rules.
+    """
+    previous = story.get("介绍", {}) if isinstance(story, dict) else {}
+    previous = previous if isinstance(previous, dict) else {}
+    proposed = patch.get("介绍", {}) if isinstance(patch, dict) else {}
+    if not isinstance(proposed, dict):
+        return ["周期治理的介绍必须为对象，包含有依据的标题和完整故事描述"]
+    errors = []
+    for key in ("标题", "描述"):
+        value = proposed.get(key, previous.get(key))
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"周期治理后介绍.{key}必须为非空字符串；依据已处理原文生成完整简介，不得用占位文字或分析正文填充")
+    return errors
+
+
 def normalize_governance_patch(patch, chapter_range: str = ""):
     """Return a corrected copy plus an auditable list of mechanical changes."""
     result = copy.deepcopy(patch)
