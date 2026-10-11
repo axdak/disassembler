@@ -122,6 +122,7 @@ def test_shape_normalization_is_lossless_and_idempotent():
 
 
 def test_nested_worker_retries_share_budget_and_explicit_resume_preserves_history(tmp_path, monkeypatch):
+    (tmp_path / "task.md").write_text("离线修复任务", encoding="utf-8")
     output = tmp_path / "failed.json"
     write_json(output, {"version": 0})
     calls = []

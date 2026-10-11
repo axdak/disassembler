@@ -6,6 +6,8 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 """
 from __future__ import annotations
 
+from local_json_patch import delta_repair_scope, apply_scoped_patch
+
 import hashlib
 import json
 import os
@@ -208,7 +210,8 @@ def recover_artifact(
                  + sorted((engine / "schemas").glob("*.json"))
                  + [engine / "scripts/run_pipeline.py", engine / "tools/agent_worker.py",
                     engine / "scripts/coerce_delta.py", engine / "scripts/recovery_contract.py",
-                    engine / "scripts/recovery_materials.py"])
+                    engine / "scripts/recovery_materials.py", engine / "scripts/local_json_patch.py",
+                    engine / "scripts/context_budget.py"])
     configuration = {key: value for key, value in os.environ.items()
                      if key.startswith(("ND_RECOVERY_", "ND_AGY_", "ND_CODEBUDDY_", "ND_AGENT_"))}
     fingerprint = hashlib.sha256((digest(Path(__file__)) + command + json.dumps(configuration, sort_keys=True)
@@ -504,7 +507,28 @@ def recover_artifact(
                     persist()
                     return rc
                 continue
-        rc = invoke("auto_" + task, workspace, common + f"\n本次必须修复完整候选产物，只写：{candidate}\n", candidate, selected_command)
+        # The first strategy fixes diagnosed fields only. Later strategies retain
+        # full evidence-based recovery for issues outside this narrow contract.
+        scope = delta_repair_scope(reference, feedback, read_object(workspace / "故事结构_增量.json")) if (
+            index == 0 and task in {"repair_chapter", "audit_repair"}) else {}
+        if scope:
+            patch_path = workspace / "candidate_patch.json"
+            patch_prompt = (common + "\n本次输出局部修复补丁，不重写候选，不修改其他文件。"
+                            "所有理由必须核对原文，不能用模板句占位。只填以下字段：\n"
+                            + json.dumps(scope, ensure_ascii=False)
+                            + f"\nbase_sha256 必须为 {digest(reference)}。"
+                            + '\n输出格式：{"base_sha256":"摘要","changes":[{"path":"指定路径","value":"修正值"}]}。'
+                            + f"\n输出位置：{patch_path}")
+            rc = invoke("recovery_patch", workspace, patch_prompt, patch_path, selected_command)
+            if rc == 0:
+                try:
+                    apply_scoped_patch(reference, candidate, read_object(patch_path), scope)
+                except (ValueError, KeyError, TypeError) as exc:
+                    rc = CONTRACT_INVALID
+                    attempt["patch_error"] = str(exc)
+            attempt["repair_scope"] = list(scope)
+        else:
+            rc = invoke("auto_" + task, workspace, common + f"\n本次必须修复完整候选产物，只写：{candidate}\n", candidate, selected_command)
         if rc == 130:
             state["next_strategy"] = index
             persist()

@@ -1,35 +1,147 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$comment": "轻量格式提示，仅用于任务包内引导 Agent 输出顶层结构。集合内详情字段、引用、章节/时间、控制标签等强校验以 scripts/validate_delta.py（规则源 scripts/story_schema_rules.py）为准。",
+  "$comment": "生成阶段要求名称及非空提取理由；详情允许完整自由档案。引用、章节/时间等业务规则仍以原校验器为准。",
   "type": "object",
   "properties": {
-    "章节": { "type": "string" },
+    "章节": {
+      "type": "string"
+    },
     "新增元素": {
       "type": "object",
       "properties": {
-        "角色集": { "type": "array" },
-        "事件集": { "type": "array" },
-        "地点集": { "type": "array" },
-        "线索集": { "type": "array" },
-        "阵营集": { "type": "array" },
-        "物品集": { "type": "array" },
-        "其他事项集": { "type": "array" }
+        "角色集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "事件集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "地点集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "线索集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "阵营集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "物品集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "其他事项集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        }
       }
     },
     "修改元素": {
       "type": "object",
       "properties": {
-        "角色集": { "type": "array" },
-        "事件集": { "type": "array" },
-        "地点集": { "type": "array" },
-        "线索集": { "type": "array" },
-        "阵营集": { "type": "array" },
-        "物品集": { "type": "array" },
-        "其他事项集": { "type": "array" }
+        "角色集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "事件集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "地点集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "线索集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "阵营集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "物品集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        },
+        "其他事项集": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/element"
+          }
+        }
       }
     },
-    "冲突声明": { "type": "array", "items": { "type": "string" } },
-    "质量说明": { "type": "string" }
+    "冲突声明": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "质量说明": {
+      "type": "string"
+    }
   },
-  "required": ["章节", "新增元素", "修改元素"]
+  "required": [
+    "章节",
+    "新增元素",
+    "修改元素"
+  ],
+  "definitions": {
+    "element": {
+      "type": "object",
+      "required": [
+        "名称",
+        "详情"
+      ],
+      "properties": {
+        "名称": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "详情": {
+          "type": "object",
+          "required": [
+            "提取理由"
+          ],
+          "properties": {
+            "提取理由": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            }
+          }
+        }
+      }
+    }
+  }
 }

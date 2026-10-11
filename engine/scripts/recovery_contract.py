@@ -6,11 +6,13 @@ Local checks also cover providers that ignore their native JSON schema option.
 from __future__ import annotations
 
 import re
+from local_json_patch import PATCH_SCHEMA, patch_shape_errors
 
 CONTRACT_INVALID = 66
 REVIEW_CHECKS = ("content_preserved", "contract_unchanged", "evidence_supported")
 TEXT = {"type": "string", "minLength": 1, "pattern": r"\S"}
 RECOVERY_SCHEMAS = {
+    "recovery_patch": PATCH_SCHEMA,
     "recovery_diagnosis": {
         "type": "object", "additionalProperties": False,
         "required": ["diagnosis", "steps"],
@@ -34,6 +36,8 @@ RECOVERY_SCHEMAS = {
 
 def recovery_output_errors(task: str, value) -> list[str]:
     """Validate internal message shape; success/evidence decisions stay upstream."""
+    if task == "recovery_patch":
+        return patch_shape_errors(value)
     schema = RECOVERY_SCHEMAS.get(task)
     if schema is None:
         return []
