@@ -544,6 +544,12 @@ def validate_set_field_governance_ops(current: Dict[str, Any], delta: Dict[str, 
 
 def _is_empty_governance_workload(delta: Dict[str, Any]) -> bool:
     """治理Delta是否完全没有作业：无新增/修改元素，且无任何非空治理操作。"""
+    # Updating a real title/description is work too; do not force an actually
+    # mutating patch to falsely declare no_change. Empty placeholders still fail.
+    intro = delta.get("介绍")
+    if isinstance(intro, dict) and any(isinstance(intro.get(key), str) and intro[key].strip()
+                                      for key in ("标题", "描述")):
+        return False
     for section in ("新增元素", "修改元素"):
         bucket = delta.get(section, {})
         if isinstance(bucket, dict):

@@ -226,7 +226,7 @@ class Orchestrator:
                 return 2
             if rc == 64:
                 # An unchanged context budget cannot be fixed by redispatching it.
-                self.state.last_error = "任务材料超出配置预算；完整材料已保留，请调整 max_pack_chars 后继续。"
+                self.state.last_error = "当前请求仍超出容量预算；完整材料与检查点已保留，请查看任务包旁的 capacity.json，校正模型容量或继续细分该请求。"
                 self.state.save()
                 self.emit("hard_block", stage=stage, detail=self.state.last_error)
                 return 1

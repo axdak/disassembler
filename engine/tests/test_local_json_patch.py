@@ -26,6 +26,19 @@ def test_patch_preserves_unrelated_values(tmp_path):
     assert result == original
 
 
+def test_identity_scope_requires_exact_diagnostic_and_formal_collection(tmp_path):
+    reference, _, _, _, value = example(tmp_path)
+    story = {"角色集": [{"名称": "正式角色"}, {"名称": ["错误类型"]}]}
+    assert not any(key.endswith("/名称") for key in delta_repair_scope(reference, "[萧炎]信息未知", story))
+    scope = delta_repair_scope(reference, "修改目标[萧炎]不存在", story)
+    assert scope["/修改元素/角色集/0/名称"]["allowed_values"] == ["正式角色"]
+    value["修改元素"]["角色集"][0]["名称"] = ["错误类型"]
+    value["修改元素"]["未知集合"] = [{"名称": "伪元素", "详情": {}}]
+    reference.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    scope = delta_repair_scope(reference, "未知名称", story)
+    assert not any(key.endswith("/名称") or "未知集合" in key for key in scope)
+
+
 def test_recovery_scheduler_uses_patch_then_full_validation_and_review(tmp_path):
     from fault_recovery import recover_artifact, digest, REVIEW_CHECKS
     from merge_delta import save_json

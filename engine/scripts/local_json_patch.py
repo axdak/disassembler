@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+from story_schema_rules import COLLECTION_KEYS
 
 PATCH_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -50,9 +51,11 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
         if not isinstance(bucket, dict):
             continue
         for collection, items in bucket.items():
-            if not isinstance(items, list):
+            if collection not in COLLECTION_KEYS or not isinstance(items, list):
                 continue
-            known = {item.get("名称") for item in story.get(collection, []) if isinstance(item, dict)}
+            historical = story.get(collection, [])
+            known = {item["名称"] for item in historical if isinstance(item, dict)
+                     and isinstance(item.get("名称"), str)} if isinstance(historical, list) else set()
             for index, item in enumerate(items):
                 if not isinstance(item, dict):
                     continue
@@ -63,8 +66,8 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
                     scope[prefix + "/详情/提取理由"] = {"name": item.get("名称"), "kind": "evidence"}
                 name = item.get("名称")
                 # The original validator must identify this exact unknown target.
-                if (section == "修改元素" and known and name not in known and isinstance(name, str)
-                        and f"[{name}]" in feedback and ("不存在" in feedback or "未知" in feedback)):
+                if (section == "修改元素" and known and isinstance(name, str) and name not in known
+                        and f"修改目标[{name}]不存在" in feedback):
                     scope[prefix + "/名称"] = {"name": name, "kind": "identity",
                                              "allowed_values": sorted(n for n in known if isinstance(n, str))}
     return scope

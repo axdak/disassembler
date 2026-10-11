@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack, estimate_tokens
+from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack, estimate_tokens, inspect_pack
 
 import argparse
 import hashlib
@@ -765,6 +765,12 @@ def run_generation_worker(
     A missing artifact or cancelled worker is not semantic repair input. Existing
     partial artifacts remain inspectable, and original validators retain authority.
     """
+    if task_type == "final_draft" and expected_output.is_file() and task_pack.is_file():
+        policy = ContextBudget.from_env()
+        if (estimate_tokens(expected_output.read_text(encoding="utf-8")) > policy.output_tokens
+                or not inspect_pack(task_pack)["passed"]):
+            from bounded_final import run_bounded_final
+            return run_bounded_final(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
     repair_task = {"analysis": "analysis_regenerate", "delta": "repair_chapter",
                    "audit_correction": "audit_repair", "final_draft": "repair_final"}.get(task_type)
     before_outputs = capture_output_signatures([expected_output])
@@ -3383,7 +3389,8 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     # 收集材料生成任务包
     task_pack = audit_dir / "final_task_pack.md"
 
-    report_excerpt = read_excerpt(report, 30000) if report.is_file() else ""
+    report_excerpt = report.read_text(encoding="utf-8") if report.is_file() else ""
+    source_files = [draft, story]
 
     analysis_specs = [
         ("全书分析/剧情结构/章节梗概汇总.md", "章节梗概汇总"),
@@ -3405,21 +3412,29 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     for rel, title in analysis_specs:
         path = confined_project_path(project_dir, rel)
         if path.is_file() and path.stat().st_size > 0:
+            source_files.append(path)
             analysis_refs.append({
                 "title": title,
                 "path": path,
-                "excerpt": read_excerpt(path, 15000),
+                "excerpt": path.read_text(encoding="utf-8"),
             })
 
     audit_refs: List[Dict[str, Any]] = []
     pa_dir = project_dir / "质量治理" / "周期审计"
     if pa_dir.is_dir():
-        for md in sorted(pa_dir.glob("audit_*.md")):
-            audit_refs.append({"name": md.name, "lang": "markdown",
-                               "excerpt": read_excerpt(md, 8000)})
+        # Audit task packs repeat raw material; the actual accepted corrections
+        # and original sources are authoritative and are included in full once.
         for cj in sorted(pa_dir.glob("correction_*.json")):
+            source_files.append(cj)
             audit_refs.append({"name": cj.name, "lang": "json",
-                               "excerpt": read_excerpt(cj, 8000)})
+                               "excerpt": cj.read_text(encoding="utf-8")})
+    for relatives in ANALYSIS_OUTPUTS.values():
+        source_files.extend(project_dir / rel for rel in relatives)
+    for folder in ("原文拆解", "章节处理", "章节处理/Delta"):
+        source_files.extend(sorted((project_dir / folder).glob("第*章*")))
+    source_files = list(dict.fromkeys(path.resolve() for path in source_files if path.is_file()))
+    source_manifest = task_pack.with_suffix(task_pack.suffix + ".sources.json")
+    save_json(source_manifest, [str(path) for path in source_files])
 
     content = render_prompt(
         "流水线/最终整理.j2",
@@ -3431,6 +3446,7 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
         audit_refs=audit_refs,
     )
 
+    content = f"完整原文、分析和历史材料目录：{source_manifest}；所有材料保留全文。\n\n" + content
     task_pack.write_text(content, encoding="utf-8")
     print(f"已生成最终整理任务包: {task_pack}")
     print(f"校验报告: {report}")

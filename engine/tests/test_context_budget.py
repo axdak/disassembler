@@ -9,7 +9,8 @@ from context_budget import ContextBudget, admit_pack, inspect_pack
 def test_shared_window_reserves_output_and_overhead():
     budget = ContextBudget(input_tokens=300000, context_tokens=300000)
     assert budget.usable_input == 250000
-    assert ContextBudget().usable_input == 270000
+    assert ContextBudget().usable_input == 250000
+    assert ContextBudget(context_tokens=0).usable_input == 270000
 
 
 def test_overflow_preserves_complete_evidence(tmp_path, monkeypatch):

@@ -26,7 +26,7 @@ def estimate_tokens(text: str) -> int:
 class ContextBudget:
     input_tokens: int = 300000
     output_tokens: int = 20000
-    context_tokens: int = 0  # Zero means the provider has separate input/output limits.
+    context_tokens: int = 300000  # Safe shared-window default; explicit zero means documented separate limits.
     reserve_tokens: int = 30000  # Provider instructions, tools and estimation error.
 
     @classmethod

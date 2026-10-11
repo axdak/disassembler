@@ -7,6 +7,7 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 from __future__ import annotations
 
 from local_json_patch import delta_repair_scope, apply_scoped_patch
+from context_budget import CONTEXT_EXCEEDED
 
 import hashlib
 import json
@@ -502,7 +503,7 @@ def recover_artifact(
             if rc != 0:
                 attempt.update(status="diagnosis_failed", returncode=rc)
                 persist()
-                if rc == 130:
+                if rc in {130, CONTEXT_EXCEEDED}:
                     state["next_strategy"] = index
                     persist()
                     return rc
@@ -529,7 +530,7 @@ def recover_artifact(
             attempt["repair_scope"] = list(scope)
         else:
             rc = invoke("auto_" + task, workspace, common + f"\n本次必须修复完整候选产物，只写：{candidate}\n", candidate, selected_command)
-        if rc == 130:
+        if rc in {130, CONTEXT_EXCEEDED}:
             state["next_strategy"] = index
             persist()
             return rc
@@ -563,7 +564,7 @@ def recover_artifact(
                          '"checks":{"content_preserved":true或false,"contract_unchanged":true或false,"evidence_supported":true或false},'
                          '"issues":[],"reason":"复核依据"}。输出位置：' + str(review))
         rc = invoke("recovery_review", workspace, review_prompt, review, selected_command)
-        if rc == 130:
+        if rc in {130, CONTEXT_EXCEEDED}:
             state["next_strategy"] = index
             persist()
             return rc
