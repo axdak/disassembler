@@ -529,9 +529,12 @@ def test_governance_rollback_restores_before_snapshot(tmp_path):
         process_path = project_path / "故事结构_增量.json"
         before_obj = json.loads(process_path.read_text(encoding="utf-8"))
 
+        # This scenario verifies deterministic rollback, not provider recovery.
+        # Explicit manual mode avoids launching forbidden live-model attempts
+        # and waiting for their unrelated recovery budget after rollback.
         response = client.post(
             f"/projects/{project['id']}/tasks",
-            json={"type": "governance", "params": {"start": 1, "end": 1}},
+            json={"type": "governance", "params": {"start": 1, "end": 1, "worker_provider": "manual"}},
             headers=AUTH,
         )
         assert response.status_code == 200, response.text

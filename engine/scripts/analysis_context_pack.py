@@ -905,13 +905,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             pieces = split_rendered_pack(content, args.max_pack_chars)
         except ValueError as exc:
-            # Keep the full material for diagnosis; do not dispatch a truncated pack.
-            (out_dir / "oversized_pack.md").write_text(content, encoding="utf-8")
-            print(f"分析材料预算不足：{exc}")
-            return 64
+            # The execution layer can page even a large story index. Preserve the
+            # complete package and delegate capacity adaptation instead of asking
+            # the user to increase a character limit and redispatch manually.
+            print(f"分析材料转入自动分层处理：{exc}")
+            pieces = [content]
         for piece in pieces:
             path = out_dir / f"pack_{len(pack_files) + 1:03d}.md"
             path.write_text(piece, encoding="utf-8")
+            hierarchy = {"sources": [str(path.resolve())],
+                         "contract": output_contract(args.task) + "\n" + TASKS[args.task]["goal"]
+                                     + "\n用户指定问题：" + (args.question or "无")
+                                     + "\n章节范围：" + args.chapters
+                                     + "\n指定目标：" + json.dumps(args.targets or [], ensure_ascii=False)}
+            path.with_suffix(".hierarchy.json").write_text(json.dumps(hierarchy, ensure_ascii=False, indent=2), encoding="utf-8")
             pack_files.append(str(path.relative_to(project_dir)))
 
     reduce_path = out_dir / "reduce_prompt.md"

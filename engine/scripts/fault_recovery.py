@@ -387,8 +387,9 @@ def recover_artifact(
             state["calls"].append(call)
             persist()  # Reserve before launching a model, including interrupted calls.
             try:
-                rc = worker(selected_command, workspace, kind, task_pack, expected, chapter_seq,
-                            timeout=timeout, retries=0, worker_window=worker_window)
+                from bounded_generation import run_paged_recovery
+                rc = run_paged_recovery(worker, selected_command, workspace, kind, task_pack, expected, chapter_seq,
+                                        timeout=timeout, retries=0, worker_window=worker_window)
             except (OSError, RuntimeError) as exc:
                 # Provider launch/transport failures must leave a durable attempt
                 # and allow a different configured strategy, never erase history.

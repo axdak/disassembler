@@ -48,10 +48,12 @@ def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> st
         return ""
     if task_type in RECOVERY_SCHEMAS:
         return json.dumps(RECOVERY_SCHEMAS[task_type], ensure_ascii=False, separators=(",", ":"))
-    if task_type not in JSON_TASK_TYPES:
+    if task_type not in JSON_TASK_TYPES and task_type != "bounded_fragment":
         return JSON_OBJECT_SCHEMA
     try:
         schema_path = DELTA_SCHEMA_PATH if task_type in {"delta", "repair_chapter"} else DELTA_SCHEMA_PATH.with_name("audit_correction.schema.json")
+        if task_type == "bounded_fragment":
+            schema_path = DELTA_SCHEMA_PATH.with_name("bounded_fragment.schema.json")
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return JSON_OBJECT_SCHEMA

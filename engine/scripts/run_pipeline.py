@@ -599,8 +599,28 @@ def _admit_worker(function):
     return admitted
 
 
+def needs_capacity_tree(pack: Path) -> bool:
+    """Dispatch outside worker admission so child calls never hold a parent slot."""
+    if not pack.with_suffix(".hierarchy.json").is_file():
+        return False
+    report = inspect_pack(pack)
+    return not report["passed"] or report["estimated_input_tokens"] > ContextBudget.from_env().output_tokens * 3
+
+
+def run_worker(command, project_dir, task_type, task_pack, expected_output, chapter_seq=0, **options):
+    """Keep ordinary calls unchanged; page explicitly declared report workloads."""
+    if command and needs_capacity_tree(task_pack):
+        from bounded_generation import run_hierarchical_reports
+        return run_hierarchical_reports(command, project_dir, task_pack, [expected_output], run_worker, **options)
+    rc = _run_worker(command, project_dir, task_type, task_pack, expected_output, chapter_seq, **options)
+    if rc == CONTEXT_EXCEEDED and task_pack.with_suffix(".hierarchy.json").is_file():
+        from bounded_generation import run_hierarchical_reports
+        return run_hierarchical_reports(command, project_dir, task_pack, [expected_output], run_worker, **options)
+    return rc
+
+
 @_admit_worker
-def run_worker(
+def _run_worker(
     command: str,
     project_dir: Path,
     task_type: str,
@@ -665,7 +685,7 @@ def run_worker(
             finish_repair(ticket, returncode)
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
             if returncode in {130, CONTEXT_EXCEEDED}:
-                return 130  # 用户取消，不重试
+                return returncode  # Capacity and user cancellation have different recovery routes.
             if (defer_artifact_repair and returncode == 1 and expected_output.is_file()
                     and expected_output.stat().st_size and invalid_output_artifacts([expected_output])):
                 return 1  # Give deterministic repair the malformed artifact first.
@@ -765,6 +785,13 @@ def run_generation_worker(
     A missing artifact or cancelled worker is not semantic repair input. Existing
     partial artifacts remain inspectable, and original validators retain authority.
     """
+    if command and task_type in {"analysis", "delta"} and task_pack.is_file():
+        report = inspect_pack(task_pack)
+        chapter = chapter_by_seq(project_dir, chapter_seq)
+        output_risk = chapter is not None and estimate_tokens(chapter.read_text(encoding="utf-8")) > ContextBudget.from_env().output_tokens * 3
+        if not report["passed"] or output_risk:
+            from bounded_generation import run_bounded_chapter
+            return run_bounded_chapter(command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options)
     if task_type == "final_draft" and expected_output.is_file() and task_pack.is_file():
         policy = ContextBudget.from_env()
         if (estimate_tokens(expected_output.read_text(encoding="utf-8")) > policy.output_tokens
@@ -776,6 +803,9 @@ def run_generation_worker(
     before_outputs = capture_output_signatures([expected_output])
     rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
                     chapter_seq, defer_artifact_repair=bool(repair_task), **worker_options)
+    if rc == CONTEXT_EXCEEDED and task_type in {"analysis", "delta"}:
+        from bounded_generation import run_bounded_chapter
+        return run_bounded_chapter(command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options)
     if rc != 1 or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
         return rc
     if unchanged_existing_outputs(before_outputs, [expected_output]) and not invalid_output_artifacts([expected_output]):
@@ -895,8 +925,20 @@ def worker_supervision_checkpoint(worker_loop: str, message: str, rerun_command:
     return True
 
 
+def run_multi_output_worker(command, project_dir, task_type, task_pack, expected_outputs, chapter_seq=0, **options):
+    """Select a reduction route before acquiring an execution slot."""
+    if command and needs_capacity_tree(task_pack):
+        from bounded_generation import run_hierarchical_reports
+        return run_hierarchical_reports(command, project_dir, task_pack, expected_outputs, run_worker, **options)
+    rc = _run_multi_output_worker(command, project_dir, task_type, task_pack, expected_outputs, chapter_seq, **options)
+    if rc == CONTEXT_EXCEEDED and task_pack.with_suffix(".hierarchy.json").is_file():
+        from bounded_generation import run_hierarchical_reports
+        return run_hierarchical_reports(command, project_dir, task_pack, expected_outputs, run_worker, **options)
+    return rc
+
+
 @_admit_worker
-def run_multi_output_worker(
+def _run_multi_output_worker(
     command: str,
     project_dir: Path,
     task_type: str,
@@ -953,7 +995,7 @@ def run_multi_output_worker(
         if returncode != 0:
             print(f"worker failed: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
             if returncode in {130, CONTEXT_EXCEEDED}:
-                return 130  # 用户取消，不重试
+                return returncode
             if attempt < attempts:
                 continue
             return returncode
@@ -3701,6 +3743,14 @@ def write_analysis_worker_pack(project_dir: Path, manifest_path: Path, record: D
     return out
 
 
+def fullbook_scope_contract(manifest: dict) -> str:
+    """Repeat user scope at every hierarchy level, not just the first leaf."""
+    return ("\n用户指定问题：" + str(manifest.get("question") or "无")
+            + "\n章节范围：" + str(manifest.get("chapter_range") or "以材料范围为准")
+            + "\n指定目标：" + json.dumps(manifest.get("targets") or [], ensure_ascii=False)
+            + "\n所有结论须保留证据来源；冲突标为待确认，不凭空新增。")
+
+
 def write_fullbook_partial_worker_pack(
     project_dir: Path,
     manifest_path: Path,
@@ -3732,6 +3782,14 @@ def write_fullbook_partial_worker_pack(
     content = pack_path.read_text(encoding="utf-8", errors="ignore")
     out = manifest_path.parent / f"worker_pack_{index:03d}.md"
     out.write_text(header + content, encoding="utf-8")
+    manifest = load_json(manifest_path, {}) or {}
+    from analysis_context_pack import output_contract
+    save_json(out.with_suffix(".hierarchy.json"), {
+        "sources": [str(pack_path.resolve())],
+        "contract": output_contract(manifest.get("task", "custom"))
+                    + fullbook_scope_contract(manifest)
+                    + "\n仅产出本分包覆盖范围的完整分批分析结果，不写最终报告。",
+    })
     return out
 
 
@@ -3764,6 +3822,16 @@ def write_fullbook_reduce_worker_pack(
         parts.append(f"## 分批结果 {i:03d}\n\n{p.read_text(encoding='utf-8', errors='ignore')}\n\n")
     out = manifest_path.parent / "worker_pack_reduce.md"
     out.write_text("".join(parts), encoding="utf-8")
+    from analysis_context_pack import output_contract, reduce_contract
+    task = manifest.get("task", "custom")
+    # Store the contract separately from evidence: the tree repeats the complete
+    # contract at every node without repeating every partial in one root request.
+    contract = output_contract(task) + "\n" + reduce_contract(task) + fullbook_scope_contract(manifest)
+    if reduce_rel and (project_dir / reduce_rel).is_file():
+        contract += "\n" + (project_dir / reduce_rel).read_text(encoding="utf-8")
+    save_json(out.with_suffix(".hierarchy.json"), {
+        "sources": [str(path.resolve()) for path in partial_paths], "contract": contract,
+    })
     return out
 
 

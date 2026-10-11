@@ -42,6 +42,10 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
     engine = Path(__file__).resolve().parents[1]
     code_hash = hashlib.sha256()
     for path in sorted([*engine.joinpath("prompts").rglob("*.j2"),
+                        *engine.joinpath("schemas").glob("*.json"),
+                        *(engine / "scripts" / name for name in (
+                            "capacity_tree.py", "bounded_generation.py", "context_budget.py",
+                            "run_pipeline.py", "analysis_context_pack.py")),
                         engine / "tools" / "agent_worker.py"]):
         code_hash.update(str(path.relative_to(engine)).encode())
         code_hash.update(path.read_bytes())
@@ -50,8 +54,20 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
     # Packs may explicitly ask the worker to inspect element details in this file.
     story = project / "故事结构_增量.json"
     story_digest = hashlib.sha256(story.read_bytes() if story.is_file() else b"").hexdigest()
+    hierarchy = pack.with_suffix(".hierarchy.json")
+    hierarchy_identity = None
+    if hierarchy.is_file():
+        metadata = json.loads(hierarchy.read_text(encoding="utf-8"))
+        source_digests = []
+        for value in metadata.get("sources", []):
+            source = Path(value).resolve()
+            source.relative_to(project.resolve())
+            source_digests.append(hashlib.sha256(source.read_bytes()).hexdigest())
+        # Use content identities, not timestamped task-directory paths, so an
+        # equivalent regenerated manifest can still reuse its checked partial.
+        hierarchy_identity = [metadata.get("contract"), source_digests]
     identity = json.dumps([1, command, task, header + separator + material, story_digest,
-                           settings, code_hash.hexdigest()], sort_keys=True, ensure_ascii=False)
+                           settings, code_hash.hexdigest(), hierarchy_identity], sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha256(identity.encode()).hexdigest()
     directory = project / "质量治理" / "分包检查点"
     artifact, receipt = directory / f"{digest}.md", directory / f"{digest}.json"

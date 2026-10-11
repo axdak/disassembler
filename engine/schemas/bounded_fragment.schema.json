@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "内部容量分片信封；content 内仍使用原有 Markdown 或 JSON 契约，不写入正式产物。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overview", "content"],
+  "properties": {
+    "overview": {"type": "string", "minLength": 1},
+    "content": {"type": ["string", "object", "array", "null"]}
+  }
+}
