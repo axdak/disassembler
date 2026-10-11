@@ -57,7 +57,8 @@ from run_pipeline import (  # noqa: E402
     artifact_paths,
     chapter_files,
     seq_from_file,
-    run_worker,
+    run_generation_worker as run_worker,
+    run_repair_worker,
     run_multi_output_worker,
     scoped_analysis_pack,
     scoped_chapter_analysis_rerun,
@@ -1061,8 +1062,19 @@ class GovernanceTaskAdapter:
         context.progress(60, "committing governance patch")
         rc = commit_governance(project_dir, str(correction_path))
         if rc != 0:
-            # commit_governance has already restored the before snapshot.
-            raise RuntimeError(f"governance commit 失败 rc={rc}")
+            if not worker_command:
+                provider = _str_param(params, "worker_provider", default="") or context.worker_provider
+                if provider and provider != "manual":
+                    worker_command = builtin_agent_worker_command(provider)
+            if worker_command:
+                context.progress(65, "自动诊断并修复治理补丁")
+                rc = run_repair_worker(
+                    worker_command, project_dir, "audit_repair", correction_path.with_suffix(".repair.md"), correction_path,
+                    timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                    observe=lambda detail, data: context.progress(65, detail),
+                )
+            if rc != 0:
+                raise RuntimeError(f"governance commit 自动修复未完成 rc={rc}")
 
         status = audit_status(project_dir, start, end)
         before = status.get("before", "") or ""
@@ -1343,28 +1355,17 @@ class FinalizeAdapter:
 
         context.progress(60, "commit final draft")
         rc = cmd_commit_final_draft(project_dir)
-        for _ in range(max_repair_rounds):
-            if rc == 0:
-                break
-            if not repair.is_file():
-                raise RuntimeError(
-                    f"commit_final_draft 失败 rc={rc}（无 repair 任务）"
-                )
-            if not worker_command:
-                raise RuntimeError(
-                    f"commit_final_draft 失败 rc={rc} 且无 worker_command"
-                )
-            wrc = run_worker(
-                worker_command, project_dir, "repair_final",
-                repair, draft,
-                timeout=worker_timeout, retries=worker_retries,
-                worker_window=worker_window, repair_limit=max_repair_rounds,
-            )
-            if wrc != 0:
-                raise RuntimeError(f"repair_final worker 失败 rc={wrc}；已保留草稿与修复记录")
-            rc = cmd_commit_final_draft(project_dir)
         if rc != 0:
-            raise RuntimeError("commit_final_draft 修复预算已耗尽 rc=65；已保留草稿与修复记录")
+            if not repair.is_file() or not worker_command:
+                raise RuntimeError(f"commit_final_draft 失败 rc={rc} 且无 worker_command 或 repair 任务")
+            rc = run_repair_worker(
+                worker_command, project_dir, "repair_final", repair, draft,
+                timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
+                repair_limit=max_repair_rounds,
+                observe=lambda detail, data: context.progress(65, detail),
+            )
+            if rc != 0:
+                raise RuntimeError(f"repair_final 自动故障处理未完成 rc={rc}；诊断与断点已保留")
 
         context.progress(80, "validate final")
         rc = cmd_validate_final(project_dir)

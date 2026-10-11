@@ -110,9 +110,9 @@ def test_final_repair_transport_and_outer_retries_share_one_budget(tmp_path, mon
     assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED
     assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED
     assert len(calls) == 2
-    begin_retry_session(tmp_path)  # An explicit resume receives one new allowance.
+    begin_retry_session(tmp_path)  # Legacy session reset cannot reset automatic recovery.
     assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED
-    assert len(calls) == 4
+    assert len(calls) == 2
 
 
 def test_worker_admission_cancels_waiter_and_releases_after_exception():

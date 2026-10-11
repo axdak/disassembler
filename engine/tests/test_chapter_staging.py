@@ -146,7 +146,8 @@ def test_run_regenerates_structurally_shrunken_analysis_before_delta_handoff():
         assert not paths["delta_task"].is_file()
         regenerate_task = paths["analysis_regenerate_task"].read_text(encoding="utf-8")
         assert "重新生成" in regenerate_task
-        assert "不要参考当前不合格的章节分析MD" in regenerate_task
+        assert "保留已有分析内容" in regenerate_task
+        assert "不能把旧MD当成事实来源" in regenerate_task
 
         paths["analysis"].write_text(valid_analysis(), encoding="utf-8")
         assert cmd_run(project, audit_interval=0) == 2
@@ -408,7 +409,7 @@ else:
         assert paths["after"].is_file()
 
 
-def test_run_with_worker_provider_uses_builtin_wrapper_for_chapter_flow():
+def test_run_with_worker_provider_uses_builtin_wrapper_for_chapter_flow(local_provider_commands):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         project = root / "project"
@@ -468,6 +469,7 @@ else:
         )
         old_agy = os.environ.get("ND_AGY_BIN")
         os.environ["ND_AGY_BIN"] = f"{sys.executable} {fake_cli}"
+        local_provider_commands.add(os.environ["ND_AGY_BIN"])
         try:
             rc = cmd_run(
                 project,

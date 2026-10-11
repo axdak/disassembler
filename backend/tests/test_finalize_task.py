@@ -172,4 +172,4 @@ def test_finalize_adapter_caps_transport_retries_by_repair_allowance(tmp_path, m
                                       "max_repair_rounds": 2})
     with pytest.raises(RuntimeError, match="rc=65"):
         FinalizeAdapter().run(context)
-    assert calls == ["repair_final", "repair_final"]
+    assert calls == ["auto_repair_final", "auto_repair_final"]

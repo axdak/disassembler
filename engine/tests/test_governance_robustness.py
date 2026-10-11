@@ -195,7 +195,7 @@ def test_serial_chapter_validation_loop_is_bounded(tmp_path, monkeypatch):
 
     def worker(command, project, env, timeout):
         calls.append(env["ND_TASK_TYPE"])
-        write_json(paths["delta"], {"attempt": len(calls)})
+        write_json(Path(env["ND_EXPECTED_OUTPUT"]), {"attempt": len(calls)})
         return 0, "local stub"
 
     monkeypatch.setattr(run_pipeline, "stream_shell_command", worker)
@@ -203,7 +203,7 @@ def test_serial_chapter_validation_loop_is_bounded(tmp_path, monkeypatch):
     rc = run_pipeline.cmd_run(tmp_path, chapter_command="fake", audit_interval=0,
                               worker_retries=1, worker_loop="continuous", run_mode="worker")
     assert rc == REPAIR_EXHAUSTED
-    assert calls == ["repair_chapter", "repair_chapter"]
+    assert calls == ["auto_repair_chapter", "auto_repair_chapter", "recovery_diagnosis"]
     assert paths["analysis"].read_text(encoding="utf-8") == valid_analysis(1)
 
 
@@ -232,6 +232,8 @@ def test_native_governance_schema_uses_real_contract():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     schema = json.loads(module.structured_output_schema("audit_repair", [Path("correction.json")]))
+    assert json.loads(module.structured_output_schema("auto_audit_repair", [Path("correction.json")])) == schema
+    assert module.structured_output_schema("auto_repair_chapter", [Path("delta.json")]) == module.structured_output_schema("repair_chapter", [Path("delta.json")])
     assert schema["properties"]["修改元素"]["type"] == "object"
     assert schema["properties"]["治理操作"]["type"] == "object"
     assert schema["properties"]["证据范围"]["type"] == "array"

@@ -41,10 +41,12 @@ from run_pipeline import (
     latest_analysis_manifest,
     run_cmd,
     run_multi_output_worker,
-    run_worker,
+    run_generation_worker as run_worker,
+    run_repair_worker,
     script_path,
     seq_from_file,
     set_cancel_event,
+    set_recovery_observer,
     write_fullbook_partial_worker_pack,
     write_fullbook_reduce_worker_pack,
 )
@@ -109,6 +111,8 @@ class Orchestrator:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
         begin_retry_session(self.project_dir)
         set_cancel_event(self._cancel)
+        set_recovery_observer(lambda detail, data: self.emit(
+            "recovery_progress", stage=self.state.current_stage, detail=detail, data=data))
         try:
             self._reconcile_chapter_scope()
             self._reconcile_recovery_state()
@@ -129,6 +133,7 @@ class Orchestrator:
             return 0
         finally:
             set_cancel_event(threading.Event())  # 重置，避免跨运行/跨测试泄漏
+            set_recovery_observer(None)
 
     @staticmethod
     def _valid_json_file(path: Path) -> bool:
@@ -227,8 +232,8 @@ class Orchestrator:
                 return 1
             if rc == REPAIR_EXHAUSTED:
                 # A failed logical task must not regain its model budget when
-                # the outer stage is redispatched. Explicit resume gets a new run.
-                self.state.last_error = "自动修复已达本次运行上限；断点及失败产物已保留，查看质量治理/重试记录后可继续重试。"
+                # the outer stage is redispatched or a legacy retry session resets.
+                self.state.last_error = "自动故障处理的可用策略已耗尽；断点和诊断记录已保留于质量治理/自动恢复。输入或修复配置变化后可重新评估。"
                 self.state.save()
                 self.emit("hard_block", stage=stage, detail=self.state.last_error)
                 return 1
@@ -483,7 +488,7 @@ class Orchestrator:
 
     def _stage_commit_final_draft(self) -> int:
         # commit-final-draft 做 strict 校验；失败时生成 repair_final.md，让 worker
-        # 修复草稿后重试，最多 max_repair_rounds 轮。
+        # 自动切换修复策略并独立验收，最多 max_repair_rounds 种策略。
         draft = self.project_dir / "故事结构_草稿.json"
         repair = self.project_dir / "质量治理" / "最终审计" / "repair_final.md"
         # 无论允许几轮修复，都先做一次提交校验；随后每完成一轮修复都必须
@@ -491,23 +496,13 @@ class Orchestrator:
         rc = cmd_commit_final_draft(self.project_dir)
         if rc == 0:
             return 0
-        for _ in range(self.config.max_repair_rounds):
-            if not repair.is_file():
-                return 1
-            wrc = run_worker(
-                self._worker_command(), self.project_dir, "repair_final",
-                repair, draft,
-                timeout=self.config.worker_timeout_seconds,
-                retries=self.config.worker_retries,
-                worker_window=self.config.worker_window,
-                repair_limit=self.config.max_repair_rounds,
-            )
-            if wrc != 0:
-                return wrc
-            rc = cmd_commit_final_draft(self.project_dir)
-            if rc == 0:
-                return 0
-        return REPAIR_EXHAUSTED
+        if not repair.is_file():
+            return 1
+        return run_repair_worker(
+            self._worker_command(), self.project_dir, "repair_final", repair, draft,
+            timeout=self.config.worker_timeout_seconds, retries=self.config.worker_retries,
+            worker_window=self.config.worker_window, repair_limit=self.config.max_repair_rounds,
+        )
 
     def _stage_finalize(self) -> int:
         return cmd_finalize(self.project_dir)

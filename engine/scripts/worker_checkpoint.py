@@ -14,7 +14,8 @@ from pathlib import Path
 from merge_delta import save_json
 
 
-def _atomic_bytes(path: Path, content: bytes) -> None:
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Replace one generated artifact only after its bytes are durably written."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
@@ -58,7 +59,7 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
         saved = json.loads(receipt.read_text(encoding="utf-8"))
         content = artifact.read_bytes()
         if reuse and content.strip() and saved.get("sha256") == hashlib.sha256(content).hexdigest():
-            _atomic_bytes(output, content)
+            atomic_write_bytes(output, content)
             print(f"已恢复通过检查的分析分包：{output.name}，无需重复请求模型。", flush=True)
             return 0
     except (OSError, ValueError, AttributeError):
@@ -66,6 +67,6 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
     rc = worker(command, project, task, pack, output, **kwargs)
     if rc == 0 and output.is_file() and output.read_bytes().strip():
         content = output.read_bytes()
-        _atomic_bytes(artifact, content)
+        atomic_write_bytes(artifact, content)
         save_json(receipt, {"sha256": hashlib.sha256(content).hexdigest()})
     return rc

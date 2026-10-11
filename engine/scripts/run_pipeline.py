@@ -41,6 +41,8 @@ from validate_structure import validate_structure_file
 
 from prompt_loader import render_prompt, prompt_fingerprint
 from worker_admission import worker_admission
+from fault_recovery import recover_artifact
+from worker_checkpoint import atomic_write_bytes
 from repair_budget import REPAIR_EXHAUSTED, REPAIR_TASKS, reserve_repair, finish_repair
 from worker_artifacts import (
     capture_output_signatures,
@@ -154,6 +156,11 @@ _cancel_local = threading.local()
 
 def set_cancel_event(event: "threading.Event") -> None:
     _cancel_local.event = event
+
+
+def set_recovery_observer(observer: Optional[Callable]) -> None:
+    """Bind recovery events to this run, avoiding project polling or shared state."""
+    _cancel_local.recovery_observer = observer
 
 
 def _get_cancel_event() -> "Optional[threading.Event]":
@@ -688,6 +695,84 @@ def run_worker(
         print(f"worker完成: task={task_type} output={expected_output} log={log_path}")
         return 0
     return 1
+
+
+def run_repair_worker(
+    command: str, project_dir: Path, task_type: str, task_pack: Path,
+    expected_output: Path, chapter_seq: int = 0,
+    timeout: float = DEFAULT_WORKER_TIMEOUT_SECONDS, retries: int = 0,
+    worker_window: str = DEFAULT_WORKER_WINDOW, repair_limit: Optional[int] = None,
+    observe: Optional[Callable] = None,
+) -> int:
+    """Resolve generated-content failures without granting models commit authority."""
+    project_dir = project_dir.resolve()
+    relative = expected_output.resolve().relative_to(project_dir)
+    pack_relative = task_pack.resolve().relative_to(project_dir)
+
+    def validate(root: Path) -> Tuple[int, str]:
+        if task_type == "repair_chapter":
+            rc = commit_chapter(root, chapter_seq)
+        elif task_type == "audit_repair":
+            rc = commit_governance(root, str(root / relative))
+        elif task_type == "repair_final":
+            rc = cmd_commit_final_draft(root)
+        elif task_type == "analysis_regenerate":
+            ok, errors = validate_chapter_analysis_file(root / relative)
+            if not ok:
+                chapter = chapter_by_seq(root, chapter_seq)
+                if chapter:
+                    write_analysis_regenerate_task(root, chapter, errors)
+            return (0 if ok else 1), "\n".join(errors)
+        else:
+            raise ValueError(f"不支持的自动修复任务：{task_type}")
+        report = root / pack_relative
+        return rc, report.read_text(encoding="utf-8") if report.is_file() else f"原校验器返回 {rc}"
+
+    def publish(candidate: Path) -> int:
+        # Publish the generated artifact first; existing chapter/governance commit
+        # receipts protect the subsequent formal structure commit against replay.
+        atomic_write_bytes(expected_output, candidate.read_bytes())
+        rc, _ = validate(project_dir)
+        return rc
+
+    return recover_artifact(
+        project_dir, task_type, task_pack, expected_output, command=command,
+        worker=run_worker, validate=validate, publish=publish,
+        cancel=_get_cancel_event(), chapter_seq=chapter_seq, timeout=timeout,
+        retries=retries, worker_window=worker_window,
+        strategies=3 if repair_limit is None else repair_limit,
+        observe=observe or getattr(_cancel_local, "recovery_observer", None),
+    )
+
+
+
+def run_generation_worker(
+    command: str, project_dir: Path, task_type: str, task_pack: Path,
+    expected_output: Path, chapter_seq: int = 0, **worker_options,
+) -> int:
+    """Route malformed generated artifacts into recovery after releasing the slot.
+
+    A missing artifact or cancelled worker is not semantic repair input. Existing
+    partial artifacts remain inspectable, and original validators retain authority.
+    """
+    rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
+                    chapter_seq, **worker_options)
+    repair_task = {"analysis": "analysis_regenerate", "delta": "repair_chapter",
+                   "audit_correction": "audit_repair", "final_draft": "repair_final"}.get(task_type)
+    if rc != 1 or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
+        return rc
+    if task_type in {"analysis", "delta"}:
+        chapter = chapter_by_seq(project_dir, chapter_seq)
+        if chapter is None:
+            return rc
+        paths = artifact_paths(project_dir, chapter)
+        repair_pack = paths["analysis_regenerate_task" if task_type == "analysis" else "repair"]
+    elif task_type == "audit_correction":
+        repair_pack = expected_output.with_suffix(".repair.md")
+    else:
+        repair_pack = project_dir / "质量治理/最终审计/repair_final.md"
+    return run_repair_worker(command, project_dir, repair_task, repair_pack,
+                             expected_output, chapter_seq, **worker_options)
 
 
 def display_shell_command(args: List[str]) -> str:
@@ -1963,66 +2048,61 @@ def run_periodic_governance(
                 rerun_command,
             )
         return 1
-    for attempt in range(worker_retries + 1):
-        if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
-            update_audit_status(
-                paths,
-                status="awaiting_agent",
-                action="读取审计任务包，产出真实 correction Delta，然后再次运行 run_pipeline.py run。",
-            )
-            print(f"周期审计 {start:03d}-{end:03d} 待Agent处理：{paths['pack']}")
-            print(f"请产出真实治理补丁：{paths['correction']}")
-            if not audit_command:
-                return 2
-            rc = run_worker(
-                audit_command,
-                project_dir,
-                "audit_correction",
-                paths["pack"],
-                paths["correction"],
-                timeout=worker_timeout_seconds,
-                retries=0,
-                worker_window=worker_window,
-            )
-            if rc != 0:
-                update_audit_status(paths, status="worker_failed", action="审计 worker 失败；查看 worker 日志后重试。")
-                return rc
-            if worker_supervision_checkpoint(worker_loop, f"audit correction written for {start:03d}-{end:03d}", rerun_command):
-                return 2
-
-        rc = commit_governance(project_dir, str(paths["correction"]))
-        if rc == 0:
-            print(f"周期审计 {start:03d}-{end:03d} 治理补丁已提交并通过校验。")
-            return 0
-
+    if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
         update_audit_status(
             paths,
             status="awaiting_agent",
-            action="读取治理校验报告，修复 correction Delta，然后再次运行 run_pipeline.py run。",
+            action="读取审计任务包，产出真实 correction Delta，然后再次运行 run_pipeline.py run。",
         )
-        print(f"周期审计 {start:03d}-{end:03d} 治理补丁未通过；待Agent修复后重试。")
+        print(f"周期审计 {start:03d}-{end:03d} 待Agent处理：{paths['pack']}")
+        print(f"请产出真实治理补丁：{paths['correction']}")
         if not audit_command:
             return 2
-        if attempt >= worker_retries:
-            update_audit_status(paths, status="repair_exhausted", action="本次运行修复次数已耗尽；保留断点，可从当前补丁继续重试。")
-            return REPAIR_EXHAUSTED
-        rc = run_worker(
+        rc = run_generation_worker(
             audit_command,
             project_dir,
-            "audit_repair",
-            paths["correction"].with_suffix(".repair.md"),
+            "audit_correction",
+            paths["pack"],
             paths["correction"],
             timeout=worker_timeout_seconds,
             retries=0,
-            repair_limit=max(1, worker_retries),
             worker_window=worker_window,
         )
         if rc != 0:
-            update_audit_status(paths, status="worker_failed", action="审计修复 worker 失败；查看 worker 日志后重试。")
+            update_audit_status(paths, status="worker_failed", action="审计 worker 失败；查看 worker 日志后重试。")
             return rc
-        if worker_supervision_checkpoint(worker_loop, f"audit repair written for {start:03d}-{end:03d}", rerun_command):
+        if worker_supervision_checkpoint(worker_loop, f"audit correction written for {start:03d}-{end:03d}", rerun_command):
             return 2
-    return 2
+
+    rc = commit_governance(project_dir, str(paths["correction"]))
+    if rc == 0:
+        print(f"周期审计 {start:03d}-{end:03d} 治理补丁已提交并通过校验。")
+        return 0
+
+    update_audit_status(
+        paths,
+        status="awaiting_agent",
+        action="读取治理校验报告，修复 correction Delta，然后再次运行 run_pipeline.py run。",
+    )
+    print(f"周期审计 {start:03d}-{end:03d} 治理补丁未通过；准备自动修复与重新验收。")
+    if not audit_command:
+        return 2
+    rc = run_repair_worker(
+        audit_command,
+        project_dir,
+        "audit_repair",
+        paths["correction"].with_suffix(".repair.md"),
+        paths["correction"],
+        timeout=worker_timeout_seconds,
+        retries=worker_retries,
+        worker_window=worker_window,
+    )
+    if rc != 0:
+        update_audit_status(paths, status="worker_failed", action="审计修复 worker 失败；查看 worker 日志后重试。")
+        return rc
+    if worker_supervision_checkpoint(worker_loop, f"audit repair written for {start:03d}-{end:03d}", rerun_command):
+        return 2
+    return 0
 
 
 def mark_periodic_audit_committed(project_dir: Path, patch: Path, before: Path, after: Path, diff: Path) -> None:
@@ -2173,7 +2253,7 @@ def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_path
 
 
 def write_analysis_regenerate_task(project_dir: Path, chapter: Path, errors: List[str]) -> None:
-    """Ask the agent to regenerate a shrunken analysis from source, never from the bad MD."""
+    """Repair analysis from complete source while preserving existing content."""
     p = artifact_paths(project_dir, chapter)
     content = render_prompt(
         "流水线/章节分析_重生成.j2",
@@ -2433,7 +2513,7 @@ def _cmd_run_analysis_serial(project_dir, files, chapter_command, worker_timeout
             print("已交接：等待章节分析MD。")
             if not chapter_command:
                 return 2
-            rc = run_worker(
+            rc = run_generation_worker(
                 chapter_command,
                 project_dir,
                 "analysis",
@@ -2448,14 +2528,13 @@ def _cmd_run_analysis_serial(project_dir, files, chapter_command, worker_timeout
                 return rc
             if worker_supervision_checkpoint(worker_loop, f"analysis artifact written for ch{seq_from_file(chapter):03d}", rerun_command):
                 return 2
-            continue
         analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
         if not analysis_ok:
             write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
             print("已交接：等待从原文重新生成完整章节分析MD。")
             if not chapter_command:
                 return 2
-            rc = run_worker(
+            rc = run_repair_worker(
                 chapter_command,
                 project_dir,
                 "analysis_regenerate",
@@ -2479,12 +2558,15 @@ def _cmd_run_analysis_serial(project_dir, files, chapter_command, worker_timeout
 def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeout_seconds,
                                worker_retries, worker_window, concurrency, cancel_event=None) -> int:
     from concurrent.futures import ThreadPoolExecutor
+    recovery_observer = getattr(_cancel_local, "recovery_observer", None)
 
     def _do_one(item):
+        set_recovery_observer(recovery_observer)
         if cancel_event is not None:
             set_cancel_event(cancel_event)  # 线程池线程需各自设线程本地取消事件
         _chapter, ttype, task_pack, expected, seq = item
-        return run_worker(
+        execute = run_repair_worker if ttype == "analysis_regenerate" else run_generation_worker
+        return execute(
             chapter_command, project_dir, ttype, task_pack, expected, seq,
             timeout=worker_timeout_seconds, retries=worker_retries, worker_window=worker_window,
         )
@@ -2617,7 +2699,10 @@ def cmd_run_interleaved(
                 err["rc"] = rc
             cond.notify_all()
 
+    recovery_observer = getattr(_cancel_local, "recovery_observer", None)
+
     def producer() -> None:
+        set_recovery_observer(recovery_observer)
         if cancel_event is not None:
             set_cancel_event(cancel_event)
         while True:
@@ -2634,7 +2719,7 @@ def cmd_run_interleaved(
             try:
                 if not p["analysis"].is_file():
                     prepare_chapter_analysis(project_dir, chapter)
-                    rc = run_worker(chapter_command, project_dir, "analysis", p["analysis_task"],
+                    rc = run_generation_worker(chapter_command, project_dir, "analysis", p["analysis_task"],
                                     p["analysis"], seq, timeout=worker_timeout_seconds,
                                     retries=worker_retries, worker_window=worker_window)
                     if rc != 0:
@@ -2642,7 +2727,7 @@ def cmd_run_interleaved(
                 ok, errs = validate_chapter_analysis_file(p["analysis"])
                 if not ok:
                     write_analysis_regenerate_task(project_dir, chapter, errs)
-                    rc = run_worker(chapter_command, project_dir, "analysis_regenerate",
+                    rc = run_repair_worker(chapter_command, project_dir, "analysis_regenerate",
                                     p["analysis_regenerate_task"], p["analysis"], seq,
                                     timeout=worker_timeout_seconds, retries=worker_retries,
                                     worker_window=worker_window)
@@ -2661,6 +2746,7 @@ def cmd_run_interleaved(
                      detail=f"ch{seq:03d}/{total} 分析完成", data={"seq": seq, "total": total})
 
     def consumer() -> None:
+        set_recovery_observer(recovery_observer)
         if cancel_event is not None:
             set_cancel_event(cancel_event)
         for seq in seqs:
@@ -2676,12 +2762,12 @@ def cmd_run_interleaved(
                     continue
                 if not p["delta"].is_file():
                     prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
-                    rc = run_worker(chapter_command, project_dir, "delta", p["delta_task"],
+                    rc = run_generation_worker(chapter_command, project_dir, "delta", p["delta_task"],
                                     p["delta"], seq, timeout=worker_timeout_seconds,
                                     retries=worker_retries, worker_window=worker_window)
                     if rc != 0:
                         if p["repair"].is_file():
-                            rc2 = run_worker(chapter_command, project_dir, "repair_chapter",
+                            rc2 = run_repair_worker(chapter_command, project_dir, "repair_chapter",
                                              p["repair"], p["delta"], seq, timeout=worker_timeout_seconds,
                                              retries=worker_retries, worker_window=worker_window)
                             if rc2 != 0:
@@ -2691,7 +2777,7 @@ def cmd_run_interleaved(
                 rc = commit_chapter(project_dir, seq)
                 if rc != 0:
                     if p["repair"].is_file():
-                        rc2 = run_worker(chapter_command, project_dir, "repair_chapter",
+                        rc2 = run_repair_worker(chapter_command, project_dir, "repair_chapter",
                                          p["repair"], p["delta"], seq, timeout=worker_timeout_seconds,
                                          retries=worker_retries, worker_window=worker_window)
                         if rc2 != 0:
@@ -2780,7 +2866,7 @@ def cmd_run_delta(
             print("Delta阶段已交接：等待全部章节分析MD通过校验。")
             if not chapter_command:
                 return 2
-            rc = run_worker(
+            rc = run_generation_worker(
                 chapter_command,
                 project_dir,
                 "analysis",
@@ -2802,7 +2888,7 @@ def cmd_run_delta(
             print("Delta阶段已交接：等待全部章节分析MD通过校验。")
             if not chapter_command:
                 return 2
-            rc = run_worker(
+            rc = run_repair_worker(
                 chapter_command,
                 project_dir,
                 "analysis_regenerate",
@@ -2960,7 +3046,7 @@ def cmd_run(
             print("已交接：等待章节分析MD。")
             if not chapter_command:
                 return 2
-            rc = run_worker(
+            rc = run_generation_worker(
                 chapter_command,
                 project_dir,
                 "analysis",
@@ -2984,7 +3070,7 @@ def cmd_run(
                 print("已交接：等待从原文重新生成完整章节分析MD。")
                 if not chapter_command:
                     return 2
-                rc = run_worker(
+                rc = run_repair_worker(
                     chapter_command,
                     project_dir,
                     "analysis_regenerate",
@@ -3003,7 +3089,7 @@ def cmd_run(
             print("已交接：等待基于章节分析的Delta JSON。")
             if not chapter_command:
                 return 2
-            rc = run_worker(
+            rc = run_generation_worker(
                 chapter_command,
                 project_dir,
                 "delta",
@@ -3022,7 +3108,7 @@ def cmd_run(
         rc = commit_chapter(project_dir, seq)
         if rc != 0:
             if chapter_command and p["repair"].is_file():
-                worker_rc = run_worker(
+                worker_rc = run_repair_worker(
                     chapter_command,
                     project_dir,
                     "repair_chapter",
@@ -3037,8 +3123,10 @@ def cmd_run(
                     return worker_rc
                 if worker_supervision_checkpoint(worker_loop, f"chapter repair artifact written for ch{seq:03d}", rerun_command):
                     return 2
-                continue
-            return rc
+                # Recovery has already validated and committed this chapter.
+                # Keep normal bookkeeping so its periodic audit is not skipped.
+            else:
+                return rc
         processed += 1
         if audit_interval and seq % audit_interval == 0:
             start = seq - audit_interval + 1
@@ -3286,7 +3374,7 @@ def cmd_commit_final_draft(project_dir: Path) -> int:
         repair = audit_dir / "repair_final.md"
         content = render_prompt(
             "流水线/终稿修复.j2",
-            report_excerpt=read_excerpt(report, 30000),
+            report_excerpt=report.read_text(encoding="utf-8"),
             run_pipeline_path=script_path("run_pipeline.py"),
             project_dir=project_dir,
         )

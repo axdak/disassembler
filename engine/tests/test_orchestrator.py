@@ -179,30 +179,29 @@ def test_final_pack_stage(tmp_path):
     assert args[4].name == "故事结构_草稿.json"
 
 
-def test_commit_final_draft_repair_loop(tmp_path):
+def test_commit_final_draft_delegates_to_recovery_scheduler(tmp_path):
     orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=3))
-    repair = tmp_path / "质量治理" / "最终审计" / "repair_final.md"
-    repair.parent.mkdir(parents=True, exist_ok=True)
-    repair.write_text("repair instructions", encoding="utf-8")
-    with patch.object(orchestrator, "cmd_commit_final_draft", side_effect=[1, 1, 0]) as cfd, \
-         patch.object(orchestrator, "run_worker", return_value=0) as rw:
-        rc = orch._stage_commit_final_draft()
-    assert rc == 0
-    assert cfd.call_count == 3
-    assert rw.call_count == 2  # 两次失败各触发一次修复 worker
-
-
-def test_commit_final_draft_exhausts_repair_rounds(tmp_path):
-    orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=2))
-    repair = tmp_path / "质量治理" / "最终审计" / "repair_final.md"
-    repair.parent.mkdir(parents=True, exist_ok=True)
+    repair = tmp_path / "质量治理/最终审计/repair_final.md"
+    repair.parent.mkdir(parents=True)
     repair.write_text("repair instructions", encoding="utf-8")
     with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1) as cfd, \
-         patch.object(orchestrator, "run_worker", return_value=0) as rw:
-        rc = orch._stage_commit_final_draft()
-    assert rc == orchestrator.REPAIR_EXHAUSTED
-    assert cfd.call_count == 3  # 初次校验 + 每轮修复后的再次校验
-    assert rw.call_count == 2  # 每轮修复一次，共 2 轮
+         patch.object(orchestrator, "run_repair_worker", return_value=0) as rw:
+        assert orch._stage_commit_final_draft() == 0
+    assert cfd.call_count == 1
+    assert rw.call_count == 1  # Scheduler owns validation and strategy changes.
+    assert rw.call_args.kwargs["repair_limit"] == 3
+
+
+def test_commit_final_draft_propagates_durable_exhaustion(tmp_path):
+    orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=2))
+    repair = tmp_path / "质量治理/最终审计/repair_final.md"
+    repair.parent.mkdir(parents=True)
+    repair.write_text("repair instructions", encoding="utf-8")
+    with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1), \
+         patch.object(orchestrator, "run_repair_worker", return_value=orchestrator.REPAIR_EXHAUSTED) as rw:
+        assert orch._stage_commit_final_draft() == orchestrator.REPAIR_EXHAUSTED
+    assert rw.call_count == 1
+    assert rw.call_args.kwargs["repair_limit"] == 2
 
 
 def test_commit_final_draft_still_validates_when_repairs_disabled(tmp_path):

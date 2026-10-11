@@ -37,6 +37,9 @@ DELTA_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "delta.
 
 def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> str:
     """Return the strictest native schema available for one JSON artifact."""
+    # Automatic repairs keep the exact original artifact schema. Their internal
+    # task prefix separates durable recovery budgets from legacy retry counters.
+    task_type = task_type.removeprefix("auto_")
     if len(expected_outputs) != 1 or expected_outputs[0].suffix.lower() != ".json":
         return ""
     if task_type not in JSON_TASK_TYPES:
@@ -174,9 +177,10 @@ def provider_order(provider: str) -> List[str]:
 
 
 def task_guidance(task_type: str) -> str:
+    task_type = task_type.removeprefix("auto_")
     guidance = {
         "analysis": "任务重点:按任务包要求写章节分析 Markdown。根据任务包,只提取和组织本章的剧情、人物、冲突、信息增量、结构和叙事信号。",
-        "analysis_regenerate": "任务重点:因校验失败重新生成章节分析 Markdown。使用任务包内的校验反馈,重写完整的目标 Markdown。",
+        "analysis_regenerate": "任务重点:根据原文和校验反馈修复完整章节分析 Markdown。保留已有分析内容，修复格式并补足缺失内容，禁止缩写或删减以通过校验。",
         "delta": "任务重点:写本章 Delta JSON。使用任务包的章节分析、当前结构上下文和规则,只输出要求的增量 JSON。",
         "repair_chapter": "任务重点:根据任务包内的校验报告修复本章 Delta JSON。保留有效语义;只改达成目标所需的。",
         "audit_correction": "任务重点:写周期治理补丁 JSON。审查审计任务包,只产出任务包要求的真实 no_change/add/modify/delete 治理操作。",
@@ -260,7 +264,7 @@ def is_unsupported_node_option(option: str) -> bool:
 
 def provider_env() -> dict[str, str]:
     env = dict(os.environ)
-    if env.get("ND_TASK_TYPE") in JSON_TASK_TYPES and not env.get(
+    if env.get("ND_TASK_TYPE", "").removeprefix("auto_") in JSON_TASK_TYPES and not env.get(
         "CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"
     ):
         # Custom CodeBuddy models may omit maxOutputTokens from their catalog
