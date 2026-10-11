@@ -9,6 +9,7 @@ import pytest
 from fault_recovery import REVIEW_CHECKS, digest, preservation_errors, preserve_quality_notes, recover_artifact
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED, begin_retry_session
+from recovery_materials import read_material_document
 
 
 def scenario(tmp_path):
@@ -96,7 +97,8 @@ def test_exhaustion_survives_restart_and_legacy_retry_reset(tmp_path):
     assert state(tmp_path)["generation"] == 2
 
 
-@pytest.mark.parametrize("mode", ["delete_content", "edit_evidence", "edit_reference", "reject_review", "bad_review", "edit_during_review"])
+@pytest.mark.parametrize("mode", ["delete_content", "edit_evidence", "edit_reference", "edit_material_index",
+                                  "edit_history", "reject_review", "bad_review", "edit_during_review"])
 def test_bad_candidates_never_publish(tmp_path, mode):
     output, pack, source, calls, published, options = scenario(tmp_path)
     original = options["worker"]
@@ -112,6 +114,10 @@ def test_bad_candidates_never_publish(tmp_path, mode):
                 (root / source.relative_to(tmp_path)).write_text("篡改原文", encoding="utf-8")
             if mode == "edit_reference":
                 save_json(root / "reference.json", {})
+            if mode == "edit_material_index":
+                save_json(root / "materials.json", {})
+            if mode == "edit_history":
+                save_json(root / "history.json", {"forged": True})
             (root / "forged_success.json").write_text("true", encoding="utf-8")
         elif kind == "recovery_review":
             if mode == "reject_review":
@@ -143,6 +149,23 @@ def test_diagnosis_strategy_and_configured_model_fallback(tmp_path, monkeypatch)
     options["worker"] = worker
     assert invoke(tmp_path, output, pack, options) == 0
     assert calls[-3:] == ["recovery_diagnosis", "auto_repair_chapter", "recovery_review"]
+    assert len(published) == 1
+
+
+def test_rejected_catalog_edit_does_not_poison_next_strategy(tmp_path):
+    """A bad worker cannot make the next strategy fail while reading its history."""
+    output, pack, _, calls, published, options = scenario(tmp_path)
+    original = options["worker"]
+
+    def worker(*args, **kwargs):
+        rc = original(*args, **kwargs)
+        if len(calls) == 1:
+            save_json(args[1] / "materials.json", {})
+        return rc
+
+    options["worker"] = worker
+    assert invoke(tmp_path, output, pack, options) == 0
+    assert calls == ["auto_repair_chapter", "auto_repair_chapter", "recovery_review"]
     assert len(published) == 1
 
 
@@ -304,7 +327,7 @@ def test_analysis_recovery_receives_complete_fresh_contract(tmp_path, monkeypatc
 
     def worker(command, root, kind, pack, expected, *a, **kw):
         if kind == "auto_analysis_regenerate":
-            contract = (root / "contract.md").read_text(encoding="utf-8")
+            contract = read_material_document(root / "contract.md")
             assert "以下10个章节" in contract
             assert "测试原文。" in contract
             expected.write_text(valid_analysis(1) + "\n" + retained, encoding="utf-8")
