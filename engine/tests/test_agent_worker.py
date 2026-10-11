@@ -66,6 +66,8 @@ record.write_text(json.dumps({
     "max_output_tokens": os.environ.get("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS", ""),
     "task_pack": os.environ.get("ND_TASK_PACK", ""),
     "expected_output": os.environ.get("ND_EXPECTED_OUTPUT", ""),
+    "cwd": str(Path.cwd()),
+    "mcp": json.loads(Path(sys.argv[sys.argv.index("--mcp-config") + 1]).read_text(encoding="utf-8")) if "--mcp-config" in sys.argv else None,
 }, ensure_ascii=False, indent=2), encoding="utf-8")
 if os.environ.get("FAKE_CLI_CAPACITY_LOG"):
     from datetime import datetime
@@ -153,6 +155,55 @@ def test_codebuddy_provider_writes_stdout_to_expected_output():
     assert "-p" in payload["argv"]
     assert "--output-format" in payload["argv"]
     assert "Write the target file." in payload["stdin"]
+
+
+def test_codebuddy_only_exposes_scoped_context_without_inherited_capabilities():
+    """The real process arguments must enforce the boundary, not just the prompt."""
+    result, _, payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN")
+    assert result.returncode == 0, result.stdout
+    argv = payload["argv"]
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in argv
+    assert "--add-dir" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+    assert "bypassPermissions" not in argv
+    assert set(payload["mcp"]["mcpServers"]) == {"nd_context"}
+    assert Path(payload["cwd"]).name.startswith("nd_worker_")
+
+
+@pytest.mark.parametrize("extra", ["--tools Bash", "--permission-mode bypassPermissions", "--add-dir C:/", "--settings unsafe.json"])
+def test_codebuddy_deployment_args_cannot_restore_filesystem_or_command_access(extra):
+    result, output, payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN", {"ND_CODEBUDDY_ARGS": extra})
+    assert result.returncode != 0
+    assert output == "" and payload == {}
+
+
+@pytest.mark.parametrize("failure", [None, "extra", "invalid"])
+def test_multifile_bodies_are_checked_before_publishing(tmp_path, failure):
+    """Reject an extra destination or bad second body without touching either old file."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    from agent_worker import _write_multi_captured_artifacts
+
+    markdown, data = tmp_path / "analysis.md", tmp_path / "result.json"
+    markdown.write_text("old analysis", encoding="utf-8")
+    data.write_text('{"old":true}', encoding="utf-8")
+    bodies = {str(markdown): "# analysis", str(data): '{"passed":true}'}
+    if failure == "extra":
+        bodies[str(tmp_path / "source.py")] = "unapproved change"
+    if failure == "invalid":
+        bodies[str(data)] = "broken json"
+    if failure:
+        with pytest.raises(ValueError):
+            _write_multi_captured_artifacts(json.dumps(bodies), [markdown, data])
+        assert markdown.read_text(encoding="utf-8") == "old analysis"
+        assert json.loads(data.read_text(encoding="utf-8")) == {"old": True}
+        assert not (tmp_path / "source.py").exists()
+    else:
+        _write_multi_captured_artifacts(json.dumps(bodies), [markdown, data])
+        assert markdown.read_text(encoding="utf-8").strip() == "# analysis"
+        assert json.loads(data.read_text(encoding="utf-8")) == {"passed": True}
 
 
 def test_codebuddy_preserves_fresh_valid_direct_json_over_stdout_summary():

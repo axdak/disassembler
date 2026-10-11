@@ -1375,7 +1375,7 @@ def replay_one_delta(project_dir: Path, seq: int) -> int:
         return 1
 
     coerce_delta_report = project_dir / "质量治理" / "delta校验" / f"coerce_ch{seq:03d}.json"
-    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--report", str(coerce_delta_report)])
+    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--current", str(story), "--report", str(coerce_delta_report)])
     if rc != 0:
         print(f"重放失败: 第{seq:03d}章 Delta 机械纠错失败，见: {coerce_delta_report}")
         return 1
@@ -2589,9 +2589,9 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
 
     # 入库前先做机械纠错：把 LLM 写错的类型/格式（bool/int、数组↔标量、章节号宽度、
     # 顶层追溯字段位置等）确定性地修好。这一步不需要 LLM 介入，能把大半 repair 循环
-    # 提前消解。失败（理论上只在 JSON 损坏时）才落 repair 包。
+    # 提前消解；正式索引唯一确定的类别与关联引用也在此完整迁移，避免模型反复修复。
     coerce_delta_report = project_dir / "质量治理" / "delta校验" / f"coerce_ch{seq:03d}.json"
-    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--report", str(coerce_delta_report)])
+    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--current", str(story), "--report", str(coerce_delta_report)])
     if rc != 0:
         print(f"Delta 机械纠错失败，见: {coerce_delta_report}")
         write_repair_pack(project_dir, chapter, "coerce_delta.py失败", [coerce_delta_report])

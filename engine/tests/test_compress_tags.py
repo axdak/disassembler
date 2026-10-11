@@ -124,6 +124,23 @@ def test_no_change_when_only_free_tags_under_limit():
     assert json.dumps(item["详情"], ensure_ascii=False, sort_keys=True) == before_detail
 
 
+def test_merged_primary_and_supplementary_overlap_is_losslessly_removed():
+    """合并后跨区重复需整理，否则最终结构校验会阻断章节入库。"""
+    item = _character("未明人物", ["身份未明"], supplementary='["身份未明","举止可疑"]')
+    report = compress_structure({"角色集": [item]}, {"角色集": 8})
+    assert len(report) == 1
+    assert item["标签集"] == ["身份未明"]
+    assert parse_supplementary_tags(item["详情"][SUPPLEMENTARY_TAGS_DETAIL_KEY]) == ["举止可疑"]
+    assert compress_structure({"角色集": [item]}, {"角色集": 8}) == []
+
+
+def test_duplicate_only_supplementary_field_is_removed():
+    item = _character("未明人物", ["身份未明"], supplementary='["身份未明"]')
+    compress_item(item, limit=8)
+    assert item["标签集"] == ["身份未明"]
+    assert SUPPLEMENTARY_TAGS_DETAIL_KEY not in item["详情"]
+
+
 def test_event_four_dimension_compound_tag_stays_in_tag_set():
     """事件四维复合标签不带受控前缀，必须留在标签集供界面直读。"""
     tag = "侠之真义+主题点化+感动+观念冲突"
@@ -246,10 +263,10 @@ def test_load_limits_handles_missing_file(tmp_path):
         assert limits[k] == FALLBACK_LIMIT
 
 
-def test_corrupted_supplementary_is_replaced_not_dropped():
-    """已有 补充标签 损坏：脚本按空处理，新降级写入，不抛错。"""
+def test_corrupted_supplementary_is_preserved_for_repair():
+    """无法解释的旧内容交给修复流程，不以空数组覆盖已有材料。"""
     item = _event("退婚事件", ["剧情母题:武力对峙"], supplementary="not a json")
-    compress_item(item, limit=8)
-    # 旧损坏的字符串被覆盖；新降级项写入
-    supp = parse_supplementary_tags(item["详情"][SUPPLEMENTARY_TAGS_DETAIL_KEY])
-    assert supp == ["剧情母题:武力对峙"]
+    before = json.dumps(item, ensure_ascii=False)
+    with pytest.raises(ValueError, match="保留原值"):
+        compress_item(item, limit=8)
+    assert json.dumps(item, ensure_ascii=False) == before

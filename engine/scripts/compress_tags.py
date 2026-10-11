@@ -7,7 +7,7 @@ FIFO 截断（截断部分一并降级）。
 设计原则：
 - 单一职责：只搬运标签，不评判 LLM 的内容质量；不读写章节分析或原文。
 - 确定性：同一输入两次执行结果完全一致。
-- 只增不删：已有 `详情.补充标签` 永远保留，新降级项追加去重。
+- 保留标签内容：新降级项追加去重；两处重复的标签仅保留在主标签中。
 - 复用现有零件：`SUPPLEMENTARY_TAGS_DETAIL_KEY`、parse/dump 补充标签、taxonomy。
 
 CLI:
@@ -112,30 +112,34 @@ def compress_item(item: Dict[str, Any], limit: int) -> Tuple[int, int]:
     extra_free = free_tags[max(limit, 0):]
 
     demoted_new = prefix_tags + extra_free
-    if not demoted_new and keep_free == cleaned:
-        # 无任何改动；不要碰详情.补充标签的存在性
-        return 0, 0
-
     # 读现有补充标签
     detail = item.get("详情")
     if not isinstance(detail, dict):
         detail = {}
-        item["详情"] = detail
 
     existing = detail.get(SUPPLEMENTARY_TAGS_DETAIL_KEY)
     existing_tags: List[str] = []
     if isinstance(existing, str) and existing.strip():
         try:
             existing_tags = parse_supplementary_tags(existing)
-        except ValueError:
-            # 现有内容损坏；按空处理而不是抛错丢数据
-            existing_tags = []
+        except ValueError as exc:
+            # A malformed old value is still evidence. Do not overwrite it with
+            # the newly demoted tags; the existing repair path owns this failure.
+            raise ValueError("补充标签不可解析，保留原值等待修复") from exc
 
-    merged = _append_unique(existing_tags, demoted_new)
+    # 合并旧档案时主标签可能与补充标签重叠。主标签仍供界面直读，
+    # 只移除补充区中的同文副本，不删除任何独有标签或重新解释标签含义。
+    duplicate_tags = set(keep_free).intersection(existing_tags)
+    if not demoted_new and keep_free == cleaned and not duplicate_tags:
+        return 0, 0
+    merged = [tag for tag in _append_unique(existing_tags, demoted_new) if tag not in keep_free]
 
     item["标签集"] = keep_free
+    item["详情"] = detail
     if merged:
         detail[SUPPLEMENTARY_TAGS_DETAIL_KEY] = dump_supplementary_tags(merged)
+    elif duplicate_tags:
+        detail.pop(SUPPLEMENTARY_TAGS_DETAIL_KEY, None)
 
     return len(prefix_tags), len(extra_free)
 
@@ -152,8 +156,15 @@ def compress_collection(
     for item in items:
         if not isinstance(item, dict):
             continue
+        # 纯跨区去重也会改变档案，必须记入改写报告，不能显示“无需改写”。
+        original_tags = item.get("标签集")
+        original_detail = item.get("详情")
+        original_supplementary = original_detail.get(SUPPLEMENTARY_TAGS_DETAIL_KEY) if isinstance(original_detail, dict) else None
         demoted_prefix, demoted_free = compress_item(item, limit)
-        if demoted_prefix or demoted_free:
+        current_detail = item.get("详情")
+        current_supplementary = current_detail.get(SUPPLEMENTARY_TAGS_DETAIL_KEY) if isinstance(current_detail, dict) else None
+        if (demoted_prefix or demoted_free or original_tags != item.get("标签集")
+                or original_supplementary != current_supplementary):
             report.append(
                 {
                     "段": section_label,

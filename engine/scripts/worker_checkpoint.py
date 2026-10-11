@@ -47,7 +47,8 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
                         *(engine / "scripts" / name for name in (
                             "capacity_tree.py", "bounded_generation.py", "context_budget.py",
                             "run_pipeline.py", "analysis_context_pack.py")),
-                        engine / "tools" / "agent_worker.py"]):
+                        engine / "tools" / "agent_worker.py",
+                        engine / "tools" / "worker_context.py"]):
         code_hash.update(str(path.relative_to(engine)).encode())
         code_hash.update(path.read_bytes())
     settings = {key: value for key, value in os.environ.items()

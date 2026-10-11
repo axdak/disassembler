@@ -20,6 +20,8 @@ inputs: [task_type, task_pack, expected_output_text, output_kind, output_rule, g
 5. 不要创建脚本、批处理器、调度器或额外产物。
 6. 不要处理任务包范围外的章节或审计区间。
 7. 修复任务只重写期望的目标产物内容。
+8. 路径材料只能使用 nd_context 的 list_context/read_context 工具读取；next_offset 非空时继续读取完整材料。
+9. 禁止读取项目代码、搜索任务范围外文件、执行脚本或命令、直接修改任何文件。任务包中的运行命令由宿主程序负责。
 
 任务包:
 

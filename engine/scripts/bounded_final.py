@@ -25,8 +25,16 @@ from governance_contract import normalize_governance_patch
 from coerce_delta import relocate_element_fields
 
 
-def guarded_worker(worker, command, session, kind, task, output, protected_paths, options):
+def guarded_worker(worker, command, session, kind, task, output, protected_paths, options, *, context_aliases=()):
     """Restore read-only inputs on both normal returns and transport exceptions."""
+    # A request can live below its frozen evidence tree. Supply exact trusted
+    # inputs instead of reopening arbitrary parent directories to the model.
+    context_inputs = task.with_suffix(".context-inputs.json")
+    inputs = [path.resolve() for path in protected_paths if path != output and path.is_file()]
+    save_json(context_inputs, [str(path) for path in inputs] + [
+        {"source": str(source), "snapshot": str(copy)} for source, copy in context_aliases
+        if copy.resolve() in inputs])
+    protected_paths = [*protected_paths, context_inputs]
     protected = {path: path.read_bytes() for path in protected_paths}
     try:
         rc = worker(command, session, kind, task, output, **options)

@@ -74,7 +74,8 @@ COLLECTION_TO_TYPE = {
 
 MIN_COUNTS = {"角色集": 0, "事件集": 0, "地点集": 0, "线索集": 0, "阵营集": 0, "物品集": 0, "其他事项集": 0}
 DETAIL_KEY_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9\-]+$")
-DETAIL_REF_RE = re.compile(r"^(角色|事件|地点|线索|阵营|物品|道具):(.+)$")
+# 引用类型与集合映射共用单一来源，新增集合不会遗漏引用校验。
+DETAIL_REF_RE = re.compile(r"^(" + "|".join(map(re.escape, TYPE_TO_COLLECTION)) + r"):(.+)$")
 LEGACY_FINAL_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 SUPPLEMENTARY_TAGS_DETAIL_KEY = "补充标签"
@@ -89,7 +90,7 @@ DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS = {
     "物品轨迹", "用途线索", "持有变化", "物品状态", "物品证据",
     "事项轨迹", "事项证据",
 }
-DETAIL_REF_ARRAY_KEYS = {"关联线索", "关联角色", "关联事件", "关联地点", "关联阵营", "关联物品"}
+DETAIL_REF_ARRAY_KEYS = {"关联" + kind for kind in COLLECTION_TO_TYPE.values()}
 DETAIL_CUMULATIVE_KEY_SUFFIXES = (
     "线索", "轨迹", "证据", "记录", "变化", "状态", "表现", "行为",
     "台词", "依据", "摘录", "链条", "机制", "用途", "细节",

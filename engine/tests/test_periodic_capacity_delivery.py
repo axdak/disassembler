@@ -26,7 +26,8 @@ def test_stream_length_stops_before_consuming_fake_success():
     assert rc.returncode == 64
     assert artifact == ""
     tools = args["argv"][args["argv"].index("--tools") + 1]
-    assert tools == "Read,StructuredOutput"
+    assert tools == "StructuredOutput"
+    assert "mcp__nd_context__read_context" in args["argv"][args["argv"].index("--allowedTools") + 1]
 
 
 @pytest.mark.parametrize("task_type", ["audit_correction", "bounded_fragment"])
@@ -45,7 +46,8 @@ def test_stream_allows_more_than_eight_requests_with_restricted_tools(task_type)
     assert rc.returncode == 0 and json.loads(artifact) == expected
     assert "CLI 模型请求第 12 轮" in rc.stdout
     assert "--max-turns" not in args["argv"]
-    assert args["argv"][args["argv"].index("--tools") + 1] == "Read,StructuredOutput"
+    assert args["argv"][args["argv"].index("--tools") + 1] == "StructuredOutput"
+    assert "mcp__nd_context__read_context" in args["argv"][args["argv"].index("--allowedTools") + 1]
 
 
 def test_explicit_provider_turn_limit_is_not_clamped_or_treated_as_capacity():

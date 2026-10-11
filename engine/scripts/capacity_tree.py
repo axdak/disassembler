@@ -140,7 +140,8 @@ class CapacityTree:
         engine = Path(__file__).resolve().parents[1]
         code = [(str(path.relative_to(engine)), digest(path)) for path in sorted(
             [*engine.joinpath("scripts").glob("*.py"), *engine.joinpath("prompts").rglob("*.j2"),
-             *engine.joinpath("schemas").glob("*.json"), engine / "tools/agent_worker.py"])]
+             *engine.joinpath("schemas").glob("*.json"), engine / "tools/agent_worker.py",
+             engine / "tools/worker_context.py"])]
         settings = {key: value for key, value in os.environ.items() if key.startswith(
             ("ND_", "CODEBUDDY_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
         identity = json.dumps([self.sources, references, command, contract, target, self.policy.__dict__,
@@ -230,7 +231,10 @@ class CapacityTree:
                                          [pack, ledger, *(path for path, _ in self.materials),
                                           *self.reference_paths.values(), self.root / "references.json",
                                           *self.protected_materials,
-                                          *(path for path in self.root.rglob("result.json") if path != result)], self.options)
+                                          *(path for path in self.root.rglob("result.json") if path != result)], self.options,
+                                         context_aliases=[(Path(source[0]), material[0])
+                                                          for source, material in zip(self.sources, self.materials)]
+                                         + [(Path(source), copy) for source, copy in self.reference_paths.items()])
             if rc in {130, CONTEXT_EXCEEDED}:
                 state["attempts"] -= 1
                 if rc == CONTEXT_EXCEEDED:

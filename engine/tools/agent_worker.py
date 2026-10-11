@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from typing import List
 
+from worker_context import snapshot_context
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from prompt_loader import render_prompt
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, recovery_output_errors
@@ -40,10 +42,16 @@ DELTA_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "delta.
 
 
 def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> str:
-    """Return the strictest native schema available for one JSON artifact."""
+    """Constrain single JSON artifacts or exact multi-file text bodies."""
     # Automatic repairs keep the exact original artifact schema. Their internal
     # task prefix separates durable recovery budgets from legacy retry counters.
     task_type = task_type.removeprefix("auto_")
+    if len(expected_outputs) > 1:
+        # Multi-artifact workers return text bodies; only the wrapper may publish
+        # files. Exact keys prevent the agent from choosing additional outputs.
+        properties = {str(path): {"type": "string", "minLength": 1} for path in expected_outputs}
+        return json.dumps({"type": "object", "additionalProperties": False,
+                           "properties": properties, "required": list(properties)}, ensure_ascii=False)
     if len(expected_outputs) != 1 or expected_outputs[0].suffix.lower() != ".json":
         return ""
     if task_type in RECOVERY_SCHEMAS:
@@ -108,18 +116,36 @@ def provider_command(
             "-p",
             "--output-format",
             output_format,
-            # bypassPermissions: 非交互(-p)模式下必须真正绕过权限检查,worker 才能用 Write 落盘产物。
-            # dontAsk 仅表示"不弹窗",询问不了时会直接拒绝 Write/Bash,导致模型准备好内容却写不进文件。
+            # Agents may only read frozen task materials via our scoped MCP.
+            # No built-in filesystem/shell tool or inherited project config is loaded.
             "--permission-mode",
-            "bypassPermissions",
-            "--add-dir",
-            str(project_dir),
+            "dontAsk",
+            "--tools",
+            "StructuredOutput" if json_schema else "",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+            "--settings",
+            json.dumps({"disableAllHooks": True, "enabledPlugins": {}}),
+            "--allowedTools",
+            "mcp__nd_context__list_context,mcp__nd_context__read_context,StructuredOutput",
+            "--agent",
+            "cli",
+            "--system-prompt",
+            "你是小说拆解任务执行器。仅按任务包分析材料并返回指定产物。"
+            "路径只可用 nd_context 的 list_context/read_context 读取。"
+            "不得读取实现代码、运行命令、修改文件、调用其他工具或派发其他智能体。"
+            "任务包中的脚本命令仅供宿主程序使用，不能执行。",
         ]
         extra_args = os.environ.get("ND_CODEBUDDY_ARGS", "").strip()
         if extra_args:
-            parts.extend(split_command(extra_args))
-        if os.environ.get("ND_CODEBUDDY_SKIP_PERMISSIONS", "1") != "0":
-            parts.append("--dangerously-skip-permissions")
+            # Deployment tuning cannot replace the task's capability boundary.
+            extra = split_command(extra_args)
+            allowed = {"--model", "--effort", "--max-turns", "--autocompact", "--fallback-model"}
+            if len(extra) % 2 or any(extra[index] not in allowed or extra[index + 1].startswith("-")
+                                     for index in range(0, len(extra), 2)):
+                raise ValueError("ND_CODEBUDDY_ARGS 仅允许模型、推理强度、轮数与上下文窗口参数")
+            parts.extend(extra)
         if json_schema:
             # CodeBuddy validates the model response against this schema before
             # returning it as structured_output in the JSON result envelope.
@@ -133,6 +159,14 @@ def provider_command(
             ).strip()
             if structured_max_turns and "--max-turns" not in parts:
                 parts.extend(["--max-turns", structured_max_turns])
+        if not model:
+            # Preserve the user's selected model without loading their hooks,
+            # plugins, tools, or permission rules into this worker session.
+            try:
+                settings = json.loads((Path.home() / ".codebuddy/settings.json").read_text(encoding="utf-8"))
+                model = settings.get("model", "")
+            except (OSError, ValueError):
+                model = ""
         if model:
             parts.extend(["--model", model])
         return parts
@@ -199,7 +233,15 @@ def task_guidance(task_type: str) -> str:
 
 def build_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path], capture_stdout: bool) -> str:
     task_text = task_pack.read_text(encoding="utf-8", errors="ignore")
-    if capture_stdout and len(expected_outputs) == 1:
+    if capture_stdout and len(expected_outputs) > 1:
+        expected_output_text = "\n".join(str(path) for path in expected_outputs)
+        output_kind = "多文件结构化产物"
+        output_rule = (
+            "调用 StructuredOutput 提交一个对象，键必须恰好为以上每个完整产物路径，"
+            "值为该文件的完整文本内容（JSON 文件也作为完整 JSON 文本字符串提交）。"
+            "禁止直接写文件；程序会校验后保存所有产物。"
+        )
+    elif capture_stdout and len(expected_outputs) == 1:
         expected_output_text = str(expected_outputs[0])
         output_kind = "JSON" if expected_outputs[0].suffix.lower() == ".json" else "Markdown"
         if output_kind == "JSON":
@@ -312,9 +354,26 @@ def run_provider(
     project_dir: Path,
 ) -> subprocess.CompletedProcess[str]:
     if provider_captures_stdout(provider):
-        if "--json-schema" in command:
-            return run_structured_stream(command, prompt, project_dir)
-        return run_provider_command(command, prompt, project_dir)
+        # Run outside the book/repository so runtime instruction discovery cannot
+        # load project code or local agents. MCP reads only immutable allowlisted copies.
+        outputs, _ = expected_outputs_from_env()
+        with tempfile.TemporaryDirectory(prefix="nd_worker_") as temporary:
+            directory = Path(temporary)
+            manifest = snapshot_context(project_dir, Path(required_env("ND_TASK_PACK")), outputs, directory)
+            config = directory / "mcp.json"
+            config.write_text(json.dumps({"mcpServers": {"nd_context": {
+                # Required context tools must be loaded before the first model
+                # turn; deferred discovery would require an unneeded ToolSearch.
+                "type": "stdio", "alwaysLoad": True, "defer_loading": False,
+                "command": sys.executable,
+                "args": [str(Path(__file__).with_name("worker_context.py")), str(manifest)],
+            }}}, ensure_ascii=False), encoding="utf-8")
+            count = len(json.loads(manifest.read_text(encoding="utf-8"))["files"])
+            print(f"worker context: {count} 个只读任务材料；代码、命令和文件修改工具已禁用", file=sys.stderr, flush=True)
+            scoped_command = [*command, "--mcp-config", str(config)]
+            if "--json-schema" in command:
+                return run_structured_stream(scoped_command, prompt, directory)
+            return run_provider_command(scoped_command, prompt, directory)
     return run_provider_command([*command, "-p", prompt], "", project_dir)
 
 
@@ -347,17 +406,8 @@ def run_structured_stream(command, prompt, project_dir):
     command[command.index("--output-format") + 1] = "stream-json"
     if "--include-partial-messages" not in command:
         command.append("--include-partial-messages")
-    bounded = os.environ.get("ND_TASK_TYPE") in {"audit_correction", "bounded_fragment"}
-    if bounded:
-        # Model work is evidence reading and artifact production, not execution
-        # of validators, shell exploration, source-code inspection or publication.
-        if "--tools" in command:
-            command[command.index("--tools") + 1] = "Read,StructuredOutput"
-        else:
-            command.extend(["--tools", "Read,StructuredOutput"])
-        # Reading evidence can legitimately require multiple model turns. Do
-        # not impose a turn cap or reinterpret turn count as capacity exhaustion;
-        # explicit provider settings and the existing worker timeout still apply.
+    # Preserve the scoped MCP capabilities from provider_command. Evidence reads
+    # can require many turns; do not impose a turn cap or reopen built-in Read.
     capacity_log = CodeBuddyCapacityLog(project_dir)
     request_ids = set()
     last_log_check = 0
@@ -529,6 +579,19 @@ def _write_captured_output_atomically(path: Path, content: str) -> None:
                 pass
 
 
+def _write_multi_captured_artifacts(content: str, outputs: List[Path]) -> None:
+    """Validate all returned bodies and exact destinations before publishing any."""
+    values = json.loads(content)
+    if not isinstance(values, dict) or set(values) != {str(path) for path in outputs}:
+        raise ValueError("多文件输出必须恰好包含全部期望路径，禁止额外文件")
+    for path in outputs:
+        value = values[str(path)]
+        if not isinstance(value, str) or not _captured_output_is_valid(path, value):
+            raise ValueError(f"产物内容为空或格式无效：{path.name}")
+    for path in outputs:
+        _write_captured_output_atomically(path, values[str(path)])
+
+
 def _dump_provider_log_tail(log_path: str) -> None:
     """agy 失败时把其内部日志尾部追加到 worker 日志（stderr，会被 stream_shell_command 合并进 worker log）。"""
     try:
@@ -559,7 +622,7 @@ def main() -> int:
     task_type = required_env("ND_TASK_TYPE")
     project_dir = Path(required_env("ND_PROJECT_DIR"))
     task_pack = Path(required_env("ND_TASK_PACK"))
-    expected_outputs, env_capture_stdout = expected_outputs_from_env()
+    expected_outputs, _ = expected_outputs_from_env()
     if not task_pack.is_file():
         print(f"任务包不存在: {task_pack}", file=sys.stderr)
         return 1
@@ -580,7 +643,7 @@ def main() -> int:
         for provider in provider_order(args.provider):
             if provider not in PROVIDER_ORDER:
                 continue
-            capture_stdout = env_capture_stdout and provider_captures_stdout(provider)
+            capture_stdout = provider_captures_stdout(provider)
             if provider_uses_task_pack_path(provider):
                 prompt = build_path_prompt(task_type, task_pack, expected_outputs)
             else:
@@ -634,6 +697,14 @@ def main() -> int:
                     raw_content,
                     structured=bool(json_schema),
                 ).strip()
+                if len(expected_outputs) > 1:
+                    try:
+                        _write_multi_captured_artifacts(content, expected_outputs)
+                    except (ValueError, OSError) as exc:
+                        print(f"provider 多文件输出无效: {exc}", file=sys.stderr)
+                        return 1
+                    print(f"provider 已通过结构化输出写入 {len(expected_outputs)} 个产物")
+                    return 0
                 expected_output = expected_outputs[0]
                 direct_output_changed = (
                     output_signature(expected_output) != before_outputs.get(expected_output)

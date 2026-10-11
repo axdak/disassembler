@@ -21,10 +21,12 @@ from pathlib import Path
 from typing import Callable
 
 from coerce_delta import relocate_element_fields
+from registered_types import align_registered_types
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, REVIEW_CHECKS, recovery_output_errors
 from recovery_materials import RecoveryMaterials, read_material_document, rebase_material_paths, write_change_index
+from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, parse_supplementary_tags
 
 STRATEGIES = (
     ("targeted", "按最新校验错误逐项定点修复；保留已正确字段和全部分析内容。"),
@@ -40,8 +42,8 @@ def digest(path: Path) -> str:
 def preserve_quality_notes(before: Path, after: Path) -> None:
     """Keep both versions of repair metadata in the existing string field.
 
-    Only the root quality note is supplemented. Narrative fields never receive
-    this treatment: deleting/rewording analysis must still fail preservation.
+    Quality notes and superseded root conflict declarations retain their original
+    versions as history. Narrative fields still require exact preservation.
     """
     if before.suffix.lower() != ".json":
         return
@@ -55,6 +57,13 @@ def preserve_quality_notes(before: Path, after: Path) -> None:
     previous, current = old.get("质量说明"), new.get("质量说明")
     if isinstance(previous, str) and previous and isinstance(current, str) and current.strip() and previous not in current:
         new["质量说明"] = f"历史质量说明（修复前，保留追溯）：\n{previous}\n\n本次修复质量说明：\n{current}"
+    conflicts = old.get("冲突声明")
+    if conflicts is not None and conflicts != new.get("冲突声明"):
+        history = json.dumps(conflicts, ensure_ascii=False)
+        note = new.get("质量说明", "")
+        if isinstance(note, str) and history not in note:
+            new["质量说明"] = f"历史冲突声明（修复前，保留追溯）：\n{history}\n\n{note}"
+    if new != json.loads(after.read_text(encoding="utf-8")):
         save_json(after, new)
 
 
@@ -83,12 +92,35 @@ def _relation_retained_in_detail(relation, item) -> bool:
             and isinstance(refs, list) and f"{kind}:{name}" in refs)
 
 
-def preservation_errors(before: Path, after: Path) -> list[str]:
+def _tag_evidence_view(item: dict) -> tuple[dict, set[str]] | None:
+    """Compare valid tags by content across both storage locations, without writes.
+
+    Mechanical tag compression may relocate or deduplicate the same tag. Only
+    parseable string tags participate; malformed evidence keeps the ordinary
+    field-by-field preservation check and must not be silently discarded.
+    """
+    tags, detail = item.get("标签集"), item.get("详情")
+    if (not isinstance(tags, list) or not isinstance(detail, dict)
+            or any(not isinstance(tag, str) or not tag.strip() for tag in tags)):
+        return None
+    supplementary = []
+    if SUPPLEMENTARY_TAGS_DETAIL_KEY in detail:
+        try:
+            supplementary = parse_supplementary_tags(detail[SUPPLEMENTARY_TAGS_DETAIL_KEY])
+        except ValueError:
+            return None
+    view = {key: value for key, value in item.items() if key != "标签集"}
+    view["详情"] = {key: value for key, value in detail.items() if key != SUPPLEMENTARY_TAGS_DETAIL_KEY}
+    return view, {tag.strip() for tag in tags + supplementary}
+
+
+def preservation_errors(before: Path, after: Path, current: dict | None = None) -> list[str]:
     """Reject destructive shortcuts independently of model self-assessment.
 
 JSON may add fields and correct scalar identifiers/types, but may not remove
 existing fields/items or shorten narrative strings. Lossless field relocation is
-compared at its schema-defined destination. Markdown retains each existing
+compared at its schema-defined destination, including types proven by the trusted
+registry. Revised conflict metadata requires archived originals. Markdown retains each existing
 non-heading content line. Semantic correctness still needs evidence-based review.
 """
     errors = []
@@ -114,14 +146,30 @@ non-heading content line. Semantic correctness still needs evidence-based review
                 if len(token) >= 26 and token not in rendered]
 
     if isinstance(old, dict) and isinstance(new, dict):
+        if current is not None:
+            align_registered_types(old, current)
+            align_registered_types(new, current)
         relocate_element_fields(old)
         relocate_element_fields(new)
+        if old.get("冲突声明") != new.get("冲突声明") and "冲突声明" in old:
+            history = json.dumps(old["冲突声明"], ensure_ascii=False)
+            note = new.get("质量说明", "")
+            if isinstance(note, str) and history in note:
+                # The current explanation may correct a false claim; its original
+                # is still traceable without preserving it as current truth.
+                old.pop("冲突声明")
 
     def visit(a, b, path):
         if isinstance(a, dict):
             if not isinstance(b, dict):
                 errors.append(f"{path} 对象被替换为其他类型")
                 return
+            old_tags, new_tags = _tag_evidence_view(a), _tag_evidence_view(b)
+            if old_tags is not None and new_tags is not None:
+                missing = old_tags[1] - new_tags[1]
+                if missing:
+                    errors.append(f"{path} 原标签内容被删除：{', '.join(sorted(missing))}")
+                a, b = old_tags[0], new_tags[0]
             for key, value in a.items():
                 if key not in b:
                     errors.append(f"{path}.{key} 原字段被删除")
@@ -212,7 +260,9 @@ def recover_artifact(
                  + [engine / "scripts/run_pipeline.py", engine / "tools/agent_worker.py",
                     engine / "scripts/coerce_delta.py", engine / "scripts/recovery_contract.py",
                     engine / "scripts/recovery_materials.py", engine / "scripts/local_json_patch.py",
-                    engine / "scripts/context_budget.py"])
+                    engine / "scripts/context_budget.py",
+                    engine / "scripts/registered_types.py", engine / "scripts/story_schema_rules.py",
+                    engine / "scripts/compress_tags.py", engine / "tools/worker_context.py"])
     configuration = {key: value for key, value in os.environ.items()
                      if key.startswith(("ND_RECOVERY_", "ND_AGY_", "ND_CODEBUDDY_", "ND_AGENT_"))}
     fingerprint = hashlib.sha256((digest(Path(__file__)) + command + json.dumps(configuration, sort_keys=True)
@@ -372,6 +422,10 @@ def recover_artifact(
                       workspace / f"reference{output.suffix}", workspace / "failure.md", workspace / "contract.md",
                       workspace / "materials.json", workspace / "changes.json", workspace / "history.json"]
         protected += materials.protected_paths()
+        context_inputs = task_pack.with_suffix(".context-inputs.json")
+        save_json(context_inputs, [str(path.resolve()) for path in protected
+                                  if path != expected and path.is_file()])
+        protected.append(context_inputs)
         # Restore rejected writes before another strategy reads this attempt's
         # linked history. A corrupted catalog must not poison subsequent repairs.
         originals = {path: path.read_bytes() for path in protected if path != expected and path.is_file()}
@@ -540,11 +594,12 @@ def recover_artifact(
             persist()
             continue
         preserve_quality_notes(reference, candidate)
-        errors = preservation_errors(reference, candidate)
+        registry = read_object(workspace / "故事结构_增量.json")
+        errors = preservation_errors(reference, candidate, registry)
         if not errors:
             rc, feedback = evaluate(workspace)
             # Mechanical normalization is part of validation; verify its result too.
-            errors = preservation_errors(reference, candidate)
+            errors = preservation_errors(reference, candidate, registry)
         if errors or rc != 0:
             materials.write_document(workspace / "failure_after.md", "\n".join(errors) if errors else feedback,
                                      "修复后验收反馈")

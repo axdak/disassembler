@@ -9,7 +9,7 @@
   把无需 LLM 判断的修复在校验之前完成，大幅降低 repair 循环触发率。
 
 CLI:
-    python coerce_delta.py <delta.json> [--report <report.json>]
+    python coerce_delta.py <delta.json> [--current <story.json>] [--report <report.json>]
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from normalize_story_schema import (
     is_iso_time,
     stringify,
 )
+from registered_types import align_registered_types
 from story_schema_rules import (
     COLLECTION_KEYS,
     VALID_FIELDS,
@@ -401,12 +402,14 @@ def _coerce_item(collection_key: str, item: Any, idx: int, report: List[str]) ->
         _coerce_involved_chapters(detail, label, report)
 
 
-def coerce_delta_in_place(delta: Dict[str, Any]) -> List[str]:
-    """对一个 Delta dict 做机械纠错（in-place），返回纠错操作的报告列表。"""
+def coerce_delta_in_place(delta: Dict[str, Any], current: Dict[str, Any] | None = None) -> List[str]:
+    """机械纠错并按可选正式索引更正唯一类别，返回完整迁移报告。"""
     report: List[str] = []
     if not isinstance(delta, dict):
         return report
 
+    if current is not None:
+        report.extend(align_registered_types(delta, current))
     report.extend(relocate_element_fields(delta))
 
     for section_key in ("新增元素", "修改元素"):
@@ -429,6 +432,7 @@ def main() -> int:
     )
     parser.add_argument("delta_path", help="Delta JSON 路径")
     parser.add_argument("--report", help="纠错报告 JSON 输出路径")
+    parser.add_argument("--current", help="正式故事结构；只按唯一正式名称修正类别与引用")
     args = parser.parse_args()
 
     delta_path = Path(args.delta_path)
@@ -438,7 +442,14 @@ def main() -> int:
         print(f"读取 Delta 失败: {exc}", file=sys.stderr)
         return 1
 
-    report = coerce_delta_in_place(delta)
+    try:
+        current = json.loads(Path(args.current).read_text(encoding="utf-8")) if args.current else None
+        if current is not None and not isinstance(current, dict):
+            raise ValueError("正式故事结构必须是对象")
+    except (OSError, ValueError) as exc:
+        print(f"读取正式故事结构失败: {exc}", file=sys.stderr)
+        return 1
+    report = coerce_delta_in_place(delta, current)
 
     delta_path.write_text(
         json.dumps(delta, ensure_ascii=False, indent=2), encoding="utf-8"
