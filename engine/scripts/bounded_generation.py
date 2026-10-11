@@ -26,6 +26,26 @@ def assemble(contents, json_output=False, resolve=None):
     return merge_markdown(contents)
 
 
+def review_complete_candidate(tree, text, sources, background, **options):
+    """Re-read every original and the complete candidate before allowing publication.
+
+    A separate task/ledger owns the review. Every page and cross-page node must
+    acknowledge its exact input and report no unresolved issue; overviews alone
+    cannot satisfy source coverage. Returned additions retain the original format.
+    """
+    candidate = tree.root / ("pre_review.json" if tree.target.endswith(".json") else "pre_review.md")
+    atomic_write_bytes(candidate, text.encode())
+    sources = list(dict.fromkeys(sources)) + [(candidate, "完整待复核候选；必须与原始证据区分")]
+    review = CapacityTree(tree.root, tree.command, tree.worker,
+                          tree.contract + "\n独立复核全部原件与候选。尤其核对跨片名称、时序、伏笔、引用与遗漏。"
+                          "区分历史背景、分析判断与本次新增事实。原文优先，不能用派生产物证明自己正确。",
+                          tree.target, sources, **options)
+    _, additions, _ = review.run(background=background, review=True)
+    if not tree.unchanged() or not review.unchanged():
+        raise TreeFailure(REPAIR_EXHAUSTED)
+    return additions
+
+
 def combine_delta(contents, story, seq, resolve=None):
     """Reconcile exact formal identities across pieces of the same real chapter.
 
@@ -77,7 +97,8 @@ def combine_delta(contents, story, seq, resolve=None):
 
 def run_bounded_chapter(command, project, task_type, output, seq, worker, **options):
     """Read all history in bounded pages, then analyze the one original chapter."""
-    from run_pipeline import chapter_by_seq, artifact_paths, render_prompt, chapter_time, seq_from_file
+    from run_pipeline import chapter_by_seq, artifact_paths, render_prompt, chapter_time
+    from full_context import history_evidence
     from validate_chapter_analysis import validate_chapter_analysis_text
     chapter = chapter_by_seq(project, seq)
     if chapter is None:
@@ -99,12 +120,9 @@ def run_bounded_chapter(command, project, task_type, output, seq, worker, **opti
         background = ""
         history_tree = None
         if task_type == "delta" and story.is_file():
-            recent = sorted((project / "章节处理/Delta").glob("第*章_*.json"))
-            recent = [path for path in recent if seq_from_file(path) < seq][-10:]
             history_tree = CapacityTree(project, command, worker,
                                         "完整阅读历史档案，索引关键进展、正式名称与别名、未决线索和来源位置。禁止生成新事实。",
-                                        "历史关联索引.md", [(story, "完整历史故事结构")]
-                                        + [(path, "最近章节完整 Delta") for path in recent], **options)
+                                        "历史关联索引.md", history_evidence(project, seq), **options)
             background, _, refs = history_tree.run(overview_only=True)
             background += f"\n完整历史入口：{refs[-1]}；原件目录：{history_tree.root / 'materials'}"
         protected = list(history_tree.root.rglob("*.json")) if history_tree else []
@@ -112,7 +130,11 @@ def run_bounded_chapter(command, project, task_type, output, seq, worker, **opti
                             protected_materials=protected, **options)
         # The history identity is part of task text, so a changed story invalidates
         # content checkpoints even when the chapter itself stayed unchanged.
-        _, contents, _ = tree.run(background=background)
+        overview, contents, _ = tree.run(background=background)
+        preliminary = (json.dumps(combine_delta(contents, json.loads(story.read_text(encoding="utf-8")), seq, tree.resolve), ensure_ascii=False)
+                       if task_type == "delta" else assemble(contents))
+        review_sources = sources + (history_evidence(project, seq) if task_type == "delta" else [])
+        contents += review_complete_candidate(tree, preliminary, review_sources, overview, **options)
         if task_type == "delta":
             value = combine_delta(contents, json.loads(story.read_text(encoding="utf-8")), seq, tree.resolve)
             text = json.dumps(value, ensure_ascii=False, indent=2)
@@ -152,7 +174,10 @@ def run_hierarchical_reports(command, project, pack, outputs, worker, **options)
         for output in outputs:
             contract = metadata["contract"] + f"\n只组织目标文件：{output.name}。保持该文件原有结构。"
             tree = CapacityTree(project, command, worker, contract, output.name, sources, **options)
-            _, contents, _ = tree.run()
+            overview, contents, _ = tree.run()
+            preliminary = assemble(contents, output.suffix == ".json", tree.resolve)
+            evidence = [(Path(path), "完整原始分析材料") for path in metadata.get("evidence", [])]
+            contents += review_complete_candidate(tree, preliminary, sources + evidence, overview, **options)
             text = assemble(contents, output.suffix == ".json", tree.resolve)
             candidate = tree.root / ("candidate" + output.suffix)
             atomic_write_bytes(candidate, text.encode())
@@ -171,6 +196,57 @@ def run_hierarchical_reports(command, project, pack, outputs, worker, **options)
         return exc.code
     except (ValueError, TypeError, OSError) as exc:
         print(f"分层汇总失败，完整分片与原报告已保留：{exc}", flush=True)
+        return REPAIR_EXHAUSTED
+
+
+def run_bounded_governance(command, project, pack, output, worker, **options):
+    """Split within one real chapter/range; original strict commit remains authoritative."""
+    from governance_contract import normalize_governance_patch
+    metadata = json.loads(pack.with_suffix(".governance.json").read_text(encoding="utf-8"))
+    sources = [(Path(path), role) for path, role in metadata["sources"]]
+    before = digest(output)
+    try:
+        tree = CapacityTree(project, command, worker, metadata["contract"], output.name, sources, **options)
+
+        def combine(parts):
+            result = None
+            no_change_seen = False
+            for part in parts:
+                patch, _ = normalize_governance_patch(part, metadata["range"])
+                if not isinstance(patch, dict) or patch.get("章节范围") != metadata["range"]:
+                    raise ValueError("治理分片不得改变实际章节范围")
+                # no_change describes one slice, not the combined workload.
+                # Keep its evidence/rationale but do not concatenate this flag
+                # into another slice's actual governance type.
+                if patch.get("治理类型") == "no_change":
+                    no_change_seen = True
+                    patch.pop("治理类型")
+                result = merge_json(result, patch, resolve=tree.resolve)
+            if not isinstance(result, dict):
+                raise ValueError("治理缺少真实补丁或有依据的 no_change")
+            if any(not isinstance(result.get(key, {}), dict)
+                   for key in ("新增元素", "修改元素", "治理操作")):
+                raise ValueError("治理分片的元素与操作必须为对象，不能丢弃异常内容")
+            changed = any(any(items for items in result.get(key, {}).values())
+                          for key in ("新增元素", "修改元素", "治理操作")) or bool(result.get("介绍"))
+            if not changed and no_change_seen and "治理类型" not in result:
+                result["治理类型"] = "no_change"
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        overview, contents, _ = tree.run()
+        contents += review_complete_candidate(tree, combine(contents), sources, overview, **options)
+        candidate = tree.root / "candidate.json"
+        atomic_write_bytes(candidate, combine(contents).encode())
+        if not tree.unchanged() or digest(output) != before:
+            return REPAIR_EXHAUSTED
+        # Only the patch is published. commit_governance still validates, merges,
+        # preserves archives and rolls back on any original governance failure.
+        atomic_write_bytes(output, candidate.read_bytes())
+        return 0
+    except TreeFailure as exc:
+        return exc.code
+    except (ValueError, TypeError, OSError) as exc:
+        print(f"分片治理未通过，保留候选与检查点：{exc}", flush=True)
         return REPAIR_EXHAUSTED
 
 

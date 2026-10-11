@@ -189,10 +189,7 @@ NARRATIVE_STRUCTURE_BACKGROUND_SPECS = [
     ("全书分析/剧情结构/剧情线交汇矩阵.md", "剧情线交汇矩阵"),
 ]
 
-# 结构类全书分析维度：结论靠故事结构元素 + 全书级中间产物回指，不需要每章完整分析MD。
-# 这些任务的 build_pack 不逐章堆砌章节材料，改用 build_structure_context 提供全书级素材 + 指引；
-# main 里也不按章分包（单包全书），pack_count=1，不走 partial/reduce。
-# 原文类（summary/style/detailed_outline/visual_assets）保持每章 build_chapter_block + 分包 + reduce。
+# 结构类任务补充全书中间产物，但仍保留原文、章节分析与历史档案。
 STRUCTURE_TASKS = frozenset({
     "characters", "plot", "worldview", "settings", "plotlines",
     "outline", "narrative_structure", "report",
@@ -244,11 +241,10 @@ def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[
 def _build_summary_index(summary_text: str) -> str:
     """把 章节梗概汇总.md 压缩为分章索引：每章一行「第NNN章 标题｜功能」。
 
-    供 build_structure_context 梗概三档的档2使用——全书梗概超预算时降载为分章索引，
-    保留章节骨架（标题/功能）而不堆砌 500 字正文，避免硬截断丢掉后半段。
+    旧版索引工具，当前 build_structure_context 不再调用；不得用它替代完整证据。
     解析按 markdown 章节标题行（## 第NNN章 / ### 第NNN章 / # 第NNN章 等）切分；
     取标题行 + 紧随其后的第一个非空短行（通常是「章节功能」）作为索引项。
-    无法识别章节标题时回退为空串（调用方据此走档3）。
+    无法识别章节标题时返回空串。
     """
     if not summary_text:
         return ""
@@ -277,16 +273,7 @@ def _build_summary_index(summary_text: str) -> str:
 
 
 def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[str, Any]], max_pack_chars: int = 70000) -> str:
-    """结构类全书分析的上下文：全书级中间产物 + 指引，不逐章堆砌章节分析MD。
-
-    结构类维度（STRUCTURE_TASKS）的结论靠故事结构元素和全书级中间产物回指，
-    不需要每章 1.2 万字分析MD。本函数按 task 收集相关全书级产物，并指引 worker
-    按需读 故事结构_增量.json 取元素详情。上游产物缺失时显式标注，不静默吞掉。
-
-    章节梗概汇总段借鉴周期治理（write_audit_pack）的 fallback 链思想：单一字符预算
-    （max_pack_chars）下逐档降载（全量梗概 → 分章梗概索引 → 仅故事索引），超限降载
-    而非硬截断，避免大书梗概被砍掉后半段丢内容。
-    """
+    """Keep complete structural reports; capacity is handled after material collection."""
     lines: List[str] = ["## 全书级分析材料", ""]
 
     if task == "narrative_structure":
@@ -294,30 +281,8 @@ def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[st
         lines.append(build_narrative_structure_background(project_dir, chapters))
         lines.append("")
     else:
-        # 其他结构类：章节梗概汇总（每章约 500 字，全书级骨架）——三档降载，不截断
         summary_path = project_dir / "全书分析" / "剧情结构" / "章节梗概汇总.md"
-        summary_text = summary_path.read_text(encoding="utf-8", errors="ignore") if summary_path.is_file() and summary_path.stat().st_size > 0 else ""
-        # 梗概段可用预算 = max_pack_chars - 固定开销（故事索引 + 契约 + 指引，经验约 3 万）
-        summary_budget = max(10000, max_pack_chars - 30000)
-        # 三档 fallback：全量梗概 → 分章梗概索引 → 仅故事索引（留空，靠上方故事结构摘要）
-        if summary_text and len(summary_text) <= summary_budget:
-            lines.append("### 章节梗概汇总")
-            lines.append("```markdown")
-            lines.append(summary_text)
-            lines.append("```")
-        elif summary_text:
-            summary_index = _build_summary_index(summary_text)
-            if summary_index and len(summary_index) <= summary_budget:
-                lines.append("### 章节梗概汇总（已降载为分章索引：全书梗概超预算，每章压缩为标题/功能行）")
-                lines.append("```markdown")
-                lines.append(summary_index)
-                lines.append("```")
-            else:
-                lines.append("### 章节梗概汇总（已降载：全书过大，仅保留上方故事结构索引，按需读 `故事结构_增量.json`）")
-        else:
-            lines.append("### 章节梗概汇总")
-            lines.append("【未生成 `章节梗概汇总.md`；建议先运行 `--task summary` 生成。本任务将主要依赖故事结构JSON摘要。】")
-        lines.append("")
+        lines.extend(["### 章节梗概汇总", read_text(summary_path) or "【未生成章节梗概汇总】", ""])
 
         if task == "report":
             # report 综合所有前置全书分析产物（已生成的才收入）
@@ -344,10 +309,9 @@ def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[st
 def read_text(path: Path, max_chars: Optional[int] = None) -> str:
     if not path.is_file():
         return ""
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    if max_chars is not None and max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars] + f"\n\n……【已截断，原文/分析共 {len(text)} 字】"
-    return text
+    # max_chars remains accepted for old callers, but can no longer discard evidence.
+    return path.read_text(encoding="utf-8")
+
 
 
 def load_json(path: Path) -> Any:
@@ -421,24 +385,9 @@ def load_index(project_dir: Path) -> List[Dict[str, Any]]:
 
 
 def sample_original(text: str, mode: str, max_chars: int) -> str:
-    if mode == "none" or not text:
-        return ""
-    if mode == "full":
-        if max_chars > 0 and len(text) > max_chars:
-            return text[:max_chars] + f"\n\n……【原文已截断，完整长度 {len(text)} 字】"
-        return text
-    # sample: beginning + middle + ending
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    part = max_chars // 3
-    mid = len(text) // 2
-    return (
-        text[:part]
-        + "\n\n……【中段抽样】……\n\n"
-        + text[max(0, mid - part // 2): mid + part // 2]
-        + "\n\n……【末段抽样】……\n\n"
-        + text[-part:]
-    )
+    """Legacy policy arguments are compatible aliases for complete evidence."""
+    return text
+
 
 
 def summarize_story_structure(story: Dict[str, Any], max_items: int = 80) -> str:
@@ -563,23 +512,15 @@ def build_chapter_block(project_dir: Path, ch: Dict[str, Any], task: str, includ
     lines.append("```")
     lines.append("")
 
-    if include_original != "none":
-        raw = read_text(split_path)
-        sampled = sample_original(raw, include_original, max_original_chars)
-        lines.append(f"#### 原文{'抽样' if include_original == 'sample' else ''}")
-        lines.append("```markdown")
-        lines.append(sampled or "【未找到原文章节】")
-        lines.append("```")
-        lines.append("")
+    # Even persisted auto/sample/none settings must not skip source evidence.
+    lines.extend(["#### 完整原文", "```markdown", read_text(split_path) or "【未找到原文章节】", "```", ""])
 
-    if task in {"characters", "plot", "report", "custom", "worldview", "settings", "plotlines", "outline", "detailed_outline", "visual_assets", "chapter_structure", "narrative_structure"}:
-        delta = load_json(delta_path)
-        lines.append("#### 本章Delta")
-        lines.append("```json")
-        lines.append(json.dumps(delta, ensure_ascii=False, indent=2) if delta is not None else "【未找到本章Delta】")
-        lines.append("```")
-        lines.append("")
-
+    # Every analysis dimension retains the complete chapter Delta as evidence.
+    lines.append("#### 本章Delta")
+    lines.append("```json")
+    lines.append(read_text(delta_path) or "【未找到本章Delta】")
+    lines.append("```")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -652,14 +593,9 @@ def split_batches(chapters: List[Dict[str, Any]], project_dir: Path, task: str, 
 def split_narrative_batches(project_dir: Path, chapters: List[Dict[str, Any]], max_pack_chars: int) -> List[List[Dict[str, Any]]]:
     """narrative_structure 专用分批：按分章 章节结构.md 的字符大小累加切批。
 
-    与 split_batches 不同——后者用 build_chapter_block（原文/分析MD/Delta）量每章，
-    而 narrative_structure 的每章材料是「分章 章节结构.md」（build_narrative_structure_background
-    读取），不经过 build_chapter_block，故需专用估算。每章按 12000 字符上限计入
-    （与 build_narrative_structure_background 的 read_text(path, 12000) 一致）。
-
-    预留 OVERHEAD 给固定开销（4 个全书级产物各约 1.2 万 + 故事索引 + 契约），确保
-    每个 partial 整包不超 max_pack_chars。无任何分章 章节结构.md 时退化为单包
-    （build_narrative_structure_background 会标注「未生成」，与原行为一致）。
+    先按完整分章结构报告粗分章节组；全书资料、历史、原文、章节分析和 Delta
+    仍由 build_pack 完整加入，再由 split_rendered_pack 执行最终连续分片。
+    此处预留值只是分组估算，不是截断上限或最终模型容量判定。
     """
     batches: List[List[Dict[str, Any]]] = []
     current: List[Dict[str, Any]] = []
@@ -670,7 +606,7 @@ def split_narrative_batches(project_dir: Path, chapters: List[Dict[str, Any]], m
     for ch in chapters:
         seq = int(ch["seq"])
         path = _existing_chapter_structure_path(project_dir, seq)
-        size = min(path.stat().st_size, 12000) if path and path.is_file() else 0
+        size = len(read_text(path)) if path and path.is_file() else 0
         if size > 0:
             has_any = True
         if current and current_size + size > budget:
@@ -740,47 +676,27 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
             lines.append("- 用户自定义输出路径")
     lines.append("")
 
-    lines.append("## 当前故事结构摘要")
-    # story_summary_max_items <= 0 表示不限制（给全部名称），默认全索引，避免大书第 81 个起元素名称被遗漏；
-    # 与 build_lightweight_index / 周期治理 story_index 档的全索引语义一致，保留分组与事件视觉标签锚点。
-    lines.append(summarize_story_structure(story, max_items=story_summary_max_items))
-    lines.append("")
-
+    target_material = []
     if targets:
-        lines.append("## 指定目标元素JSON片段")
+        target_material.append("## 指定目标元素JSON片段")
         found = select_target_items(story, targets)
         if not found:
-            lines.append("未找到指定目标元素。")
+            target_material.append("未找到指定目标元素。")
         for type_name, name, item in found:
-            lines.append(f"### {type_name}:{name}")
-            lines.append("```json")
-            lines.append(json.dumps(item, ensure_ascii=False, indent=2))
-            lines.append("```")
-        lines.append("")
+            target_material.extend([f"### {type_name}:{name}", "```json",
+                                    json.dumps(item, ensure_ascii=False, indent=2), "```", ""])
 
     lines.append(output_contract(task))
     lines.append("")
+    # All facts are in the splittable material section, not an unbounded header.
+    lines.extend(["## 章节材料", "### 完整历史故事结构", "```json",
+                  json.dumps(story, ensure_ascii=False, indent=2), "```", ""])
+    lines.extend(target_material)
     if task in STRUCTURE_TASKS and per_chapter_seq is None:
-        # 结构类全书分析：全书级素材 + 指引，不逐章堆砌章节分析MD/原文
         lines.append(build_structure_context(project_dir, task, chapters, max_pack_chars=max_pack_chars))
+    for ch in chapters:
+        lines.append(build_chapter_block(project_dir, ch, task, "full", max_original_chars, max_analysis_chars))
         lines.append("")
-    else:
-        # include_original=auto：按故事 JSON 文件大小自动分级
-        # （故事小给全文、中等给抽样、大给空，与 delta/governance 的自动降级思路一致）
-        effective_original = include_original
-        if include_original == "auto":
-            story_file = project_dir / "故事结构_增量.json"
-            story_size = story_file.stat().st_size if story_file.is_file() else 0
-            if story_size < context_budget_chars * 0.5:
-                effective_original = "full"
-            elif story_size < context_budget_chars:
-                effective_original = "sample"
-            else:
-                effective_original = "none"
-        lines.append("## 章节材料")
-        for ch in chapters:
-            lines.append(build_chapter_block(project_dir, ch, task, effective_original, max_original_chars, max_analysis_chars))
-            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -809,12 +725,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--chapters", default="all", help="章节范围，如 all、1-50、1,3,8-12")
     parser.add_argument("--targets", nargs="*", default=[], help="指定结构元素，如 角色:林婉 事件:入门试炼")
     parser.add_argument("--question", default="", help="自定义分析问题，task=custom时尤其有用")
-    parser.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto", help="是否包含原文：auto(按故事大小自动)/none/sample/full")
+    parser.add_argument("--include-original", choices=["auto", "none", "sample", "full"], default="auto", help="兼容旧选项；所有模式均保留完整原文，超限分层处理")
     parser.add_argument("--max-pack-chars", type=int, default=70000, help="单个任务包最大字符数，超出自动分包")
-    parser.add_argument("--max-original-chars", type=int, default=6000, help="每章原文最多放入字符数；sample模式会抽样")
+    parser.add_argument("--max-original-chars", type=int, default=6000, help="兼容旧配置；原文保留全文，超限分层处理")
     parser.add_argument("--max-analysis-chars", type=int, default=12000, help="兼容旧配置；章节分析保留全文，超限通过分包处理")
-    parser.add_argument("--story-summary-max-items", type=int, default=0, help="故事结构摘要每集合最大列出条目数；0=不限制（全名称索引，默认，避免大书遗漏）")
-    parser.add_argument("--context-budget-chars", type=int, default=160000, help="上下文预算字符数，auto模式按此自动分级")
+    parser.add_argument("--story-summary-max-items", type=int, default=0, help="兼容旧配置；历史档案完整分层处理，不再按条目截断")
+    parser.add_argument("--context-budget-chars", type=int, default=160000, help="兼容旧字符预算；模型容量由统一 Token 设置控制")
     parser.add_argument("--out-dir", default="", help="输出目录；默认 全书分析/_任务包/<timestamp>_<task>")
     parser.add_argument("--per-chapter", action="store_true", help="每个章节生成一份独立任务包（visual_assets / chapter_structure）")
     parser.add_argument("--aggregate", action="store_true", help="把分章产物合并为顶层五件套（仅 visual_assets）")
@@ -871,8 +787,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # narrative_structure：按分章 章节结构.md 分批 + partial→reduce（复用多包 reduce 机制）
         batches = split_narrative_batches(project_dir, chapters, args.max_pack_chars)
     elif args.task in STRUCTURE_TASKS:
-        # 其余结构类全书分析：单包全书，不按章分包（无每章材料，靠全书级素材；
-        # 上下文超限时由 build_structure_context 内部三档降载兜底，不截断）
+        # 完整结构资料与章节证据统一交给下方连续分片器，不做摘要降载。
         batches = [chapters]
     else:
         batches = split_batches(
@@ -932,7 +847,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "chapter_range": args.chapters,
         "targets": args.targets,
         "question": args.question,
-        "include_original": args.include_original,
+        "include_original": "full",
         "max_pack_chars": args.max_pack_chars,
         "pack_count": len(pack_files),
         "packs": pack_files,
@@ -1001,7 +916,7 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
         "task": "visual_assets",
         "mode": "per_chapter",
         "chapter_range": args.chapters,
-        "include_original": args.include_original,
+        "include_original": "full",
         "pack_count": len(pack_records),
         "packs": pack_records,
         "recommended_workflow": [
@@ -1065,7 +980,7 @@ def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse
         "task": "chapter_structure",
         "mode": "per_chapter",
         "chapter_range": args.chapters,
-        "include_original": args.include_original,
+        "include_original": "full",
         "pack_count": len(pack_records),
         "packs": pack_records,
         "recommended_workflow": [
@@ -1114,6 +1029,9 @@ def _build_visual_aggregate_pack(project_dir: Path, args: argparse.Namespace, in
         inventory_lines.append(f"## 第{seq:03d}章")
         for p in _existing_visual_paths(project_dir, seq):
             inventory_lines.append(f"- {p.relative_to(project_dir)}")
+            # The inventory doubles as complete bounded evidence; a path alone
+            # cannot prove that an external worker read every chapter artifact.
+            inventory_lines.append(p.read_text(encoding="utf-8"))
         inventory_lines.append("")
     if missing:
         inventory_lines.append("## 尚未生成分章产物的章节（aggregate 时将被跳过）")

@@ -401,7 +401,7 @@ class AnalysisAdapter:
             chapters=chapters,
             targets=targets or [],
             question=question,
-            include_original=include_original,
+            include_original=manifest.get("include_original", "full"),
             force=force,
         )
 

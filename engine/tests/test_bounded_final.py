@@ -1,5 +1,6 @@
 """Final governance: lossless coverage, real strict validation and durable restart."""
 import json
+import re
 from pathlib import Path
 
 from bounded_final import run_bounded_final, split_text
@@ -28,6 +29,12 @@ def project_files(tmp_path, monkeypatch, valid=True):
 def unchanged_worker(calls):
     def worker(command, project, kind, task, output, **kwargs):
         calls.append(task.read_text(encoding="utf-8"))
+        if kind == "bounded_fragment":
+            fingerprint = re.search(r"复核材料指纹：([0-9a-f]{64})", calls[-1])
+            assert fingerprint
+            save_json(output, {"overview": "离线复核完整证据及候选，无跨片遗漏",
+                               "content": {"checked": fingerprint[1], "unresolved": [], "addition": None}})
+            return 0
         assert kind == "audit_correction"
         assert kwargs["retries"] == 0
         save_json(output, {"章节范围": "全书", "新增元素": {}, "修改元素": {},
@@ -42,6 +49,63 @@ def test_lossless_split_including_json_and_unicode_boundaries():
     parts = split_text(text, 99)
     assert "".join(parts) == text
     assert all(estimate_tokens(part) <= 99 for part in parts)
+
+
+def test_final_cross_review_failure_keeps_draft_and_durable_budget(tmp_path, monkeypatch):
+    pack, draft, _ = project_files(tmp_path, monkeypatch)
+    before = draft.read_bytes()
+    worker = unchanged_worker([])
+    rejected = []
+
+    def reject(command, root, kind, task, output, **kwargs):
+        rc = worker(command, root, kind, task, output, **kwargs)
+        if kind == 'bounded_fragment':
+            verdict = json.loads(output.read_text(encoding='utf-8'))
+            verdict['content']['unresolved'] = ['跨片身份与原文不一致，尚未解决']
+            save_json(output, verdict)
+            rejected.append(1)
+        return rc
+
+    assert run_bounded_final('fake', tmp_path, pack, draft, reject) == REPAIR_EXHAUSTED
+    assert run_bounded_final('fake', tmp_path, pack, draft, reject) == REPAIR_EXHAUSTED
+    assert len(rejected) == 3
+    assert draft.read_bytes() == before
+
+
+def test_final_cross_review_addition_reenters_strict_governance(tmp_path, monkeypatch):
+    from fault_recovery import digest, REVIEW_CHECKS
+    pack, draft, source = project_files(tmp_path, monkeypatch)
+    source.write_text('完整的故事描述。补充跨片关联证据。', encoding='utf-8')
+    normal = unchanged_worker([])
+    repaired, proposed, accepted = [], [], []
+    patch = {'章节范围': '全书', '新增元素': {}, '修改元素': {},
+             '介绍': {'描述': '完整的故事描述。补充跨片关联证据。'}}
+
+    def worker(command, root, kind, task, output, **kwargs):
+        prompt = task.read_text(encoding='utf-8')
+        if kind == 'audit_correction' and '本次材料：独立跨片复核' in prompt:
+            save_json(output, patch)
+            repaired.append(1)
+            return 0
+        if kind == 'recovery_review':
+            save_json(output, {'passed': True, 'candidate_sha256': digest(root / '故事结构_增量.json'),
+                               'checks': dict.fromkeys(REVIEW_CHECKS, True), 'issues': [],
+                               'reason': '离线检查：原文支持补充且原描述完整保留'})
+            accepted.append(1)
+            return 0
+        rc = normal(command, root, kind, task, output, **kwargs)
+        if kind == 'bounded_fragment' and not repaired and not proposed:
+            value = json.loads(output.read_text(encoding='utf-8'))
+            value['content']['addition'] = patch
+            save_json(output, value)
+            proposed.append(1)
+        return rc
+
+    assert run_bounded_final('fake', tmp_path, pack, draft, worker) == 0
+    assert proposed and repaired and accepted
+    description = json.loads(draft.read_text(encoding='utf-8'))['介绍']['描述']
+    assert patch['介绍']['描述'] in description  # Original merge appends evidence conservatively.
+    assert list(tmp_path.rglob('review_coverage.json'))
 
 
 def test_all_evidence_covered_and_success_reused(tmp_path, monkeypatch):
@@ -145,6 +209,8 @@ def test_real_patch_requires_independent_review_before_publication(tmp_path, mon
             save_json(output, {"passed": True, "candidate_sha256": digest(root / "故事结构_增量.json"),
                                "checks": dict.fromkeys(REVIEW_CHECKS, True), "issues": [],
                                "reason": "离线模拟：标题可由原文确认"})
+        elif kind == "bounded_fragment":
+            return unchanged(command, root, kind, task, output, **kwargs)
         elif not json.loads((root / "故事结构_增量.json").read_text(encoding="utf-8"))["介绍"]["标题"]:
             save_json(output, {"章节范围": "全书", "介绍": {"标题": "测试书"},
                                "新增元素": {}, "修改元素": {}, "治理类型": "governance"})
@@ -188,6 +254,8 @@ def test_program_normalization_precedes_model_retry(tmp_path, monkeypatch):
 
     def legacy_output(*args, **kwargs):
         rc = original(*args, **kwargs)
+        if args[2] == "bounded_fragment":
+            return rc
         output = args[4]
         patch = json.loads(output.read_text(encoding="utf-8"))
         patch["新增元素"] = "{}"  # Losslessly repairable legacy container.

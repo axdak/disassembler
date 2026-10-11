@@ -373,43 +373,7 @@ export function SettingsView({ settings, setSettings, onSave }: {
       <div style={sectionStyle}>
         <h4 style={{ margin: '0 0 6px' }}>分析任务包（字符阈值）</h4>
         <div style={groupHintStyle}>以下参数作用于所有分析任务（全书分析、章节结构分析、视觉资产）的任务包打包。</div>
-        <div style={{ marginTop: 8 }}>
-          <label>原文策略: </label>
-          <select value={(settings.include_original as string) || 'auto'} onChange={(e) => setSettings({ ...settings, include_original: e.target.value })}>
-            <option value="auto">auto（按故事大小自动分级）</option>
-            <option value="full">full（全文）</option>
-            <option value="sample">sample（三段抽样）</option>
-            <option value="none">none（不放原文）</option>
-          </select>
-          <span style={{ fontSize: 12, color: '#888' }}> auto：小→全文、中→抽样、大→不放</span>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>每章原文上限: </label>
-          <input type="number" min={1000} style={{ width: 70 }}
-            value={String((settings.max_original_chars as number) ?? 6000)}
-            onChange={(e) => setSettings({ ...settings, max_original_chars: Math.max(1000, Number(e.target.value) || 6000) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> 字符；sample 模式三段各取 1/3</span>
-        </div>
-        <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
-          章节分析保留全文；全书分析材料过长时按任务包大小自动分包。
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>摘要最大条目: </label>
-          <input type="number" min={0} style={{ width: 70 }}
-            value={String((settings.story_summary_max_items as number) ?? 0)}
-            onChange={(e) => setSettings({ ...settings, story_summary_max_items: Math.max(0, Number(e.target.value) || 0) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> 故事结构摘要每集合列出元素的上限条数；0=不限（全名称索引，默认，避免大书遗漏）</span>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>任务包字符预算: </label>
-          <input type="number" min={10000} style={{ width: 80 }}
-            value={String((settings.context_budget_chars as number) ?? 160000)}
-            onChange={(e) => setSettings({ ...settings, context_budget_chars: Math.max(10000, Number(e.target.value) || 160000) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> 字符；auto 按此分级（×0.5/×1.0 两道阈值），也是分析包总预算标尺</span>
-        </div>
+        <p style={{ fontSize: 12 }}>原文、历史档案、章节分析和前置报告全部保留，容量不足时自动分层。旧版本的抽样、省略及截断设置不再生效。</p>
         <div style={{ marginTop: 8 }}>
           <label>单包字符上限: </label>
           <input type="number" min={10000} style={{ width: 80 }}
@@ -420,25 +384,17 @@ export function SettingsView({ settings, setSettings, onSave }: {
         </div>
       </div>
 
-      {/* 第三组：Delta 与周期治理 —— 两个独立子系统的上下文压缩阈值，与分析任务包互不影响 */}
+      {/* 第三组：Delta 与周期治理 —— 治理分包阈值；不再按大小缩减历史 */}
       <div style={sectionStyle}>
         <h4 style={{ margin: '0 0 6px' }}>Delta 与周期治理</h4>
-        <div style={groupHintStyle}>这些是材料组织阈值（KB / 字符），不是模型 Token 上限。所有调用仍受上方统一容量控制。</div>
-        <div style={{ marginTop: 8 }}>
-          <label>Delta故事阈值: </label>
-          <input type="number" min={10} style={{ width: 70 }}
-            value={String((settings.delta_full_story_kb as number) ?? 256)}
-            onChange={(e) => setSettings({ ...settings, delta_full_story_kb: Math.max(10, Number(e.target.value) || 256) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> KB；story.json 超此值时 delta 改用名称索引+最近10章 delta，不再传完整故事</span>
-        </div>
+        <div style={groupHintStyle}>这是材料分包的字符阈值，不是模型 Token 上限。历史完整处理，所有调用仍受上方统一容量控制。</div>
         <div style={{ marginTop: 8 }}>
           <label>周期审计上下文上限: </label>
           <input type="number" min={10000} style={{ width: 80 }}
             value={String((settings.audit_max_context_chars as number) ?? 524288)}
             onChange={(e) => setSettings({ ...settings, audit_max_context_chars: Math.max(10000, Number(e.target.value) || 524288) })}
           />
-          <span style={{ fontSize: 12, color: '#888' }}> 字符；超限则故事结构逐级降载，三级都超自动二分拆包，绝不截断证据</span>
+          <span style={{ fontSize: 12, color: '#888' }}> 字符；超限先拆章节区间，单章仍超限时继续分片；完整复核后按原要求验收</span>
         </div>
       </div>
 

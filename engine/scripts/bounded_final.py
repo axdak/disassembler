@@ -206,6 +206,9 @@ def run_bounded_final(command, project: Path, pack: Path, draft: Path, worker, *
     units.append({"source": "global_reconciliation", "content":
                   "所有材料分片已经逐项核查。请做全局名称、别名、引用、冲突和线索一致性复核；"
                   "发现问题时读取隔离材料原件核对，只提交必要治理补丁。不能把各片通过当作全局通过。"})
+    # Review findings re-enter the same strict governance path, with durable
+    # rounds and snapshots. A restart never discards accepted evidence work.
+    units.extend(state.get("cross_review_units", []))
     full_contract = pack.read_text(encoding="utf-8")
     checklist = full_contract.split("## 整理清单", 1)[1] if "## 整理清单" in full_contract else ""
     native_options = {k: v for k, v in options.items() if k in {"timeout", "worker_window"}}
@@ -337,6 +340,38 @@ def run_bounded_final(command, project: Path, pack: Path, draft: Path, worker, *
         # Revisit the global pass with strict diagnostics; accepted evidence work
         # stays cached. The same three-attempt limit survives stage redispatch.
         state.update(next=len(units) - 1, feedback="\n".join(errors), status="needs_final_repair")
+        save_json(state_path, state)
+        return run_bounded_final(command, project, pack, draft, worker, **options)
+    # Re-read every original and the entire final candidate. The global index
+    # above is only a routing aid and cannot attest full semantic coverage.
+    from capacity_tree import CapacityTree, TreeFailure
+    from bounded_generation import review_complete_candidate
+    try:
+        review_sources = [(Path(item["path"]), " / ".join(item["roles"])) for item in catalog]
+        contract = (
+            "全书终稿独立复核，核对完整原文、历史分析与当前候选的事实、跨片身份、引用、时序与遗漏。"
+            "只补充原格式治理 Delta：章节范围=全书，新增元素/修改元素为对象；保留有效档案与提取理由。"
+            "必须修正时 addition 写有原文依据的治理补丁；无须修正时 addition=null。"
+            "禁止输出完整故事替代补丁。\n" + checklist
+        )
+        review_tree = CapacityTree(session, command, worker, contract, "全书复核补丁.json", review_sources, **options)
+        additions = review_complete_candidate(review_tree, candidate.read_text(encoding="utf-8"),
+                                              review_sources, "完整候选与原始证据须逐片交叉核对。", **options)
+    except TreeFailure as exc:
+        return exc.code
+    except (ValueError, TypeError, OSError):
+        return REPAIR_EXHAUSTED
+    if additions:
+        rounds = state.get("cross_review_rounds", 0)
+        if rounds >= 3:
+            return REPAIR_EXHAUSTED
+        findings = json.dumps(additions, ensure_ascii=False, indent=2)
+        save_json(session / f"cross_review_{rounds:02d}.json", additions)
+        extra = [{"source": f"独立跨片复核第{rounds + 1}轮",
+                  "content": "以下是待核实的复核补丁建议，核对原文后按原规则处理，禁止重复应用已生效操作。\n" + part}
+                 for part in split_text(findings, chunk_budget)]
+        state.setdefault("cross_review_units", []).extend(extra)
+        state.update(cross_review_rounds=rounds + 1, status="needs_cross_review_repair")
         save_json(state_path, state)
         return run_bounded_final(command, project, pack, draft, worker, **options)
     if any(digest(Path(path)) != signature for path, signature in identity):

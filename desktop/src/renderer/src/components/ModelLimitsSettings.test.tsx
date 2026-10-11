@@ -35,6 +35,6 @@ describe('模型容量设置', () => {
     expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
     fireEvent.change(screen.getByLabelText('输入上限（Token）：'), { target: { value: '' } })
     expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
-    expect(screen.getByText('任务包字符预算:')).toBeInTheDocument()
+    expect(screen.getByText('单包字符上限:')).toBeInTheDocument()
   })
 })

@@ -163,7 +163,7 @@ def test_audit_pack_cli_creates_review_package():
     print("[OK] audit-pack CLI 生成周期审计任务包")
 
 
-def test_audit_pack_falls_back_to_story_index_when_full_story_exceeds_budget():
+def test_audit_pack_pages_full_story_when_it_exceeds_budget():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = empty_story()
@@ -175,10 +175,10 @@ def test_audit_pack_falls_back_to_story_index_when_full_story_exceeds_budget():
 
         assert pack is not None
         text = pack.read_text(encoding="utf-8")
-        assert "## 当前故事结构索引" in text
+        assert pack.with_suffix(".governance.json").is_file()
         assert "## 完整故事结构" not in text
         status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
-        assert status["context"]["render_mode"] == "story_index_relevant"
+        assert status["context"]["render_mode"] == "complete_evidence_tree"
 
 
 def test_audit_pack_keeps_full_story_for_large_file_when_budget_allows():
@@ -197,7 +197,7 @@ def test_audit_pack_keeps_full_story_for_large_file_when_budget_allows():
         assert status["context"]["attempts"][0]["render_mode"] == "full_story"
 
 
-def test_audit_pack_attempts_full_story_before_fallback_for_very_large_file():
+def test_audit_pack_attempts_full_story_before_paging_very_large_file():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = empty_story()
@@ -210,11 +210,11 @@ def test_audit_pack_attempts_full_story_before_fallback_for_very_large_file():
         assert pack is not None
         status = load_status(next(project.rglob("audit_001-001.status.json")))
         attempts = [attempt["render_mode"] for attempt in status["context"]["attempts"]]
-        assert attempts[:2] == ["full_story", "story_index_relevant"]
-        assert status["context"]["render_mode"] == "story_index_relevant"
+        assert attempts == ["full_story"]
+        assert status["context"]["render_mode"] == "complete_evidence_tree"
 
 
-def test_audit_pack_blocks_instead_of_truncating_current_evidence_when_context_overflows():
+def test_audit_pack_pages_single_chapter_without_truncating_evidence():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         write_json(project / "故事结构_增量.json", empty_story())
@@ -223,11 +223,11 @@ def test_audit_pack_blocks_instead_of_truncating_current_evidence_when_context_o
 
         pack = write_audit_pack(project, 1, 1, max_context_chars=12000)
 
-        assert pack is None
+        assert pack is not None and pack.with_suffix(".governance.json").is_file()
         status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
-        assert status["status"] == "blocked_context"
+        assert status["context"]["render_mode"] == "complete_evidence_tree"
         assert status["context"]["current_evidence_chars"] >= len("原文证据" * 10000)
-        assert not (project / "质量治理" / "周期审计" / "audit_001-001.md").exists()
+        assert (project / "质量治理" / "周期审计" / "audit_001-001.md").exists()
 
 
 def test_audit_pack_splits_multi_chapter_overflow_into_child_packs():
@@ -251,7 +251,8 @@ def test_audit_pack_splits_multi_chapter_overflow_into_child_packs():
         assert {item["range"] for item in mid["child_ranges"]} == {"001-002", "003-003"}
         assert (audit_dir / "audit_001-002.md").is_file()
         assert (audit_dir / "audit_003-003.md").is_file()
-        assert (audit_dir / "audit_004-005.md").is_file()
+        assert (audit_dir / "audit_004-004.md").is_file()
+        assert (audit_dir / "audit_005-005.md").is_file()
         assert not (audit_dir / "audit_001-005.md").exists()
 
 
@@ -425,28 +426,25 @@ def test_run_auto_splits_periodic_audit_and_continues_after_child_patches():
 
         worker = root / "split_audit_worker.py"
         worker.write_text(
-            """
-import json
-import os
-import re
+            r"""
+import json, os, re
 from pathlib import Path
-
 output = Path(os.environ["ND_EXPECTED_OUTPUT"])
-match = re.match(r"correction_(\\d{3})-(\\d{3})\\.json", output.name)
-if not match:
-    raise SystemExit(f"unexpected output: {output}")
+prompt = Path(os.environ["ND_TASK_PACK"]).read_text(encoding="utf-8")
+review = re.search(r"复核材料指纹：([0-9a-f]{64})", prompt)
+match = re.search(r"correction_(\d{3})-(\d{3})\.json", output.name + prompt)
+if not match: raise SystemExit("no real chapter range")
 start, end = match.groups()
-chapters = [f"第{seq:03d}章" for seq in range(int(start), int(end) + 1)]
-empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
+empty = {key: [] for key in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集", "其他事项集"]}
+value = {"章节范围": f"第{start}章-第{end}章", "治理类型": "no_change",
+         "质量说明": "已完整检查证据、名称和跨片关系，无需变更。",
+         "证据范围": [f"第{n:03d}章" for n in range(int(start), int(end)+1)],
+         "新增元素": empty, "修改元素": empty}
+if os.environ["ND_TASK_TYPE"] == "bounded_fragment":
+    value = {"overview": "完整证据及跨片关系已检查", "content":
+             {"checked": review[1], "unresolved": [], "addition": None} if review else value}
 output.parent.mkdir(parents=True, exist_ok=True)
-output.write_text(json.dumps({
-    "章节范围": f"第{start}章-第{end}章",
-    "治理类型": "no_change",
-    "质量说明": "已检查本子区间角色、事件、地点、线索、阵营、物品，无需合并或降级。",
-    "证据范围": chapters,
-    "新增元素": empty,
-    "修改元素": empty,
-}, ensure_ascii=False, indent=2), encoding="utf-8")
+output.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 """,
             encoding="utf-8",
         )
@@ -728,8 +726,8 @@ def test_delta_story_context_passes_full_story_when_small():
     print("[OK] 小故事(<256KB) Delta 上下文传完整 JSON")
 
 
-def test_delta_story_context_passes_name_index_plus_recent_when_medium():
-    # ≥256KB（中量）：传元素名称摘要 + 最近10章 Delta，不传完整详情。
+def test_delta_story_context_keeps_full_details_when_medium():
+    # 历史大小不再决定是否丢弃详情。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -742,15 +740,15 @@ def test_delta_story_context_passes_name_index_plus_recent_when_medium():
 
         ctx = build_delta_story_context(story, project, chapter_seq=1)
 
-        assert "FULL_ONLY_MARKER" not in ctx
+        assert "FULL_ONLY_MARKER" in ctx
         assert "主角A" in ctx
         assert "路人B" in ctx
 
-    print("[OK] 中故事(≥256KB) Delta 上下文传名称摘要+最近10章Delta")
+    print("[OK] 中故事保留完整历史详情")
 
 
-def test_delta_story_context_large_tier_all_names_not_details():
-    # ≥ 阈值：传全部名称索引 + 最近10章delta完整内容，不传完整故事详情。
+def test_delta_story_context_large_tier_keeps_all_details():
+    # 超过旧阈值时仍保留完整历史。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -763,7 +761,7 @@ def test_delta_story_context_large_tier_all_names_not_details():
 
         ctx = build_delta_story_context(story, project, chapter_seq=1)
 
-        assert "FULL_ONLY_MARKER" not in ctx  # 故事详情不进索引
+        assert "FULL_ONLY_MARKER" in ctx  # 故事详情不再省略
         assert "主角A" in ctx  # 全部名称都在
         assert "路人B" in ctx  # 全部名称都在（不只是主角）
         assert "故事结构_增量.json" in ctx  # 附文件路径
@@ -824,10 +822,10 @@ def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
         ctx = build_delta_story_context(story, project, chapter_seq=2)
 
         assert "前章角色C" in ctx  # 实际 Delta 内容被嵌入
-        assert "FULL_ONLY_MARKER" not in ctx  # 故事详情不进摘要
-        assert "第001章 Delta:" in ctx  # 实际 Delta 块标记
+        assert "FULL_ONLY_MARKER" in ctx  # 故事详情不再省略
+        assert "第001章完整章节Delta" in ctx  # 实际 Delta 块标记
 
-    print("[OK] ≥256KB 档传名称摘要+最近10章Delta实际内容")
+    print("[OK] 超过旧阈值仍保留完整历史与此前 Delta")
 
 
 if __name__ == "__main__":
@@ -841,8 +839,7 @@ if __name__ == "__main__":
     test_periodic_governance_skipped_when_no_committed_chapters()
     test_commit_governance_rejects_no_change_missing_metadata()
     test_delta_story_context_passes_full_story_when_small()
-    test_delta_story_context_passes_name_index_plus_recent_when_medium()
-    test_delta_story_context_passes_protagonist_factions_when_large()
-    test_delta_story_context_large_tier_only_main_factions()
+    test_delta_story_context_keeps_full_details_when_medium()
+    test_delta_story_context_large_tier_keeps_all_details()
     test_delta_story_context_medium_tier_includes_actual_recent_deltas()
     print("\n全部测试通过 [PASS]")

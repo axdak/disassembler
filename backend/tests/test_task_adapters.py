@@ -247,8 +247,9 @@ def test_analysis_adapter_passes_task_chapters_targets_question_original_and_for
     assert manifest["chapters"] == [1, 2, 3]
     assert manifest["targets"] == ["角色:林婉"]
     assert manifest["question"] == "谁是主角？"
-    assert manifest["include_original"] == "none"
-    assert result["include_original"] == "none"
+    # Persisted omission requests are compatible aliases for complete evidence.
+    assert manifest["include_original"] == "full"
+    assert result["include_original"] == "full"
 
     # Adapter records the forwarded force flag.
     assert result["force"] is True

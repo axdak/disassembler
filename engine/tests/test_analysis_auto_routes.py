@@ -43,6 +43,13 @@ from pathlib import Path
 
 task_type = os.environ["ND_TASK_TYPE"]
 print(f"VISIBLE_ANALYSIS_WORKER {task_type}")
+if task_type == "bounded_fragment":
+    import re
+    prompt = Path(os.environ["ND_TASK_PACK"]).read_text(encoding="utf-8")
+    receipt = re.search(r"复核材料指纹：([0-9a-f]{64})", prompt)
+    content = {"checked": receipt[1], "unresolved": [], "addition": None} if receipt else "# generated visual_assets\\n完整离线产物\\n"
+    Path(os.environ["ND_EXPECTED_OUTPUT"]).write_text(json.dumps({"overview": "离线完整材料复核", "content": content}, ensure_ascii=False), encoding="utf-8")
+    raise SystemExit(0)
 outputs = json.loads(os.environ["ND_EXPECTED_OUTPUTS"])
 for item in outputs:
     target = Path(item)

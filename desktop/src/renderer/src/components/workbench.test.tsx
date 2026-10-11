@@ -227,17 +227,17 @@ describe('workbench seven-tab UI', () => {
     expect(screen.getAllByText('章节梗概').length).toBeGreaterThan(0)
     expect(screen.getAllByText('情节、冲突与伏笔').length).toBeGreaterThan(0)
     expect(screen.getAllByText('自定义分析').length).toBeGreaterThan(0)
-    // Create form: scope, targets, question, original-text policy, force.
+    // Scope is configurable; original evidence always stays complete.
     fireEvent.change(screen.getByLabelText('章节范围'), { target: { value: '1-10' } })
     fireEvent.change(screen.getByLabelText('目标元素'), { target: { value: '角色:林婉' } })
     fireEvent.change(screen.getByLabelText('自定义问题'), { target: { value: '关系如何' } })
-    fireEvent.change(screen.getByLabelText('原文策略'), { target: { value: 'none' } })
+    expect(screen.getByText('完整保留，超限自动分层并复核跨片关联')).toBeInTheDocument()
     fireEvent.click(screen.getByLabelText('强制重跑'))
     fireEvent.click(screen.getByRole('button', { name: '创建分析任务' }))
     await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(1))
     expect(fake.calls.tasksCreate[0]).toEqual({
       type: 'analysis',
-      params: { task: 'summary', chapters: '1-10', targets: ['角色:林婉'], question: '关系如何', original_text: 'none', force: true },
+      params: { task: 'summary', chapters: '1-10', targets: ['角色:林婉'], question: '关系如何', original_text: 'full', force: true },
     })
   })
 

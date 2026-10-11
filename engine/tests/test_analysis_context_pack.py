@@ -287,8 +287,8 @@ def test_narrative_structure_per_chapter_does_not_inject_background(tmp_path):
     assert "## 全书背景资料" not in pack
 
 
-def test_structure_task_pack_uses_global_material_not_per_chapter(tmp_path):
-    """结构类全书任务包用全书级材料，不堆砌每章章节分析MD。"""
+def test_structure_task_pack_keeps_global_and_per_chapter_material(tmp_path):
+    """结构类材料之外仍需保留完整原文与章节分析。"""
     from analysis_context_pack import build_pack
     project = tmp_path / "novel"
     (project / "原文拆解").mkdir(parents=True)
@@ -301,9 +301,9 @@ def test_structure_task_pack_uses_global_material_not_per_chapter(tmp_path):
     chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
     pack = build_pack(project, "plot", chapters, [], "", "sample", 6000, 12000, 1, 1)
     assert "## 全书级分析材料" in pack
-    assert "## 章节材料" not in pack
-    # 不应包含每章分析MD内容（结构类不逐章堆砌）
-    assert "分析MD内容" not in pack
+    assert "## 章节材料" in pack
+    # 结构类也必须覆盖每章完整分析。
+    assert "分析MD内容" in pack
     assert "章节梗概汇总" in pack
     assert "上下文指引" in pack
 
@@ -340,7 +340,7 @@ def test_report_pack_collects_existing_upstream_artifacts(tmp_path):
     pack = build_pack(project, "report", chapters, [], "", "sample", 6000, 12000, 1, 1)
     assert "## 全书级分析材料" in pack
     assert "世界观档案.md" in pack
-    assert "## 章节材料" not in pack
+    assert "## 章节材料" in pack
 
 
 def test_structure_task_main_generates_single_pack(tmp_path):

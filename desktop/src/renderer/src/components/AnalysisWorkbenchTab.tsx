@@ -3,8 +3,8 @@
 // One card per analysis dimension (the 13 from spec §3.3) showing state
 // (missing/latest/stale/queued/running/failed/cancelled) plus last run range
 // / time / artifact entry. The create-task form configures chapter range
-// (all/range/discrete), targets, custom question, original-text policy and
-// force. Plain React state; no extra deps.
+// (all/range/discrete), targets, custom question and force. Original evidence
+// is always complete; capacity is handled by the bounded processing pipeline.
 import { useState } from 'react'
 import type { ArtifactStatusResponse, WorkbenchTask } from '../types'
 import { TaskStatus } from './TaskStatus'
@@ -45,7 +45,6 @@ export function AnalysisWorkbenchTab({
   const [chapters, setChapters] = useState('')
   const [targets, setTargets] = useState('')
   const [question, setQuestion] = useState('')
-  const [originalText, setOriginalText] = useState('none')
   const [force, setForce] = useState(false)
 
   function latestForDim(key: string): WorkbenchTask | undefined {
@@ -60,7 +59,7 @@ export function AnalysisWorkbenchTab({
       chapters: chapters.trim() || 'all',
       targets: parseTargets(targets),
       question: question.trim(),
-      original_text: originalText,
+      original_text: 'full',
       force,
     })
     setChapters(''); setTargets(''); setQuestion(''); setForce(false)
@@ -108,12 +107,8 @@ export function AnalysisWorkbenchTab({
         <input id="aw-targets" aria-label="目标元素" value={targets} onChange={(e) => setTargets(e.target.value)} placeholder="角色:林婉，事件:…" style={{ padding: 4 }} />
         <label htmlFor="aw-question">自定义问题</label>
         <input id="aw-question" aria-label="自定义问题" value={question} onChange={(e) => setQuestion(e.target.value)} style={{ padding: 4 }} />
-        <label htmlFor="aw-orig">原文策略</label>
-        <select id="aw-orig" aria-label="原文策略" value={originalText} onChange={(e) => setOriginalText(e.target.value)}>
-          <option value="none">none</option>
-          <option value="sample">sample</option>
-          <option value="full">full</option>
-        </select>
+        <span>原文处理</span>
+        <span>完整保留，超限自动分层并复核跨片关联</span>
         <label htmlFor="aw-force">强制重跑</label>
         <input id="aw-force" aria-label="强制重跑" type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
       </div>

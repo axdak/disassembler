@@ -19,6 +19,13 @@ def limits(monkeypatch):
     monkeypatch.setenv("ND_CONTEXT_OUTPUT_TOKENS", "1200")
 
 
+def review_response(prompt, addition=None):
+    """Fake only the internal receipt; never call a live reviewer in tests."""
+    match = re.search(r"复核材料指纹：([0-9a-f]{64})", prompt)
+    return {"overview": "已逐项核对原件和跨片关系", "content": {
+        "checked": match[1], "unresolved": [], "addition": addition}} if match else None
+
+
 def fake_worker(calls, *, cancel_at=None):
     def worker(command, root, kind, pack, output, **options):
         assert kind == "bounded_fragment"
@@ -139,6 +146,9 @@ def test_report_tree_keeps_full_content_and_json_format(tmp_path, limits):
     counts = []
     def worker(command, root, kind, task, output, **kwargs):
         text = task.read_text(encoding="utf-8")
+        if review_response(text):
+            save_json(output, review_response(text))
+            return 0
         span = re.search(r"字符区间：(\d+)-(\d+)", text)
         content = None
         if span:

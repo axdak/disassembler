@@ -146,7 +146,7 @@ def test_scoped_analysis_pack_forwards_all_chapters_targets_question_and_origina
     assert manifest["chapters"] == [1, 2, 3]
     assert manifest["targets"] == ["角色:林婉"]
     assert manifest["question"] == "谁是主角？"
-    assert manifest["include_original"] == "none"
+    assert manifest["include_original"] == "full"  # Legacy omission no longer drops originals.
     # The pack files referenced by the manifest exist on disk.
     for rel in manifest["packs"]:
         assert (project / rel).is_file()
