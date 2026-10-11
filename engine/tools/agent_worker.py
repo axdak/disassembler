@@ -20,6 +20,7 @@ from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from prompt_loader import render_prompt
+from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, recovery_output_errors
 from worker_artifacts import (
     capture_output_signatures,
     invalid_output_artifacts,
@@ -42,6 +43,8 @@ def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> st
     task_type = task_type.removeprefix("auto_")
     if len(expected_outputs) != 1 or expected_outputs[0].suffix.lower() != ".json":
         return ""
+    if task_type in RECOVERY_SCHEMAS:
+        return json.dumps(RECOVERY_SCHEMAS[task_type], ensure_ascii=False, separators=(",", ":"))
     if task_type not in JSON_TASK_TYPES:
         return JSON_OBJECT_SCHEMA
     try:
@@ -530,6 +533,12 @@ def main() -> int:
                     and expected_output.is_file()
                     and not invalid_output_artifacts([expected_output])
                 )
+                if direct_output_valid and task_type in RECOVERY_SCHEMAS:
+                    errors = recovery_output_errors(
+                        task_type, json.loads(expected_output.read_text(encoding="utf-8")))
+                    if errors:
+                        print("自动恢复输出协议不合格: " + "; ".join(errors), file=sys.stderr)
+                        return CONTRACT_INVALID
                 if direct_output_valid:
                     # Some CLIs ignore the stdout-only contract, write the
                     # artifact directly, then print a prose completion summary.
@@ -541,6 +550,8 @@ def main() -> int:
                     return 0
                 if not content:
                     print(f"provider 输出为空: {provider}", file=sys.stderr)
+                    if task_type in RECOVERY_SCHEMAS:
+                        return CONTRACT_INVALID
                     if args.provider == "auto":
                         last_returncode = 1
                         continue
@@ -557,10 +568,17 @@ def main() -> int:
                             file=sys.stderr,
                         )
                     print(f"provider stdout 预览:\n{preview}", file=sys.stderr)
+                    if task_type in RECOVERY_SCHEMAS:
+                        return CONTRACT_INVALID
                     if args.provider == "auto":
                         last_returncode = 1
                         continue
                     return 1
+                if task_type in RECOVERY_SCHEMAS:
+                    errors = recovery_output_errors(task_type, json.loads(content))
+                    if errors:
+                        print("自动恢复输出协议不合格: " + "; ".join(errors), file=sys.stderr)
+                        return CONTRACT_INVALID
                 _write_captured_output_atomically(expected_output, content)
                 # capture_stdout 模式下 stdout 否则为空（产物已写文件、不回显内容），
                 # 留一行摘要给 worker 日志，便于判断该章是否真完成。
@@ -582,10 +600,18 @@ def main() -> int:
                 print("provider 写出的产物格式无效:", file=sys.stderr)
                 for path in invalid:
                     print(f"- {path}", file=sys.stderr)
+                if task_type in RECOVERY_SCHEMAS:
+                    return CONTRACT_INVALID
                 if args.provider == "auto":
                     last_returncode = 1
                     continue
                 return 1
+            if task_type in RECOVERY_SCHEMAS:
+                for path in expected_outputs:
+                    errors = recovery_output_errors(task_type, json.loads(path.read_text(encoding="utf-8")))
+                    if errors:
+                        print("自动恢复输出协议不合格: " + "; ".join(errors), file=sys.stderr)
+                        return CONTRACT_INVALID
             unchanged = (
                 unchanged_existing_outputs(before_outputs, expected_outputs)
                 if os.environ.get("ND_WORKER_REQUIRE_FRESH_OUTPUT", "1") != "0"

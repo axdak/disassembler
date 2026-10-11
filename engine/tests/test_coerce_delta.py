@@ -1,7 +1,7 @@
 """Tests for scripts/coerce_delta.py — 入库前的机械纠错层。
 
 设计契约：
-- 只做确定性类型/格式纠错，不改语义、不改键名、不评判内容。
+- 只做确定性类型/格式及位置纠错，不改语义、不评判内容。
 - 复用 normalize_story_schema.py 已有的 coerce_* 工具，不重复造轮子。
 - 输入是 LLM 写的 Delta JSON dict，输出是修正后的 Delta JSON dict。
 - 修正项记录到 list[str] 报告里，方便审计。
@@ -23,6 +23,50 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from coerce_delta import coerce_delta_in_place  # noqa: E402
+
+
+def test_nonstandard_field_relocation_is_lossless_and_idempotent():
+    """Wrong-layer fields are deterministic repairs, not a reason to call a model."""
+    from coerce_delta import relocate_element_fields
+    item = {"名称": "主角", "人物轨迹": '["完整原文轨迹"]', "关联物品": ["物品:古戒"],
+            "提取理由": "原文证据", "详情": {"提取理由": "原文证据"}}
+    delta = {"修改元素": {"角色集": [item]}}
+    assert len(relocate_element_fields(delta)) == 3
+    assert item == {"名称": "主角", "详情": {"人物轨迹": '["完整原文轨迹"]',
+                                          "关联物品": ["物品:古戒"], "提取理由": "原文证据"}}
+    assert relocate_element_fields(delta) == []
+
+
+@pytest.mark.parametrize("field", ["人物轨迹", "提取理由"])
+def test_relocation_conflict_preserves_both_values_for_validation(field):
+    item = {"名称": "主角", field: "顶层分析", "详情": {field: "详情中的不同分析"}}
+    delta = {"修改元素": {"角色集": [item]}}
+    report = coerce_delta_in_place(delta)
+    assert item[field] == "顶层分析"
+    assert item["详情"][field] == "详情中的不同分析"
+    assert any("冲突" in line for line in report)
+
+
+def test_invalid_detail_keeps_original_analysis():
+    item = {"名称": "主角", "详情": "不能用空对象覆盖这段分析", "人物轨迹": "顶层轨迹"}
+    coerce_delta_in_place({"修改元素": {"角色集": [item]}})
+    assert item["详情"] == "不能用空对象覆盖这段分析"
+    assert item["人物轨迹"] == "顶层轨迹"
+
+
+def test_program_relocation_keeps_process_and_governance_boundary():
+    """Relocating a field must not invent evidence/trace data or relax governance."""
+    from test_validate_delta import base_story, bad_delta_missing_trace_for_new_element
+    from validate_delta import validate_elements
+    delta = bad_delta_missing_trace_for_new_element()
+    item = delta["新增元素"]["角色集"][0]
+    item["本章状态"] = "前往山门"
+    coerce_delta_in_place(delta)
+    assert validate_elements(base_story(), delta, "process")[0] == []
+    assert validate_elements(base_story(), delta, "governance")[0]
+    item["详情"].pop("提取理由")
+    assert validate_elements(base_story(), delta, "process")[0]
+    assert validate_elements(base_story(), delta, "governance")[0]
 
 
 def _empty_delta() -> dict:

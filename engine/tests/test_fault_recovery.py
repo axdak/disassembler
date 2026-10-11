@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from fault_recovery import REVIEW_CHECKS, digest, preservation_errors, recover_artifact
+from fault_recovery import REVIEW_CHECKS, digest, preservation_errors, preserve_quality_notes, recover_artifact
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED, begin_retry_session
 
@@ -392,3 +392,96 @@ def test_failed_generation_cannot_reuse_unchanged_valid_draft(tmp_path, monkeypa
     monkeypatch.setattr(pipeline, "run_worker", lambda *a, **kw: 1)
     monkeypatch.setattr(pipeline, "run_repair_worker", lambda *a, **kw: pytest.fail("不应验收未更新草稿"))
     assert pipeline.run_generation_worker("local-fake", tmp_path, "final_draft", tmp_path / "task.md", draft) == 1
+
+
+def test_schema_relocation_keeps_content_and_rejects_hidden_deletion(tmp_path):
+    """Regression for the saved chapter-8 candidates: same values, new location."""
+    before, after = tmp_path / "old.json", tmp_path / "new.json"
+    narrative = "完整分析必须留在所属元素中，不能借迁移字段的位置把分析内容删掉。"
+    save_json(before, {"修改元素": {"角色集": [{"名称": "主角", "人物轨迹": narrative}]}})
+    save_json(after, {"修改元素": {"角色集": [{"名称": "主角", "详情": {"人物轨迹": narrative}}]}})
+    assert preservation_errors(before, after) == []
+    save_json(after, {"修改元素": {"角色集": [{"名称": "主角", "详情": {"人物轨迹": "缩写"}}]}, "质量说明": narrative})
+    assert preservation_errors(before, after)  # Same text in metadata cannot replace analysis.
+
+
+def test_preservation_reserves_exact_names_before_matching_renamed_records(tmp_path):
+    before, after = tmp_path / "old.json", tmp_path / "new.json"
+    first = "第一个元素的完整独立分析必须全部保留，不能由另外一个元素替代。"
+    second = "第二个元素的完整独立分析必须全部保留，不能由另外一个元素替代。"
+    save_json(before, [{"名称": "错别字", "介绍": first}, {"名称": "乙", "介绍": second}])
+    save_json(after, [{"名称": "乙", "介绍": second}, {"名称": "正式名称", "介绍": first}])
+    assert preservation_errors(before, after) == []
+    save_json(before, [{"名称": "重复名称", "介绍": first}, {"名称": "重复名称", "介绍": first}])
+    save_json(after, [{"名称": "替代元素", "介绍": "删去分析"}, {"名称": "重复名称", "介绍": first}])
+    assert preservation_errors(before, after)
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_typed_relation_requires_same_element_complete_detail(tmp_path, valid):
+    before, after = tmp_path / "old.json", tmp_path / "new.json"
+    detail = {"寄居物品": "古戒（随身携带）", "关联物品": ["物品:古戒"]}
+    save_json(before, {"新增元素": {"角色集": [{"名称": "老者", "关系": ["寄居:物品:古戒"], "详情": detail}]}})
+    candidate_detail = detail if valid else {**detail, "寄居物品": "古戒二号"}
+    save_json(after, {"新增元素": {"角色集": [{"名称": "老者", "关系": [], "详情": candidate_detail}]}})
+    assert bool(preservation_errors(before, after)) is not valid
+
+
+def test_quality_note_is_retained_without_exempting_narrative(tmp_path):
+    before, after = tmp_path / "old.json", tmp_path / "new.json"
+    old_note = "旧说明曾描述修复提取理由，后续改名不能导致这一份历史说明消失。"
+    narrative = "分析正文详细记载了主角第一次收到来信并决定前往约定地点的过程。"
+    save_json(before, {"质量说明": old_note, "介绍": narrative})
+    save_json(after, {"质量说明": "已按正式索引更正名称。", "介绍": narrative})
+    preserve_quality_notes(before, after)
+    assert preservation_errors(before, after) == []
+    first = after.read_bytes()
+    preserve_quality_notes(before, after)
+    assert after.read_bytes() == first
+    value = json.loads(first)
+    assert old_note in value["质量说明"]
+    value["介绍"] = "删除细节"
+    save_json(after, value)
+    preserve_quality_notes(before, after)
+    assert preservation_errors(before, after)
+
+
+@pytest.mark.parametrize("bad_plan", [{"difficulty": "easy"}, {"diagnosis": "根因", "steps": [""]},
+                                      {"diagnosis": "根因", "steps": [None]}, {"diagnosis": "根因", "steps": [{}]}])
+def test_diagnosis_protocol_retries_once_then_continues(tmp_path, bad_plan):
+    output, pack, _, calls, published, options = scenario(tmp_path)
+    original = options["worker"]
+
+    def worker(*args, **kwargs):
+        if len(calls) < 2:
+            calls.append(args[2])
+            return 1
+        if calls.count("recovery_diagnosis") == 0:
+            calls.append(args[2])
+            save_json(args[4], bad_plan)
+            return 0
+        return original(*args, **kwargs)
+
+    options["worker"] = worker
+    assert invoke(tmp_path, output, pack, options) == 0
+    assert calls.count("recovery_diagnosis") == 2
+    assert len(published) == 1
+    assert state(tmp_path)["calls"][2]["returncode"] == 66
+
+
+@pytest.mark.parametrize("native_rc", [0, 66])
+def test_invalid_diagnosis_exhausts_bounded_budget_without_publication(tmp_path, native_rc):
+    output, pack, _, calls, published, options = scenario(tmp_path)
+
+    def worker(*args, **kwargs):
+        calls.append(args[2])
+        if args[2] == "recovery_diagnosis":
+            save_json(args[4], {"difficulty": "easy"})
+            return native_rc
+        return 1
+
+    options["worker"] = worker
+    for _ in range(2):
+        assert invoke(tmp_path, output, pack, options) == REPAIR_EXHAUSTED
+    assert calls == ["auto_repair_chapter", "auto_repair_chapter", "recovery_diagnosis", "recovery_diagnosis"]
+    assert not published

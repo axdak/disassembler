@@ -2,7 +2,7 @@
 """入库前 Delta 机械纠错层。
 
 设计契约：
-- 只做确定性类型/格式修复，不改语义、不改键名、不评判 LLM 内容质量。
+- 只做确定性类型/格式及字段位置修复，不改语义、不评判 LLM 内容质量。
 - 复用 normalize_story_schema.py 已有的 coerce_* 工具，不重复造轮子。
 - 输入是 LLM 写的 Delta dict（in-place 修改）；返回纠错操作 list[str]。
 - 修复点覆盖 validate_delta.py 中"机械可推断"的硬约束错误，
@@ -38,6 +38,7 @@ from normalize_story_schema import (
 )
 from story_schema_rules import (
     COLLECTION_KEYS,
+    VALID_FIELDS,
     TRACEABLE_COLLECTION_KEYS,
     DETAIL_REF_RE,
     STRUCTURAL_REF_FIELDS,
@@ -50,7 +51,6 @@ from story_schema_rules import (
 
 
 CHAPTER_TRACE_FIELDS = ("首次章节", "最近章节")
-TOP_LEVEL_TRACE_FIELDS = ("提取理由", *CHAPTER_TRACE_FIELDS, "涉及章节")
 DETAIL_KEY_CHAPTER_WITH_SEPARATOR_RE = re.compile(r"^(?:第?\d{1,6}章?)[\-_=：:，,、\s]+")
 DETAIL_KEY_CHAPTER_WITHOUT_SEPARATOR_RE = re.compile(r"^(?:第?(\d{1,6})章)")
 DETAIL_KEY_FOUR_DIGIT_CHAPTER_RE = re.compile(r"^(\d{4})(?=\D)")
@@ -64,22 +64,35 @@ def _ensure_detail(item: Dict[str, Any]) -> Dict[str, Any]:
     return item["详情"]
 
 
-def _move_top_trace_fields_to_detail(
-    item: Dict[str, Any], label: str, report: List[str]
-) -> None:
-    """把误写在元素顶层的追溯字段（提取理由 / 首次章节 / 最近章节 / 涉及章节）
-    迁回 详情。详情已存在的同名键不会被覆盖。"""
-    detail = _ensure_detail(item)
-    for field in TOP_LEVEL_TRACE_FIELDS:
-        if field in item and field not in detail:
-            value = item.pop(field)
-            if value not in (None, "", [], {}):
-                detail[field] = value
-                report.append(f"{label}.{field} 从顶层迁回详情")
-        elif field in item:
-            # 详情里也已经有这个键，直接丢弃顶层的（详情是权威位置）
-            item.pop(field)
-            report.append(f"{label}.{field} 顶层重复，已移除")
+def relocate_element_fields(delta: Dict[str, Any]) -> List[str]:
+    """按同一字段契约无损迁移位置；冲突原样保留，交原校验器/模型处理。
+
+    保全比较也使用此函数，仅在内存中的副本上归一化位置，不改变文本、
+    类型或列表内容。不能用其他元素、其他字段中的同文替代本字段。
+    """
+    report = []
+    for section_name in ("新增元素", "修改元素"):
+        section = delta.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        for collection, allowed in VALID_FIELDS.items():
+            items = section.get(collection)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("详情", {}), dict):
+                    continue
+                for field in list(item):
+                    if field in allowed:
+                        continue
+                    detail = item.setdefault("详情", {})
+                    label = f"{section_name}.{collection}[{item.get('名称', '')}].{field}"
+                    if field in detail and detail[field] != item[field]:
+                        report.append(f"{label} 与详情同名字段冲突，保留两处原值待修复")
+                        continue
+                    detail[field] = item.pop(field)
+                    report.append(f"{label} 从顶层迁回详情（原值完整保留）")
+    return report
 
 
 def _coerce_chapter_trace(detail: Dict[str, Any], label: str, report: List[str]) -> None:
@@ -362,8 +375,10 @@ def _coerce_item(collection_key: str, item: Any, idx: int, report: List[str]) ->
     name = item.get("名称") if isinstance(item.get("名称"), str) else idx
     label = f"{collection_key}[{name}]"
 
-    # 共通：迁回顶层追溯字段，确保详情存在
-    _move_top_trace_fields_to_detail(item, label, report)
+    # 非对象详情可能包含有效分析，不能用空对象替换来掩盖错误。
+    if "详情" in item and not isinstance(item["详情"], dict):
+        report.append(f"{label}.详情 类型错误，保留原值待修复")
+        return
     detail = _ensure_detail(item)
     _coerce_detail_key_chapter_prefixes(collection_key, detail, label, report)
     _coerce_supplementary_tags(detail, label, report)
@@ -391,6 +406,8 @@ def coerce_delta_in_place(delta: Dict[str, Any]) -> List[str]:
     report: List[str] = []
     if not isinstance(delta, dict):
         return report
+
+    report.extend(relocate_element_fields(delta))
 
     for section_key in ("新增元素", "修改元素"):
         section = delta.get(section_key)

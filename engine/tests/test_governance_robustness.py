@@ -203,7 +203,9 @@ def test_serial_chapter_validation_loop_is_bounded(tmp_path, monkeypatch):
     rc = run_pipeline.cmd_run(tmp_path, chapter_command="fake", audit_interval=0,
                               worker_retries=1, worker_loop="continuous", run_mode="worker")
     assert rc == REPAIR_EXHAUSTED
-    assert calls == ["auto_repair_chapter", "auto_repair_chapter", "recovery_diagnosis"]
+    # Malformed diagnosis receives exactly one contract correction, not an
+    # unbounded repair loop or an invented plan accepted by the scheduler.
+    assert calls == ["auto_repair_chapter", "auto_repair_chapter", "recovery_diagnosis", "recovery_diagnosis"]
     assert paths["analysis"].read_text(encoding="utf-8") == valid_analysis(1)
 
 

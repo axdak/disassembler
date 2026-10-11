@@ -3,11 +3,51 @@ import os
 import subprocess
 import sys
 import tempfile
+import pytest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKER = ROOT / "tools" / "agent_worker.py"
+
+
+@pytest.mark.parametrize("task_type,value", [
+    ("recovery_diagnosis", {"difficulty": "easy"}),
+    ("recovery_diagnosis", {"diagnosis": "问题", "steps": [""]}),
+    ("recovery_review", {"passed": True}),
+])
+@pytest.mark.parametrize("direct", [False, True])
+def test_internal_contract_rejects_valid_json_with_wrong_shape(task_type, value, direct):
+    """Enforce contracts even when a CLI ignores native structured output."""
+    env = {"FAKE_CLI_STDOUT": json.dumps(value)}
+    if direct:
+        env.update(FAKE_CLI_DIRECT_WRITE="1", FAKE_CLI_DIRECT_CONTENT=json.dumps(value))
+    result, output, _ = run_worker("codebuddy", "ND_CODEBUDDY_BIN", env,
+                                 task_type=task_type, output_name="out.json")
+    assert result.returncode == 66, result.stdout
+    if not direct:
+        assert output == ""  # Rejected stdout never becomes an accepted artifact.
+
+
+def test_diagnosis_native_schema_requires_actionable_nonempty_steps():
+    plan = {"diagnosis": "字段位置错误", "steps": ["原值迁入详情"]}
+    result, output, payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN",
+                                        {"FAKE_CLI_STDOUT": json.dumps(plan)},
+                                        task_type="recovery_diagnosis", output_name="out.json")
+    assert result.returncode == 0, result.stdout
+    assert json.loads(output) == plan
+    schema = json.loads(payload["argv"][payload["argv"].index("--json-schema") + 1])
+    assert schema["required"] == ["diagnosis", "steps"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["steps"]["minItems"] == 1
+
+
+@pytest.mark.parametrize("content", ["", "not json", '{"diagnosis":'])
+def test_invalid_diagnosis_syntax_uses_protocol_failure_code(content):
+    result, output, _ = run_worker("codebuddy", "ND_CODEBUDDY_BIN", {"FAKE_CLI_STDOUT": content},
+                                 task_type="recovery_diagnosis", output_name="out.json")
+    assert result.returncode == 66, result.stdout
+    assert output == ""
 
 
 def write_fake_cli(path: Path) -> None:
