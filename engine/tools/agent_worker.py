@@ -29,6 +29,9 @@ from worker_artifacts import (
 )
 
 
+from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack
+
+
 PROVIDER_ORDER = ["agy", "codebuddy"]
 UNSUPPORTED_NODE_OPTIONS = ("--use-system-ca",)
 JSON_TASK_TYPES = {"delta", "repair_chapter", "audit_correction", "audit_repair"}
@@ -267,15 +270,11 @@ def is_unsupported_node_option(option: str) -> bool:
 
 def provider_env() -> dict[str, str]:
     env = dict(os.environ)
-    if env.get("ND_TASK_TYPE", "").removeprefix("auto_") in JSON_TASK_TYPES and not env.get(
-        "CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"
-    ):
-        # Custom CodeBuddy models may omit maxOutputTokens from their catalog
-        # entry, which makes the CLI fall back to a small server-side default
-        # and can truncate a valid Delta halfway through a JSON string.
-        env["CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"] = env.get(
-            "ND_CODEBUDDY_JSON_MAX_OUTPUT_TOKENS", "32768"
-        )
+    # A deployment override may tighten, never exceed the configured model limit.
+    limit = ContextBudget.from_env().output_tokens
+    requested = int(env.get("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS") or
+                    env.get("ND_CODEBUDDY_JSON_MAX_OUTPUT_TOKENS") or limit)
+    env["CODEBUDDY_CODE_MAX_OUTPUT_TOKENS"] = str(min(limit, max(1, requested)))
     node_options = env.get("NODE_OPTIONS", "")
     if node_options:
         options = split_command(node_options)
@@ -482,6 +481,12 @@ def main() -> int:
             else:
                 prompt = build_prompt(task_type, task_pack, expected_outputs, capture_stdout)
             json_schema = structured_output_schema(task_type, expected_outputs)
+            # Count the actual wrapper/schema as well as the full task and declared
+            # material files. CLI tool reads after launch remain explicitly unmeasured.
+            task_text = task_pack.read_text(encoding="utf-8")
+            overhead = prompt.replace(task_text, "") + json_schema
+            if not admit_pack(task_pack, overhead):
+                return CONTEXT_EXCEEDED
             command = provider_command(
                 provider,
                 project_dir,

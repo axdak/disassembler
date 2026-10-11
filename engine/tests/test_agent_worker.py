@@ -172,7 +172,7 @@ def test_codebuddy_preserves_fresh_valid_direct_json_over_stdout_summary():
     assert schema["required"] == ["章节", "新增元素", "修改元素"]
     assert "--max-turns" not in payload["argv"]
     assert "StructuredOutput" in payload["stdin"]
-    assert payload["max_output_tokens"] == "32768"
+    assert payload["max_output_tokens"] == "20000"
 
 
 def test_codebuddy_rejects_invalid_json_stdout_without_overwriting_existing_file():

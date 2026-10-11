@@ -201,6 +201,7 @@ def test_failed_partial_is_never_reused(tmp_path):
 
 
 def test_both_worker_apis_share_model_admission(tmp_path, monkeypatch):
+    (tmp_path / "pack").write_text("离线任务材料", encoding="utf-8")
     gate = WorkerAdmission(1)
     started, release, second_started = threading.Event(), threading.Event(), threading.Event()
     results = []

@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack
+
 import argparse
 import hashlib
 import json
@@ -614,6 +616,8 @@ def run_worker(
     """Run an external model/agent worker for exactly one task package."""
     if not command:
         return 2
+    if not admit_pack(task_pack):
+        return CONTEXT_EXCEEDED
     attempts = retries + 1
     for attempt in range(1, attempts + 1):
         if wait_before_worker_retry(attempt):
@@ -660,7 +664,7 @@ def run_worker(
         if returncode != 0:
             finish_repair(ticket, returncode)
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
-            if returncode == 130:
+            if returncode in {130, CONTEXT_EXCEEDED}:
                 return 130  # 用户取消，不重试
             if (defer_artifact_repair and returncode == 1 and expected_output.is_file()
                     and expected_output.stat().st_size and invalid_output_artifacts([expected_output])):
@@ -900,6 +904,8 @@ def run_multi_output_worker(
     """Run an external worker for a task package that owns several artifacts."""
     if not command:
         return 2
+    if not admit_pack(task_pack):
+        return CONTEXT_EXCEEDED
     attempts = retries + 1
     for attempt in range(1, attempts + 1):
         if wait_before_worker_retry(attempt):
@@ -940,7 +946,7 @@ def run_multi_output_worker(
             log_path.write_text(output, encoding="utf-8")
         if returncode != 0:
             print(f"worker failed: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
-            if returncode == 130:
+            if returncode in {130, CONTEXT_EXCEEDED}:
                 return 130  # 用户取消，不重试
             if attempt < attempts:
                 continue
