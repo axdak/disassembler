@@ -130,6 +130,7 @@ class CapacityTree:
         self.options["retries"] = 0
         self.protected_materials = options.get("protected_materials", [])
         self.adaptive_overviews = options.get("adaptive_overviews", False)
+        self.generation_input_tokens = options.get("generation_input_tokens")
         self.overview_budget = min(2000, self.policy.output_tokens // 5, self.policy.usable_input // 16)
         self.sources = [(str(path.resolve()), digest(path), role) for path, role in sources]
         # Reference archives are addressable evidence, not a mandatory reread
@@ -143,7 +144,7 @@ class CapacityTree:
         settings = {key: value for key, value in os.environ.items() if key.startswith(
             ("ND_", "CODEBUDDY_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
         identity = json.dumps([self.sources, references, command, contract, target, self.policy.__dict__,
-                               self.adaptive_overviews, code, settings],
+                               self.adaptive_overviews, self.generation_input_tokens, code, settings],
                               sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         self.root = project / "质量治理/容量分层" / key
@@ -173,7 +174,7 @@ class CapacityTree:
         return all(digest(Path(path)) == signature for path, signature, _ in self.sources + self.references)
 
     def request(self, material: str, label: str, *, overview_only=False, decision=False, review=False,
-                overview_limit=None):
+                overview_limit=None, validate_content=None):
         """Checkpoint only protocol-valid output; failure budgets survive restart."""
         overview_budget = self.overview_budget if overview_limit is None else min(self.overview_budget, overview_limit)
         prompt = (
@@ -270,6 +271,10 @@ class CapacityTree:
                                  or not isinstance(value["content"].get("reason"), str)
                                  or not value["content"]["reason"].strip()):
                     raise ValueError("字段裁决必须选择已有值并给出原文依据")
+                if validate_content is not None:
+                    # Narrow consumers may impose a stricter business contract;
+                    # failures use this node's durable strategy budget as usual.
+                    validate_content(value["content"])
                 state.update(sha256=digest(result), feedback="")
                 save_json(ledger, state)
                 return value, result
@@ -364,6 +369,10 @@ class CapacityTree:
         # must not be needlessly tied to output size. Generation leaves retain a
         # smaller budget and adapt further if a real output exceeds the ceiling.
         budget = self.policy.usable_input // 2 if overview_only else min(self.policy.usable_input // 4, self.policy.output_tokens)
+        if self.generation_input_tokens is not None:
+            # Sparse governance patches need not mirror every input token.
+            # Admit a larger evidence group first, then split on real exhaustion.
+            budget = min(self.policy.usable_input // 2, self.generation_input_tokens)
         nodes = []
         for path, role in self.materials:
             text = path.read_text(encoding="utf-8")

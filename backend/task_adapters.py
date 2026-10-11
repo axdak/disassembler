@@ -43,7 +43,6 @@ from run_pipeline import (  # noqa: E402
     builtin_agent_worker_command,
     cmd_commit_final_draft,
     cmd_finalize,
-    cmd_final_pack,
     cmd_validate_final,
     commit_governance,
     copy_analysis_task_packages,
@@ -52,6 +51,7 @@ from run_pipeline import (  # noqa: E402
     load_json,
     max_available_delta_seq,
     prepare_audit_pack_or_split,
+    run_periodic_governance,
     recover_story_from_snapshot,
     repair_llm_json,
     artifact_paths,
@@ -1026,55 +1026,27 @@ class GovernanceTaskAdapter:
                 end=end,
             )
 
-        context.progress(10, "preparing audit pack")
-        rc = prepare_audit_pack_or_split(
-            project_dir, start, end,
-            force=force, max_context_chars=max_context_chars,
-        )
-        if rc != 0:
-            raise RuntimeError(f"audit pack 准备失败 rc={rc}")
-
+        # The workbench and automatic pipeline share one split/resume owner.
+        # Preparing children and then dispatching the absent parent pack would
+        # bypass capacity recovery and repeat already committed child audits.
+        if force:
+            rc = prepare_audit_pack_or_split(project_dir, start, end, force=True,
+                                            max_context_chars=max_context_chars)
+            if rc:
+                raise RuntimeError(f"audit pack 准备失败 rc={rc}")
+        if not worker_command:
+            provider = _str_param(params, "worker_provider", default="") or context.worker_provider
+            if provider and provider != "manual":
+                worker_command = builtin_agent_worker_command(provider)
+        context.progress(30, "周期治理：程序校验、必要模型处理与断点续跑")
+        rc = run_periodic_governance(project_dir, start, end, max_context_chars=max_context_chars,
+                                     audit_command=worker_command, worker_timeout_seconds=worker_timeout,
+                                     worker_retries=worker_retries, worker_window=worker_window,
+                                     worker_loop="continuous")
+        if rc:
+            raise RuntimeError(f"governance 自动治理未完成 rc={rc}；材料与断点已保留")
         paths = audit_paths(project_dir, start, end)
         correction_path = paths["correction"]
-
-        # Worker correction step: only invoke when the correction is missing.
-        if not correction_path.is_file() or correction_path.stat().st_size == 0:
-            # 任务参数未显式指定 worker_command 时，按全局 worker_provider 设置
-            # 自动解析内置 agent_worker 命令（默认 agy），对齐 orchestrator 的
-            # _worker_command()，使周期治理可一键自动跑，无需手动配 worker 命令。
-            if not worker_command:
-                provider = _str_param(params, "worker_provider", default="") or context.worker_provider
-                if provider and provider != "manual":
-                    worker_command = builtin_agent_worker_command(provider)
-            if not worker_command:
-                raise RuntimeError(
-                    f"governance correction 缺失且未提供 worker_command: {correction_path}"
-                )
-            context.progress(30, "running audit correction worker")
-            rc = run_worker(
-                worker_command, project_dir, "audit_correction",
-                paths["pack"], correction_path,
-                timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
-            )
-            if rc != 0:
-                raise RuntimeError(f"audit correction worker 失败 rc={rc}")
-
-        context.progress(60, "committing governance patch")
-        rc = commit_governance(project_dir, str(correction_path))
-        if rc != 0:
-            if not worker_command:
-                provider = _str_param(params, "worker_provider", default="") or context.worker_provider
-                if provider and provider != "manual":
-                    worker_command = builtin_agent_worker_command(provider)
-            if worker_command:
-                context.progress(65, "自动诊断并修复治理补丁")
-                rc = run_repair_worker(
-                    worker_command, project_dir, "audit_repair", correction_path.with_suffix(".repair.md"), correction_path,
-                    timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
-                    observe=lambda detail, data: context.progress(65, detail),
-                )
-            if rc != 0:
-                raise RuntimeError(f"governance commit 自动修复未完成 rc={rc}")
 
         status = audit_status(project_dir, start, end)
         before = status.get("before", "") or ""
@@ -1302,7 +1274,7 @@ class FinalizeAdapter:
     """Writer, worker-backed adapter: rerun finalization on demand.
 
     Mirrors orchestrator ``_stage_final_pack`` / ``_stage_commit_final_draft``
-    / ``_stage_finalize``: ``cmd_final_pack`` → worker revises the draft →
+    / ``_stage_finalize``: completed cycles → program preparation → formal introduction →
     ``cmd_commit_final_draft`` (repair loop on failure) → ``cmd_validate_final``
     → ``cmd_finalize``. Holds the project writer lock for the whole run.
     """
@@ -1334,24 +1306,25 @@ class FinalizeAdapter:
             if provider and provider != "manual":
                 worker_command = builtin_agent_worker_command(provider)
 
-        task_pack = project_dir / "质量治理" / "最终审计" / "final_task_pack.md"
         draft = project_dir / "故事结构_草稿.json"
         repair = project_dir / "质量治理" / "最终审计" / "repair_final.md"
 
-        context.progress(10, "final pack")
-        rc = cmd_final_pack(project_dir)
+        from story_delivery import prepare_delivery, finish_introduction, ensure_delivery_governance
+        rc = ensure_delivery_governance(project_dir, worker_command,
+                                        timeout=worker_timeout, retries=worker_retries,
+                                        worker_window=worker_window)
+        if rc != 0:
+            raise RuntimeError(f"正式交付前章节或周期治理未完成 rc={rc}")
+        context.progress(10, "准备正式故事交付")
+        rc = prepare_delivery(project_dir)
         if rc != 0:
             raise RuntimeError(f"final_pack 失败 rc={rc}")
-        if worker_command:
-            context.progress(30, "final draft worker")
-            rc = run_worker(
-                worker_command, project_dir, "final_draft",
-                task_pack, draft,
-                timeout=worker_timeout, retries=worker_retries,
-                worker_window=worker_window,
-            )
-            if rc != 0:
-                raise RuntimeError(f"final_draft worker 失败 rc={rc}")
+        context.progress(30, "正式简介收尾")
+        rc = finish_introduction(project_dir, worker_command, run_worker,
+                                 timeout=worker_timeout, retries=worker_retries,
+                                 worker_window=worker_window)
+        if rc != 0:
+            raise RuntimeError(f"正式简介收尾未完成 rc={rc}；断点已保留")
 
         context.progress(60, "commit final draft")
         rc = cmd_commit_final_draft(project_dir)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """全流程编排器。
 
-把现有引擎命令串成一键全流程（章节分析/Delta -> 章节结构 -> 视觉资产 -> 全书分析
--> 最终整理 -> 导出），加状态机、worker 重试、硬阻塞判定与结构化事件。
+把现有引擎命令串成一键全流程（章节分析/Delta及周期治理 -> 简介与严格交付
+-> 章节结构/视觉资产/全书报告 -> 导出），报告不再阻塞正式故事 JSON 产出。
 
 设计要点：
 - 直接 import 调用 run_pipeline 的 cmd_*（显式参数），不经过 CLI 翻译层。
@@ -32,7 +32,6 @@ from run_pipeline import (
     builtin_agent_worker_command,
     cmd_chapter_structure_auto,
     cmd_commit_final_draft,
-    cmd_final_pack,
     cmd_finalize,
     cmd_run,
     cmd_run_interleaved,
@@ -186,6 +185,15 @@ class Orchestrator:
 
     def _reconcile_recovery_state(self) -> None:
         """Verify terminal artifacts before trusting a late/done state checkpoint."""
+        if self.state.flow_version < 2:
+            # Upgrade pending legacy report/final stages without replaying chapters
+            # or losing completed report dimensions. Existing final files stay valid.
+            if self.state.current_stage not in {"chapter_analysis", "chapter_delta"} and "finalize" not in self.state.completed:
+                self.state.current_stage = "final_pack"
+                self.state.completed = [s for s in self.state.completed
+                                        if s not in {"final_pack", "commit_final_draft", "finalize"}]
+            self.state.flow_version = 2
+            self.state.save()
         current_index = len(STAGES) if self.state.is_done() else (
             STAGES.index(self.state.current_stage)
             if self.state.current_stage in STAGES else 0
@@ -482,16 +490,20 @@ class Orchestrator:
         )
 
     def _stage_final_pack(self) -> int:
-        # final-pack 生成草稿与最终整理任务包；随后让 worker 按任务包修改草稿。
-        # 草稿最终是否合格由 commit_final_draft 阶段的 strict 校验把关。
-        rc = cmd_final_pack(self.project_dir)
+        # Formal delivery no longer asks a model to rewrite/re-audit the book.
+        # Only the introduction is synthesized; strict validation still follows.
+        from story_delivery import prepare_delivery, finish_introduction, ensure_delivery_governance
+        rc = ensure_delivery_governance(
+            self.project_dir, self._worker_command(), end_chapter_seq=self.config.end_chapter_seq,
+            timeout=self.config.worker_timeout_seconds, retries=self.config.worker_retries,
+            worker_window=self.config.worker_window)
         if rc != 0:
             return rc
-        task_pack = self.project_dir / "质量治理" / "最终审计" / "final_task_pack.md"
-        draft = self.project_dir / "故事结构_草稿.json"
-        return run_worker(
-            self._worker_command(), self.project_dir, "final_draft",
-            task_pack, draft,
+        rc = prepare_delivery(self.project_dir)
+        if rc != 0:
+            return rc
+        return finish_introduction(
+            self.project_dir, self._worker_command(), run_worker,
             timeout=self.config.worker_timeout_seconds,
             retries=self.config.worker_retries,
             worker_window=self.config.worker_window,

@@ -20,12 +20,12 @@ from typing import Any
 STAGES = [
     "chapter_analysis",
     "chapter_delta",
-    "chapter_structure",
-    "visual_assets",
-    "fullbook_analysis",
     "final_pack",
     "commit_final_draft",
     "finalize",
+    "chapter_structure",
+    "visual_assets",
+    "fullbook_analysis",
     "export",
 ]
 DONE = "done"
@@ -42,9 +42,10 @@ class PipelineState:
     started_at: float = 0.0
     updated_at: float = 0.0
     last_error: str = ""
-    # 阶段5按分析维度落细粒度断点；崩溃恢复时只重跑缺失/损坏的维度。
+    # 下游报告按分析维度落细粒度断点；崩溃恢复时只重跑缺失/损坏的维度。
     fullbook_completed_tasks: list[str] = field(default_factory=list)
     end_chapter_seq: int = 0  # 上次运行范围；变更时编排器需从章节阶段续跑
+    flow_version: int = 2  # JSON delivery precedes optional downstream reports.
 
     def _stage(self, stage: str) -> dict[str, Any]:
         return self.stages.setdefault(
@@ -80,7 +81,7 @@ class PipelineState:
             self.completed.append(stage)
         if stage in STAGES:
             idx = STAGES.index(stage)
-            self.current_stage = STAGES[idx + 1] if idx + 1 < len(STAGES) else DONE
+            self.current_stage = next((item for item in STAGES[idx + 1:] if item not in self.completed), DONE)
         self.reset_stage(stage)
 
     def is_done(self) -> bool:
@@ -103,6 +104,7 @@ class PipelineState:
             st.last_error = d.get("last_error", "")
             st.fullbook_completed_tasks = list(d.get("fullbook_completed_tasks", []))
             st.end_chapter_seq = d.get("end_chapter_seq", 0)
+            st.flow_version = d.get("flow_version", 1)
             return st
         st = cls(project_dir=str(project_dir))
         st.started_at = time.time()

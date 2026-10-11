@@ -825,7 +825,26 @@ def run_generation_worker(
     if rc == CONTEXT_EXCEEDED and task_type == "audit_correction":
         match = re.fullmatch(r"correction_(\d+)-(\d+)\.json", expected_output.name)
         if match:
-            write_governance_route(project_dir, int(match[1]), int(match[2]), task_pack)
+            first, last = int(match[1]), int(match[2])
+            # Never mistake a truncated provider artifact for a finished patch.
+            if expected_output.is_file():
+                atomic_write_bytes(expected_output.with_suffix(".capacity-partial.json"), expected_output.read_bytes())
+                expected_output.unlink()
+            children = split_audit_range(first, last)
+            if children:
+                paths = audit_paths(project_dir, first, last)
+                previous = audit_status(project_dir, first, last)
+                limit = previous.get("context", {}).get("max_context_chars", DEFAULT_AUDIT_MAX_CONTEXT_CHARS)
+                update_audit_status(paths, status="split_pending", range=audit_range_label(first, last),
+                                    child_ranges=[{"start": a, "end": b, "range": audit_range_label(a, b)}
+                                                  for a, b in children],
+                                    capacity_reason="模型生成长度耗尽，原请求不再重试；已提交子区间直接复用")
+                return run_child_periodic_governance(
+                    project_dir, first, last, children, limit, command,
+                    worker_options.get("timeout", DEFAULT_WORKER_TIMEOUT_SECONDS),
+                    worker_options.get("retries", 0), worker_options.get("worker_window", DEFAULT_WORKER_WINDOW),
+                    "continuous")
+            write_governance_route(project_dir, first, last, task_pack)
             from bounded_generation import run_bounded_governance
             return run_bounded_governance(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
     if rc != 1 or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
@@ -2192,6 +2211,8 @@ def run_periodic_governance(
     paths = audit_paths(project_dir, start, end)
     existing_status = load_json(paths["status"], {}) if paths["status"].is_file() else {}
     existing_status = existing_status if isinstance(existing_status, dict) else {}
+    if audit_range_is_resolved(project_dir, start, end):
+        return 0  # Completed receipts are authoritative, including after restart.
     child_ranges = audit_child_ranges_from_status(existing_status)
     if child_ranges:
         return run_child_periodic_governance(

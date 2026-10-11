@@ -153,7 +153,8 @@ def test_audit_pack_cli_creates_review_package():
         text = pack.read_text(encoding="utf-8")
         assert "周期结构审计任务包" in text
         assert str(correction) in text
-        assert "commit-governance" in text
+        assert "程序负责规范化、校验、提交" in text
+        assert "commit-governance" not in text
         assert "第001章_测试.md" in text
         assert "第005章_测试.json" in text
         assert "测试原文。" in text

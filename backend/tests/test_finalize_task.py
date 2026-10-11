@@ -1,7 +1,7 @@
 """Finalize task adapter tests (gap-fill plan Task 3).
 
 Asserts the worker-backed composite finalize adapter mirrors the
-orchestrator's final-pack -> worker revises draft -> commit_final_draft
+orchestrator's program preparation -> formal introduction -> commit_final_draft
 (repair loop) -> validate_final -> finalize sequence, producing a valid
 故事结构.json under the project dir.
 """
@@ -16,6 +16,13 @@ import pytest
 
 from task_adapters import FinalizeAdapter
 from workbench import TaskContext
+import story_delivery
+
+
+@pytest.fixture(autouse=True)
+def completed_cycles(monkeypatch):
+    """This adapter suite isolates delivery; cycle gating has engine coverage."""
+    monkeypatch.setattr(story_delivery, "ensure_delivery_governance", lambda *a, **kw: 0)
 
 # Make engine/scripts importable so the adapter and its helpers run.
 _ENGINE_SCRIPTS = Path(__file__).resolve().parent.parent.parent / "engine" / "scripts"
@@ -79,13 +86,18 @@ def _write_finalize_worker(worker: Path) -> None:
     worker.write_text(
         f"""
 import os
+import json
 from pathlib import Path
 
 task_type = os.environ["ND_TASK_TYPE"]
 output = Path(os.environ["ND_EXPECTED_OUTPUT"])
 output.parent.mkdir(parents=True, exist_ok=True)
 
-if task_type in ("final_draft", "repair_final"):
+if task_type == "bounded_fragment":
+    pack = Path(os.environ["ND_TASK_PACK"]).read_text(encoding="utf-8")
+    content = None if "content 必须为 null" in pack else {{"标题": "测试故事", "描述": "正式简介"}}
+    output.write_text(json.dumps({{"overview": "完整来源位置", "content": content}}, ensure_ascii=False), encoding="utf-8")
+elif task_type in ("final_draft", "repair_final"):
     output.write_text({story_text!r}, encoding="utf-8")
 else:
     raise SystemExit(f"unexpected task type: {{task_type}}")
@@ -143,8 +155,7 @@ def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path)
     with pytest.raises(RuntimeError) as excinfo:
         adapter.run(ctx)
     msg = str(excinfo.value)
-    assert "commit_final_draft 失败" in msg
-    assert "无 worker_command" in msg
+    assert "正式简介收尾未完成 rc=2" in msg
 
 
 @pytest.mark.parametrize("needs_model", [False, True])
@@ -160,7 +171,12 @@ def test_finalize_adapter_uses_program_before_bounded_model_repair(tmp_path, mon
     pack = project / "质量治理/最终审计/final_task_pack.md"
     pack.parent.mkdir(parents=True, exist_ok=True)
     pack.write_text("完整离线终稿任务", encoding="utf-8")
-    monkeypatch.setattr(task_adapters, "cmd_final_pack", lambda *a: 0)
+    def prepare(*args):
+        draft = {**EMPTY_STORY, "介绍": {"标题": "", "描述": ""}} if needs_model else EMPTY_STORY
+        _write_json(project / "故事结构_草稿.json", draft)
+        return 0
+    monkeypatch.setattr(story_delivery, "prepare_delivery", prepare)
+    monkeypatch.setattr(story_delivery, "finish_introduction", lambda *a, **kw: 0)
     monkeypatch.setattr(task_adapters, "cmd_commit_final_draft", lambda *a: 1)
     monkeypatch.setattr(run_pipeline, "wait_before_worker_retry", lambda attempt: False)
 

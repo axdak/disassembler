@@ -220,11 +220,34 @@ def run_hierarchical_reports(command, project, pack, outputs, worker, **options)
 def run_bounded_governance(command, project, pack, output, worker, **options):
     """Split within one real chapter/range; original strict commit remains authoritative."""
     from governance_contract import normalize_governance_patch
+    # Parent routing indices may exhaust output too. Shrink only their routing
+    # overviews; retain all source bodies, leaf receipts and cross-range checks.
+    from context_budget import ContextBudget
+    options = {**options, "adaptive_overviews": True,
+               "generation_input_tokens": ContextBudget.from_env().usable_input // 2}
     metadata = json.loads(pack.with_suffix(".governance.json").read_text(encoding="utf-8"))
     sources = [(Path(path), role) for path, role in metadata["sources"]]
     before = digest(output)
     try:
         references = [(Path(path), role) for path, role in metadata.get("references", [])]
+        # Coalesce small files into budgeted evidence groups, not one model call
+        # per file. Keep every source byte as decoded text and explicit offsets;
+        # original files remain independently addressable and hash protected.
+        blocks, offsets, position = [], [], 0
+        for path, role in sources:
+            text = path.read_text(encoding="utf-8")
+            header = f"\n## 完整来源：{path}；角色：{role}\n"
+            position += len(header)
+            offsets.append({"source": str(path), "sha256": digest(path),
+                            "start": position, "end": position + len(text)})
+            blocks.extend([header, text, "\n"])
+            position += len(text) + 1
+        evidence = pack.with_suffix(".evidence.md")
+        body = "".join(blocks)
+        atomic_write_bytes(evidence, body.encode("utf-8"))
+        save_json(pack.with_suffix(".evidence.json"), offsets)
+        references = list(dict.fromkeys(references + sources))
+        sources = [(evidence, "本周期全部必读材料；来源与区间在正文及 evidence.json 中逐项登记")]
         tree = CapacityTree(project, command, worker, metadata["contract"], output.name, sources,
                             reference_sources=references, **options)
 

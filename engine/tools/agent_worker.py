@@ -312,8 +312,109 @@ def run_provider(
     project_dir: Path,
 ) -> subprocess.CompletedProcess[str]:
     if provider_captures_stdout(provider):
+        if "--json-schema" in command:
+            return run_structured_stream(command, prompt, project_dir)
         return run_provider_command(command, prompt, project_dir)
     return run_provider_command([*command, "-p", prompt], "", project_dir)
+
+
+def stream_capacity_exceeded(value: dict) -> bool:
+    """Inspect protocol metadata only; novel text must never trigger a retry."""
+    event = value.get("event", {}) if value.get("type") == "stream_event" else {}
+    if not isinstance(event, dict):
+        return False
+    delta = event.get("delta", {})
+    if isinstance(delta, dict) and delta.get("stop_reason") in {"max_tokens", "length"}:
+        return True
+    choices = event.get("choices")
+    return isinstance(choices, list) and any(
+        isinstance(choice, dict) and choice.get("finish_reason") == "length" for choice in choices)
+
+
+def run_structured_stream(command, prompt, project_dir):
+    """Stop CLI continuation at the first exhausted response, returning capacity code.
+
+    Consume partial events privately and retain only the final result envelope.
+    The pipeline owns splitting/checkpoints; the CLI must not hide repeated
+    length-limited turns behind a single twenty-minute invocation.
+    """
+    import threading
+    import time
+    from run_pipeline import _kill_tree
+    from provider_stream import CodeBuddyCapacityLog
+
+    command = list(command)
+    command[command.index("--output-format") + 1] = "stream-json"
+    if "--include-partial-messages" not in command:
+        command.append("--include-partial-messages")
+    bounded = os.environ.get("ND_TASK_TYPE") in {"audit_correction", "bounded_fragment"}
+    if bounded:
+        # Model work is evidence reading and artifact production, not execution
+        # of validators, shell exploration, source-code inspection or publication.
+        if "--tools" in command:
+            command[command.index("--tools") + 1] = "Read,StructuredOutput"
+        else:
+            command.extend(["--tools", "Read,StructuredOutput"])
+        if "--max-turns" in command:
+            index = command.index("--max-turns") + 1
+            command[index] = str(min(8, int(command[index])))
+        else:
+            command.extend(["--max-turns", "8"])
+    capacity_log = CodeBuddyCapacityLog(project_dir)
+    request_ids = set()
+    last_log_check = 0
+    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=None, cwd=str(project_dir), env=provider_env(),
+                            text=True, encoding="utf-8", errors="replace")
+
+    def feed():
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass  # A capacity stop can close stdin while the prompt is draining.
+
+    sender = threading.Thread(target=feed, daemon=True)
+    sender.start()
+    result = ""
+    fallback = []
+    try:
+        for line in proc.stdout:
+            try:
+                value = json.loads(line)
+            except ValueError:
+                fallback.append(line)  # Compatibility with non-streaming wrappers.
+                continue
+            if not isinstance(value, dict):
+                fallback.append(line)
+                continue
+            # CodeBuddy calls its conversation ID _requestId; the per-model
+            # request ID recorded by ModelProvider is exposed as _messageId.
+            request_id = value.get("_messageId") or value.get("_requestId")
+            if isinstance(request_id, str) and request_id not in request_ids:
+                request_ids.add(request_id)
+                print(f"CLI 模型请求第 {len(request_ids)} 轮；等待结构化产物。", file=sys.stderr, flush=True)
+            event_type = (value.get("event") or {}).get("type") if isinstance(value.get("event"), dict) else ""
+            exhausted = stream_capacity_exceeded(value)
+            if time.monotonic() - last_log_check > 1 or event_type in {"message_delta", "message_stop"}:
+                exhausted = capacity_log.check(request_ids) or exhausted
+                last_log_check = time.monotonic()
+            turn_limit = bounded and (len(request_ids) > 8 or value.get("subtype") == "error_max_turns")
+            if exhausted or turn_limit:
+                _kill_tree(proc)
+                print("模型生成达到容量或多轮执行上限；停止 CLI 自动续写，交由程序拆小并断点续跑。", file=sys.stderr)
+                return subprocess.CompletedProcess(command, CONTEXT_EXCEEDED, "", "")
+            if value.get("type") == "result" or "structured_output" in value:
+                result = line
+            elif "type" not in value:
+                fallback.append(line)
+        return subprocess.CompletedProcess(command, proc.wait(), result or "".join(fallback), "")
+    finally:
+        if proc.poll() is None:
+            _kill_tree(proc)
+        proc.wait()
+        sender.join(timeout=1)
+        proc.stdout.close()
 
 
 def _captured_output_is_valid(path: Path, content: str) -> bool:

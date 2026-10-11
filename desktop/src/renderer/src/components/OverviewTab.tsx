@@ -11,8 +11,8 @@ import type { StageEvent, Status, WorkbenchTask, ArtifactStatusResponse, AppendP
 import { TaskStatus } from './TaskStatus'
 
 const STAGES = [
-  'chapter_analysis', 'chapter_delta', 'chapter_structure', 'visual_assets',
-  'fullbook_analysis', 'final_pack', 'commit_final_draft', 'finalize', 'export',
+  'chapter_analysis', 'chapter_delta', 'final_pack', 'commit_final_draft', 'finalize',
+  'chapter_structure', 'visual_assets', 'fullbook_analysis', 'export',
 ]
 
 /** Empty input means the whole book; invalid or fractional chapter numbers stay unsaved. */

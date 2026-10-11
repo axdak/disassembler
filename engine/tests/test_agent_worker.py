@@ -67,6 +67,12 @@ record.write_text(json.dumps({
     "task_pack": os.environ.get("ND_TASK_PACK", ""),
     "expected_output": os.environ.get("ND_EXPECTED_OUTPUT", ""),
 }, ensure_ascii=False, indent=2), encoding="utf-8")
+if os.environ.get("FAKE_CLI_CAPACITY_LOG"):
+    from datetime import datetime
+    logdir = Path(os.environ["CODEBUDDY_CONFIG_DIR"]) / "logs" / datetime.now().strftime("%Y-%m-%d")
+    logdir.mkdir(parents=True, exist_ok=True)
+    (logdir / (Path.cwd().name + "__fake.log")).write_text(
+        'finish_reason="length" received, requestId=model-request-1, chunks=6934\\n', encoding="utf-8")
 if os.environ.get("FAKE_CLI_DIRECT_WRITE") == "1":
     output = Path(os.environ["ND_EXPECTED_OUTPUT"])
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +239,7 @@ def test_codebuddy_extracts_structured_output_from_json_result_envelope():
     assert result.returncode == 0, result.stdout
     assert json.loads(output_text) == structured
     output_format_index = payload["argv"].index("--output-format") + 1
-    assert payload["argv"][output_format_index] == "json"
+    assert payload["argv"][output_format_index] == "stream-json"
     assert "--max-turns" not in payload["argv"]
 
 

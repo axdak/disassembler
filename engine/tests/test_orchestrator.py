@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import orchestrator
+import story_delivery
 from events import EventBus
 from orchestrator import Config, Orchestrator
 from pipeline_state import PipelineState
@@ -20,14 +21,14 @@ def test_chapter_phases_advance_then_block_on_stub(tmp_path):
     with patch.object(orchestrator, "cmd_run", side_effect=[0, 0]) as m:
         orch = Orchestrator(tmp_path, config=Config(max_attempts=1), bus=bus)
         rc = orch.run()
-    # chapter_analysis(0) -> chapter_delta(0) -> chapter_structure 未实现 -> 阻塞
+    # Empty fixture cannot pass the delivery chapter/governance gate.
     assert rc == 1
     assert m.call_count == 2
     types = [(e.type, e.stage) for e in ev]
     assert ("stage_done", "chapter_analysis") in types
     assert ("stage_done", "chapter_delta") in types
-    assert ("stage_fail", "chapter_structure") in types
-    assert orch.state.current_stage == "chapter_structure"
+    assert ("stage_fail", "final_pack") in types
+    assert orch.state.current_stage == "final_pack"
 
 
 def test_retry_then_success(tmp_path):
@@ -35,7 +36,7 @@ def test_retry_then_success(tmp_path):
     with patch.object(orchestrator, "cmd_run", side_effect=[1, 1, 0, 0]) as m:
         orch = Orchestrator(tmp_path, config=Config(max_attempts=10, stagnant_limit=5), bus=bus)
         rc = orch.run()
-    # chapter_analysis: 1,1,0（第3次成功）；chapter_delta: 0；chapter_structure 未实现 -> 阻塞
+    # chapter_analysis: 1,1,0（第3次成功）；chapter_delta: 0；正式交付前置检查失败 -> 阻塞
     assert m.call_count == 4
     assert rc == 1
     assert "chapter_analysis" in orch.state.completed
@@ -64,7 +65,7 @@ def test_recovery_resumes_at_state(tmp_path):
     with patch.object(orchestrator, "cmd_run", return_value=0) as m:
         orch = Orchestrator(tmp_path, config=Config(max_attempts=1), bus=bus)
         rc = orch.run()
-    # chapter_analysis 已完成被跳过；chapter_delta 执行一次(0)；chapter_structure 未实现
+    # chapter_analysis 已完成被跳过；chapter_delta 执行一次(0)；正式交付前置检查失败
     assert m.call_count == 1
     assert rc == 1
     assert "chapter_analysis" in orch.state.completed
@@ -125,7 +126,7 @@ def test_rc2_handoff_reruns_until_success(tmp_path):
     assert ("stage_fail", "chapter_analysis") not in types
     assert ("hard_block", "chapter_analysis") not in types
     assert "chapter_analysis" in orch.state.completed
-    # chapter_structure 未实现，最终 rc=1
+    # 正式交付前置检查失败，最终 rc=1
     assert rc == 1
 
 
@@ -149,7 +150,10 @@ def test_structure_and_visual_stages_dispatch(tmp_path):
     bus = EventBus()
     with patch.object(orchestrator, "cmd_run", side_effect=[0, 0]), \
          patch.object(orchestrator, "cmd_chapter_structure_auto", return_value=0) as cs, \
-         patch.object(orchestrator, "cmd_visual_assets_auto", return_value=0) as va:
+         patch.object(orchestrator, "cmd_visual_assets_auto", return_value=0) as va, \
+         patch.object(Orchestrator, "_stage_final_pack", return_value=0), \
+         patch.object(Orchestrator, "_stage_commit_final_draft", return_value=0), \
+         patch.object(Orchestrator, "_stage_finalize", return_value=0):
         orch = Orchestrator(tmp_path, config=Config(max_attempts=1, worker_provider="agy"), bus=bus)
         rc = orch.run()
     assert cs.call_count == 1
@@ -167,16 +171,15 @@ def test_structure_and_visual_stages_dispatch(tmp_path):
 
 def test_final_pack_stage(tmp_path):
     orch = Orchestrator(tmp_path, config=Config(worker_provider="agy"))
-    with patch.object(orchestrator, "cmd_final_pack", return_value=0) as fp, \
-         patch.object(orchestrator, "run_worker", return_value=0) as rw:
-        rc = orch._stage_final_pack()
-    assert rc == 0
-    assert fp.call_count == 1
-    assert rw.call_count == 1
-    args = rw.call_args[0]  # command, project_dir, task_type, task_pack, expected_output
-    assert args[2] == "final_draft"
-    assert args[3].name == "final_task_pack.md"
-    assert args[4].name == "故事结构_草稿.json"
+    with patch.object(story_delivery, "ensure_delivery_governance", return_value=0) as gates, \
+         patch.object(story_delivery, "prepare_delivery", return_value=0) as prepare, \
+         patch.object(story_delivery, "finish_introduction", return_value=0) as intro, \
+         patch.object(orchestrator, "run_worker") as worker:
+        assert orch._stage_final_pack() == 0
+    gates.assert_called_once()
+    prepare.assert_called_once()
+    intro.assert_called_once()
+    worker.assert_not_called()  # No implicit final_draft/global governance call.
 
 
 def test_commit_final_draft_delegates_to_recovery_scheduler(tmp_path):
@@ -379,7 +382,7 @@ def test_full_pipeline_completes(tmp_path):
     with patch.object(orchestrator, "cmd_run", side_effect=[0, 0]), \
          patch.object(orchestrator, "cmd_chapter_structure_auto", return_value=0), \
          patch.object(orchestrator, "cmd_visual_assets_auto", return_value=0), \
-         patch.object(orchestrator, "cmd_final_pack", return_value=0), \
+         patch.object(Orchestrator, "_stage_final_pack", return_value=0), \
          patch.object(orchestrator, "run_worker", return_value=0), \
          patch.object(orchestrator, "cmd_commit_final_draft", return_value=0), \
          patch.object(orchestrator, "cmd_finalize", return_value=0), \
