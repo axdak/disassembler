@@ -27,7 +27,8 @@ def test_concurrent_budgets_do_not_change_environment_or_each_other():
         results = list(pool.map(book, [60000, 90000]))
     assert results == [30000, 60000]
     assert dict(os.environ) == before
-    assert ContextBudget.from_env().usable_input == 250000
+    default = ContextBudget()
+    assert ContextBudget.from_env().usable_input == 300000 - default.output_tokens - default.reserve_tokens
 
 
 def test_scope_restored_after_failure():

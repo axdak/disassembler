@@ -484,3 +484,110 @@ def test_详情元素引用数组_保持真实数组():
 
     assert delta["新增元素"]["角色集"][0]["详情"]["关联线索"] == ["线索:资金缺口"]
     assert not any("关联线索" in line for line in report)
+
+
+# ---- 详情 → 顶层 反向搬迁（模型把整组标准字段写进详情）----
+
+
+def test_详情内整组标准字段被搬回顶层():
+    """模型把事件集标准字段整组写进详情时，程序按顶层契约搬回，无需模型重写。"""
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {
+            "名称": "萧炎退回鉴宝室静候拍卖款项",
+            "时间": "0001-01-01T00:00:00",
+            "详情": {
+                "涉及章节": "0024",
+                "发生地点": "鉴宝室",
+                "参与成员": ["角色:萧炎"],
+                "重量级": 20,
+                "分组": "筑基灵液交易收官",
+                "动作链条": "回到鉴宝室等待款项",
+            },
+        }
+    )
+
+    report = coerce_delta_in_place(delta)
+
+    event = delta["新增元素"]["事件集"][0]
+    assert event["发生地点"] == "鉴宝室"
+    assert event["参与成员"] == ["萧炎"]
+    assert event["重量级"] == 20
+    assert event["分组"] == "筑基灵液交易收官"
+    assert set(event["详情"]) == {"涉及章节", "动作链条"}
+    assert sum("迁回顶层" in line for line in report) == 4
+    from test_validate_delta import base_story
+    from validate_delta import validate_elements
+    assert not any("详情[重量级]" in line for line in validate_elements(base_story(), delta, "process")[0])
+
+
+def test_详情内标准字段为空值不搬迁():
+    """空字符串/空数组不携带信息，搬上去只会掩盖"缺少标准字段"，交给 normalize。"""
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "X", "时间": "0001-01-01T00:00:00",
+         "详情": {"发生地点": "", "参与成员": [], "分组": "   "}}
+    )
+    report = coerce_delta_in_place(delta)
+    event = delta["新增元素"]["事件集"][0]
+    assert "发生地点" not in event and "参与成员" not in event and "分组" not in event
+    assert not any("迁回顶层" in line for line in report)
+
+
+def test_详情内标准字段类型不符则不搬迁():
+    """标签集顶层契约是字符串数组；详情里是字符串时不搬，交给校验器报错。"""
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "X", "时间": "0001-01-01T00:00:00",
+         "详情": {"标签集": '["宝物交易","冲突升级"]'}}
+    )
+    coerce_delta_in_place(delta)
+    event = delta["新增元素"]["事件集"][0]
+    assert "标签集" not in event
+    assert event["详情"]["标签集"] == '["宝物交易","冲突升级"]'
+
+
+def test_布尔值不会被当成重量级搬迁():
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "X", "时间": "0001-01-01T00:00:00", "详情": {"重量级": True}}
+    )
+    coerce_delta_in_place(delta)
+    event = delta["新增元素"]["事件集"][0]
+    assert "重量级" not in event
+    assert event["详情"]["重量级"] is True
+
+
+def test_顶层已有同名值时详情内副本原样保留():
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "X", "时间": "0001-01-01T00:00:00", "分组": "顶层分组",
+         "详情": {"分组": "详情里的另一种说法"}}
+    )
+    report = coerce_delta_in_place(delta)
+    event = delta["新增元素"]["事件集"][0]
+    assert event["分组"] == "顶层分组"
+    assert event["详情"]["分组"] == "详情里的另一种说法"
+    assert not any("迁回顶层" in line for line in report)
+
+
+def test_名称不从详情搬迁():
+    """名称由身份对齐负责，不能把详情里的同名键当成正式名称。"""
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "X", "时间": "0001-01-01T00:00:00", "详情": {"名称": "另一种说法"}}
+    )
+    coerce_delta_in_place(delta)
+    event = delta["新增元素"]["事件集"][0]
+    assert event["名称"] == "X"
+    assert event["详情"]["名称"] == "另一种说法"
+
+
+def test_反向搬迁幂等():
+    from coerce_delta import relocate_element_fields
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "X", "时间": "0001-01-01T00:00:00", "详情": {"重量级": 30, "发生地点": "广场"}}
+    )
+    assert len(relocate_element_fields(delta)) == 2
+    assert relocate_element_fields(delta) == []

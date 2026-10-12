@@ -113,6 +113,23 @@ def test_done_state_rewinds_to_final_pack_when_final_and_draft_missing(tmp_path)
     assert "final_pack" not in orch.state.completed
 
 
+def test_output_truncation_is_not_reported_as_capacity_block(tmp_path):
+    """单轮输出被截断属于输出预算不足：既不是输入材料超容量，也不做无效重跑。"""
+    from context_budget import OUTPUT_TRUNCATED
+    bus = EventBus()
+    ev = collect(bus)
+    with patch.object(orchestrator, "cmd_run", return_value=OUTPUT_TRUNCATED) as m:
+        orch = Orchestrator(tmp_path, config=Config(max_attempts=10, stagnant_limit=1), bus=bus)
+        rc = orch.run()
+    assert rc == 1
+    assert m.call_count == 1  # 输出上限不变时重跑同一请求没有意义
+    types = [e.type for e in ev]
+    assert "output_truncated" in types
+    assert "hard_block" not in types
+    assert "单次输出上限" in orch.state.last_error
+    assert "重新分包" not in orch.state.last_error
+
+
 def test_rc2_handoff_reruns_until_success(tmp_path):
     # rc=2 是交接/检查点，不是失败：重跑同阶段直到成功，不发 stage_fail、不计停滞。
     bus = EventBus()

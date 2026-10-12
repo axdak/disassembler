@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from capacity_tree import CapacityTree, TreeFailure, merge_json, merge_markdown
-from context_budget import CONTEXT_EXCEEDED, estimate_tokens
+from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, estimate_tokens
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 
@@ -105,6 +105,23 @@ def test_provider_capacity_splits_leaf_without_becoming_cancellation(tmp_path, l
     tree.run()
     assert calls
     assert any(part["end"] - part["start"] <= 350 for part in tree.coverage)
+
+
+def test_output_truncation_is_not_recorded_as_split_evidence(tmp_path, limits):
+    """输出被截断说明输出额度不足；拆分材料无用，因此不得记为继续分包的证据。"""
+    source = tmp_path / "source.md"
+    source.write_text("甲" * 400, encoding="utf-8")
+
+    def worker(command, root, kind, pack, output, **options):
+        return OUTPUT_TRUNCATED
+
+    tree = CapacityTree(tmp_path, "fake", worker, "契约", "报告.md", [(source, "原文")])
+    with pytest.raises(TreeFailure) as failure:
+        tree.run()
+    assert failure.value.code == OUTPUT_TRUNCATED
+    ledger = json.loads(next((tmp_path / "质量治理/容量分层").rglob("state.json")).read_text(encoding="utf-8"))
+    assert not ledger.get("split_required")
+    assert ledger["attempts"] == 0  # 输出截断不是语义失败，不消耗该节点的策略预算
 
 
 def test_json_merge_preserves_mentions_and_rejects_scalar_conflicts():

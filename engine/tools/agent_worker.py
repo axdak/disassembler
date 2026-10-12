@@ -31,7 +31,7 @@ from worker_artifacts import (
 )
 
 
-from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack
+from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, ContextBudget, admit_pack, estimate_tokens
 
 
 PROVIDER_ORDER = ["agy", "codebuddy"]
@@ -397,8 +397,11 @@ def run_provider(
     return run_provider_command([*command, "-p", prompt], "", project_dir)
 
 
-def stream_capacity_exceeded(value: dict) -> bool:
-    """Inspect protocol metadata only; novel text must never trigger a retry."""
+def stream_output_truncated(value: dict) -> bool:
+    """Inspect protocol metadata only; novel text must never trigger a retry.
+
+    单轮响应被输出上限截断，只说明输出预算不足，不说明输入材料超容量。
+    """
     event = value.get("event", {}) if value.get("type") == "stream_event" else {}
     if not isinstance(event, dict):
         return False
@@ -410,17 +413,29 @@ def stream_capacity_exceeded(value: dict) -> bool:
         isinstance(choice, dict) and choice.get("finish_reason") == "length" for choice in choices)
 
 
+# 旧名保留：外部脚本/文档仍可能引用。
+stream_capacity_exceeded = stream_output_truncated
+
+
 def run_structured_stream(command, prompt, project_dir):
-    """Stop CLI continuation at the first exhausted response, returning capacity code.
+    """Stop CLI continuation at the first length-limited turn.
 
     Consume partial events privately and retain only the final result envelope.
     The pipeline owns splitting/checkpoints; the CLI must not hide repeated
     length-limited turns behind a single twenty-minute invocation.
+
+    Returned code is OUTPUT_TRUNCATED (输出预算不足), never CONTEXT_EXCEEDED:
+    材料是否超容量由 admit_pack 在派发前单独判定，两者不能混为一谈。
+
+    另一条独立判据是无进展（idle）：连续 idle_limit 秒没有**任何流事件**即视为
+    卡死，就地杀掉本 provider 并返回 124。放在这里而不是只靠外层墙钟，是因为
+    这个循环能逐行看到流事件（判据精确），而且返回 124 后 main() 会在同一次调用内
+    直接换用下一个 provider——不必等外层墙钟耗尽再重来一轮。
     """
     import threading
     import time
-    from run_pipeline import _kill_tree
-    from provider_stream import CodeBuddyCapacityLog
+    from run_pipeline import _kill_tree, worker_idle_limit
+    from provider_stream import CodeBuddyCapacityLog, CodeBuddyFailureLog
 
     command = list(command)
     command[command.index("--output-format") + 1] = "stream-json"
@@ -430,10 +445,51 @@ def run_structured_stream(command, prompt, project_dir):
     # can require many turns; do not impose a turn cap or reopen built-in Read.
     capacity_log = CodeBuddyCapacityLog(project_dir)
     request_ids = set()
+    truncated_tokens = 0  # 仅用于诊断：本轮已生成的输出规模，不参与产物解析。
     last_log_check = 0
+    env = provider_env()
+    # 实际生效的单次输出上限就是传给子进程的这个值（已按模型容量钳制）。
+    output_limit = env.get("CODEBUDDY_CODE_MAX_OUTPUT_TOKENS", "")
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=None, cwd=str(project_dir), env=provider_env(),
+                            stderr=None, cwd=str(project_dir), env=env,
                             text=True, encoding="utf-8", errors="replace")
+
+    # 无进展判据：activity 只在真正收到流事件时刷新，心跳类日志不算进展。
+    idle_limit = worker_idle_limit()
+    activity = time.monotonic()
+    stalled = threading.Event()
+    concluded = threading.Event()
+    finished = threading.Event()
+
+    def watch_idle():
+        while not finished.wait(1.0):
+            if time.monotonic() - activity >= idle_limit:
+                stalled.set()
+                # 杀掉整棵进程树；stdout 关闭后上面的读取循环自然结束。
+                _kill_tree(proc)
+                return
+
+    def watch_conclusion():
+        """盯 CLI 会话日志的失败终局，把兜底等待从 idle 窗口压缩到秒级。
+
+        CLI 在连接层失败后会写下 FinalStop reason=failed，随后既不重试也不退出：
+        stdout 永远不再产生流事件，进程只留心跳。此时只能靠 idle 判据收手，代价是
+        白等一整个窗口（实测 915 秒）。识别该信号即可立刻收手——它意味着 CLI 已
+        终局，不可能再交付产物，已完成的分片与断点不受影响。
+        """
+        failure_log = CodeBuddyFailureLog(project_dir)
+        while not finished.wait(2.0):
+            if failure_log.check():
+                concluded.set()
+                _kill_tree(proc)
+                return
+
+    watchdog = None
+    if idle_limit:
+        watchdog = threading.Thread(target=watch_idle, daemon=True)
+        watchdog.start()
+    conclusion_watch = threading.Thread(target=watch_conclusion, daemon=True)
+    conclusion_watch.start()
 
     def feed():
         try:
@@ -448,6 +504,7 @@ def run_structured_stream(command, prompt, project_dir):
     fallback = []
     try:
         for line in proc.stdout:
+            activity = time.monotonic()
             try:
                 value = json.loads(line)
             except ValueError:
@@ -462,15 +519,23 @@ def run_structured_stream(command, prompt, project_dir):
             if isinstance(request_id, str) and request_id not in request_ids:
                 request_ids.add(request_id)
                 print(f"CLI 模型请求第 {len(request_ids)} 轮；等待结构化产物。", file=sys.stderr, flush=True)
-            event_type = (value.get("event") or {}).get("type") if isinstance(value.get("event"), dict) else ""
-            exhausted = stream_capacity_exceeded(value)
+            event = value.get("event") if isinstance(value.get("event"), dict) else {}
+            event_type = event.get("type", "")
+            truncated_tokens += estimate_tokens(_delta_text(event))
+            exhausted = stream_output_truncated(value)
             if time.monotonic() - last_log_check > 1 or event_type in {"message_delta", "message_stop"}:
                 exhausted = capacity_log.check(request_ids) or exhausted
                 last_log_check = time.monotonic()
             if exhausted:
                 _kill_tree(proc)
-                print("模型生成达到容量上限；停止 CLI 自动续写，交由程序拆小并断点续跑。", file=sys.stderr)
-                return subprocess.CompletedProcess(command, CONTEXT_EXCEEDED, "", "")
+                print(
+                    "本轮模型输出达到单次输出上限被截断：已接收约 "
+                    f"{truncated_tokens} token（保守估算，含思维链），"
+                    f"当前单次输出上限 {output_limit} token。"
+                    "这是输出预算不足，不是输入材料超容量；提高“单次输出上限”后重跑本任务即可，材料无需重新分包。",
+                    file=sys.stderr,
+                )
+                return subprocess.CompletedProcess(command, OUTPUT_TRUNCATED, "", "")
             if value.get("type") == "result" and value.get("subtype") == "error_max_turns":
                 # A separately configured CLI cap is a failed invocation, not
                 # evidence that materials exceed capacity or a valid patch.
@@ -480,13 +545,48 @@ def run_structured_stream(command, prompt, project_dir):
                 result = line
             elif "type" not in value:
                 fallback.append(line)
+        if concluded.is_set() and not result:
+            print(
+                "CLI 会话已以失败终局（连接层失败后既不重试也不退出）：stdout 收不到结果，"
+                "已就地终止本 provider 并交由上层立即重试。"
+                "这不是材料超容量、也不是输出预算不足；已完成的分片与断点全部保留。",
+                file=sys.stderr,
+            )
+            return subprocess.CompletedProcess(command, 124, "", "")
+        if stalled.is_set() and not result:
+            print(
+                f"worker 连续 {idle_limit:g} 秒没有任何流事件（无进展），已终止本 provider；"
+                "即将在同一次调用内换用下一个 provider，或交由上层立即重试。"
+                "这不是材料超容量、也不是输出预算不足；已完成的分片与断点全部保留。",
+                file=sys.stderr,
+            )
+            return subprocess.CompletedProcess(command, 124, "", "")
+        # 已拿到最终结果信封时以产物为准：即使看门狗同时触发，也不丢已交付的结果。
         return subprocess.CompletedProcess(command, proc.wait(), result or "".join(fallback), "")
     finally:
+        finished.set()
         if proc.poll() is None:
             _kill_tree(proc)
         proc.wait()
+        if watchdog is not None:
+            watchdog.join(timeout=1)
         sender.join(timeout=1)
         proc.stdout.close()
+
+
+def _delta_text(event: dict) -> str:
+    """Extract streamed text from a partial event without interpreting content."""
+    delta = event.get("delta")
+    if isinstance(delta, dict):
+        text = delta.get("text")
+        if isinstance(text, str):
+            return text
+    choices = event.get("choices")
+    if isinstance(choices, list):
+        return "".join(
+            choice.get("text", "") for choice in choices
+            if isinstance(choice, dict) and isinstance(choice.get("text"), str))
+    return ""
 
 
 def _captured_output_is_valid(path: Path, content: str) -> bool:

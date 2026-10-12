@@ -15,7 +15,11 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# 输入材料超过可用输入预算：只能重新分包，重跑同一请求不会改变结果。
 CONTEXT_EXCEEDED = 64
+# 单轮模型输出达到输出上限：属于输出预算不足，与输入材料规模无关。
+# 与 CONTEXT_EXCEEDED 分开，避免把"模型写了太长"误判成"材料放不下"。
+OUTPUT_TRUNCATED = 67
 _active_budget = ContextVar("model_context_budget", default=None)
 
 
@@ -28,7 +32,10 @@ def estimate_tokens(text: str) -> int:
 @dataclass(frozen=True)
 class ContextBudget:
     input_tokens: int = 300000
-    output_tokens: int = 20000
+    # 单次模型输出上限（token）。推理型模型的思维链同样计入该额度，因此
+    # 单章 Delta/分析的实际输出规模远大于正文本身；实测单章 Delta 约
+    # 2 万~3.5 万 token（保守估算），20000 必然截断，这里留出足够余量。
+    output_tokens: int = 64000
     context_tokens: int = 300000  # Safe shared-window default; explicit zero means documented separate limits.
     reserve_tokens: int = 30000  # Provider instructions, tools and estimation error.
 

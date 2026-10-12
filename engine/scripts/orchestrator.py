@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from events import Event, EventBus
-from context_budget import capacity_scope
+from context_budget import OUTPUT_TRUNCATED, capacity_scope
 from worker_checkpoint import run_checkpointed_partial
 from repair_budget import REPAIR_EXHAUSTED, begin_retry_session
 from pipeline_state import STAGES, PipelineState
@@ -68,7 +68,7 @@ class Config:
     worker_timeout_seconds: int = 1200
     # Immutable per-run Token settings; subprocesses inherit this task's snapshot.
     model_input_tokens: int = 300000
-    model_output_tokens: int = 20000
+    model_output_tokens: int = 64000  # 单次输出上限；必须容纳单章 Delta/分析（含思维链）
     model_context_tokens: int = 300000
     model_reserve_tokens: int = 30000
     worker_window: str = "hidden"
@@ -245,9 +245,24 @@ class Orchestrator:
                 return 2
             if rc == 64:
                 # An unchanged context budget cannot be fixed by redispatching it.
-                self.state.last_error = "当前请求仍超出容量预算；完整材料与检查点已保留，请查看任务包旁的 capacity.json，校正模型容量或继续细分该请求。"
+                self.state.last_error = (
+                    "输入材料超过可用输入预算；完整材料与检查点已保留，"
+                    "请查看任务包旁的 capacity.json，提高模型输入容量或继续细分该请求。"
+                )
                 self.state.save()
                 self.emit("hard_block", stage=stage, detail=self.state.last_error)
+                return 1
+            if rc == OUTPUT_TRUNCATED:
+                # 单轮输出被输出上限截断：属于输出预算不足，与输入材料规模无关。
+                # 重跑同一请求不会改变输出上限，因此这里不做无效重试；
+                # 保留断点，并用与容量阻塞区分开的事件给出可执行的处置指引。
+                self.state.last_error = (
+                    "单轮模型输出达到“单次输出上限”被截断（输入材料并未超容量）；"
+                    "断点与产物已保留。请在设置中提高“单次输出上限”后重跑本章，"
+                    "或将该任务细分。"
+                )
+                self.state.save()
+                self.emit("output_truncated", stage=stage, detail=self.state.last_error)
                 return 1
             if rc == REPAIR_EXHAUSTED:
                 # A failed logical task must not regain its model budget when

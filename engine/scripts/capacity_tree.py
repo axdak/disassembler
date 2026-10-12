@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from bounded_final import split_text, guarded_worker
-from context_budget import ContextBudget, CONTEXT_EXCEEDED, estimate_tokens, admit_pack
+from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, estimate_tokens, admit_pack
 from fault_recovery import digest
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
@@ -235,10 +235,12 @@ class CapacityTree:
                                          context_aliases=[(Path(source[0]), material[0])
                                                           for source, material in zip(self.sources, self.materials)]
                                          + [(Path(source), copy) for source, copy in self.reference_paths.items()])
-            if rc in {130, CONTEXT_EXCEEDED}:
+            if rc in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
                 state["attempts"] -= 1
                 if rc == CONTEXT_EXCEEDED:
                     state["split_required"] = True
+                # OUTPUT_TRUNCATED 表示单轮输出被输出上限截断：再拆分材料不会
+                # 增加输出额度，因此不计为语义失败、也不触发继续分包。
                 save_json(ledger, state)
                 raise TreeFailure(rc)
             if rc in {124, 408, 429, 502, 503, 504}:

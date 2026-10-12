@@ -6,6 +6,8 @@ import tempfile
 import pytest
 from pathlib import Path
 
+from context_budget import ContextBudget
+
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKER = ROOT / "tools" / "agent_worker.py"
@@ -246,7 +248,8 @@ def test_codebuddy_preserves_fresh_valid_direct_json_over_stdout_summary():
     assert schema["required"] == ["章节", "新增元素", "修改元素"]
     assert "--max-turns" not in payload["argv"]
     assert "StructuredOutput" in payload["stdin"]
-    assert payload["max_output_tokens"] == "20000"
+    # 单次输出上限必须容纳单章 Delta（含思维链），不能用 20000 这类过小默认值。
+    assert payload["max_output_tokens"] == str(ContextBudget().output_tokens)
 
 
 def test_codebuddy_rejects_invalid_json_stdout_without_overwriting_existing_file():

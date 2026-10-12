@@ -7,7 +7,7 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 from __future__ import annotations
 
 from local_json_patch import delta_repair_scope, apply_scoped_patch
-from context_budget import CONTEXT_EXCEEDED
+from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED
 
 import hashlib
 import json
@@ -262,6 +262,7 @@ def recover_artifact(
                     engine / "scripts/recovery_materials.py", engine / "scripts/local_json_patch.py",
                     engine / "scripts/context_budget.py",
                     engine / "scripts/registered_types.py", engine / "scripts/story_schema_rules.py",
+                    engine / "scripts/governance_contract.py", engine / "scripts/governance_introduction.py",
                     engine / "scripts/compress_tags.py", engine / "tools/worker_context.py"])
     configuration = {key: value for key, value in os.environ.items()
                      if key.startswith(("ND_RECOVERY_", "ND_AGY_", "ND_CODEBUDDY_", "ND_AGENT_"))}
@@ -558,7 +559,7 @@ def recover_artifact(
             if rc != 0:
                 attempt.update(status="diagnosis_failed", returncode=rc)
                 persist()
-                if rc in {130, CONTEXT_EXCEEDED}:
+                if rc in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
                     state["next_strategy"] = index
                     persist()
                     return rc
@@ -585,7 +586,7 @@ def recover_artifact(
             attempt["repair_scope"] = list(scope)
         else:
             rc = invoke("auto_" + task, workspace, common + f"\n本次必须修复完整候选产物，只写：{candidate}\n", candidate, selected_command)
-        if rc in {130, CONTEXT_EXCEEDED}:
+        if rc in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
             state["next_strategy"] = index
             persist()
             return rc
@@ -620,7 +621,7 @@ def recover_artifact(
                          '"checks":{"content_preserved":true或false,"contract_unchanged":true或false,"evidence_supported":true或false},'
                          '"issues":[],"reason":"复核依据"}。输出位置：' + str(review))
         rc = invoke("recovery_review", workspace, review_prompt, review, selected_command)
-        if rc in {130, CONTEXT_EXCEEDED}:
+        if rc in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
             state["next_strategy"] = index
             persist()
             return rc
@@ -644,6 +645,15 @@ def recover_artifact(
     state["status"] = "exhausted"
     persist()
     emit("本故障的不同修复策略已用尽，保留证据与断点", ledger=str(ledger))
+    # 让"停下来"这件事可操作：直接给出未修复产物、断点和最后一轮失败反馈的位置，
+    # 使用者不必翻日志猜原因，也能确认重跑会从同一断点继续。
+    print("自动恢复已用尽全部策略：程序纠错与多轮模型修复均未能消除失败"
+          "（与容量/输出预算无关）。断点、证据与历史尝试均已保留。\n"
+          f"  未修复产物：{output}\n"
+          f"  恢复账本：{ledger}", flush=True)
+    last_feedback = workspace / "failure_after.md"
+    if last_feedback.is_file():
+        print(f"  本轮最后失败反馈：{last_feedback}", flush=True)
     return REPAIR_EXHAUSTED
 
 

@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from context_budget import ContextBudget, CONTEXT_EXCEEDED, estimate_tokens, admit_pack
+from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, estimate_tokens, admit_pack
 from worker_checkpoint import atomic_write_bytes
 from merge_delta import save_json, merge_delta
 from apply_governance_ops import apply_ops
@@ -393,6 +393,12 @@ def run_bounded_final(command, project: Path, pack: Path, draft: Path, worker, *
             state["attempts"][unit_id] = attempts
             save_json(state_path, state)
             return rc
+        if rc == OUTPUT_TRUNCATED and not changed:
+            # 单轮输出被输出上限截断：拆分材料不会增加输出额度，直接保留断点。
+            state["attempts"][unit_id] = attempts
+            state["feedback"] = "单轮模型输出达到输出上限；提高“单次输出上限”后重跑本单元。"
+            save_json(state_path, state)
+            return rc
         if rc == CONTEXT_EXCEEDED and not changed:
             state["attempts"][unit_id] = attempts
             if split_pending_unit(state, state_path, "实际调用超限"):
@@ -498,10 +504,12 @@ def run_bounded_final(command, project: Path, pack: Path, draft: Path, worker, *
             if not accepted or changed:
                 atomic_write_bytes(candidate, original.read_bytes())
                 state["feedback"] = "独立复核未通过：" + json.dumps(verdict, ensure_ascii=False)
-                if rc not in {130, CONTEXT_EXCEEDED, 124, 408, 429, 502, 503, 504}:
+                # 输出截断与传输类失败都不能靠重跑同一请求解决；保留待复核提案，
+                # 由上游按准确诊断处理。
+                if rc not in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, 124, 408, 429, 502, 503, 504}:
                     state.pop("pending_proposal", None)
                 save_json(state_path, state)
-                if rc in {130, CONTEXT_EXCEEDED, 124, 408, 429, 502, 503, 504}:
+                if rc in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, 124, 408, 429, 502, 503, 504}:
                     return rc
                 continue
         snapshot = session / f"snapshot_{unit_id}_{attempts}.json"

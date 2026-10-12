@@ -8,6 +8,16 @@ from pathlib import Path
 from capacity_tree import CapacityTree, TreeFailure, merge_json
 from context_budget import CONTEXT_EXCEEDED
 from merge_delta import save_json
+from synopsis_contract import SYNOPSIS_SYNTHESIS_BUDGETS, synopsis_section_spec
+
+# 结构与生成端提示词共用同一来源（`synopsis_contract`），避免归并时把分节弄丢。
+_SECTION_SPEC = synopsis_section_spec()
+_SECTION_RULE = (
+    "输出的简介必须结构化分节：按顺序固定使用 " + _SECTION_SPEC +
+    " 四个分节标题，标题独占一行写在段首，正文接在标题之后，节与节之间空一行；"
+    "四个分节必须齐全且顺序固定，不得新增、改名、合并或省略，"
+    "不得写成条目清单、表格或任何 Markdown 标记。"
+)
 
 
 def combine_introductions(tree, proposals, **options):
@@ -43,7 +53,8 @@ def combine_introductions(tree, proposals, **options):
         tree.root, tree.command, tree.worker,
         "核对本周期多份简介候选及其原文依据，归并成一份覆盖已处理故事的连贯简介。"
         "候选不是原文事实；矛盾须查证，不拼接多份版本，不编造后续章节。"
-        "本任务仅生成介绍.描述，不得改动或删减原文、分析、Delta及元素档案。",
+        "本任务仅生成介绍.描述，不得改动或删减原文、分析、Delta及元素档案。"
+        + _SECTION_RULE,
         "周期简介.json", [(evidence, "完整简介候选；旧版与分片原件均保留")],
         **{**options, "reference_sources": tree.reference_sources +
            [(Path(path), role) for path, _, role in tree.sources], "adaptive_overviews": True})
@@ -54,11 +65,14 @@ def combine_introductions(tree, proposals, **options):
                 or not isinstance(content["描述"], str) or not content["描述"].strip()):
             raise ValueError('简介归并必须只输出 {"描述":"完整新版简介"}')
 
-    for budget in (2000, 1000, 500, 250):
+    for budget in SYNOPSIS_SYNTHESIS_BUDGETS:
         try:
             value, _ = synthesis.request(
                 f"完整候选根节点：{refs[-1]}\n候选关联索引：{overview}\n"
                 f"依据原件写一份约 {budget} 字以内的完整简介，覆盖核心主线。"
+                "这是替换旧简介的完整新版，不是在上版基础上追加段落；"
+                "篇幅上限是契约，不得因为候选变多而突破，分节标题也计入字数。"
+                + _SECTION_RULE +
                 'content 仅为 {"描述":"完整新版简介"}；不是新增段落，不含过程笔记。',
                 f"周期简介归并（描述预算 {budget} 字）", validate_content=validate)
             if not synthesis.unchanged():

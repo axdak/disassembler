@@ -39,6 +39,7 @@ from normalize_story_schema import (
 from registered_types import align_registered_types
 from story_schema_rules import (
     COLLECTION_KEYS,
+    DEFAULTS,
     VALID_FIELDS,
     TRACEABLE_COLLECTION_KEYS,
     DETAIL_REF_RE,
@@ -65,11 +66,41 @@ def _ensure_detail(item: Dict[str, Any]) -> Dict[str, Any]:
     return item["详情"]
 
 
+_MISSING = object()
+
+
+def _fits_top_level_contract(collection: str, field: str, value: Any) -> bool:
+    """判断详情里的值是否符合该字段在顶层的类型契约。
+
+    以 ``DEFAULTS`` 为唯一类型来源，只做"形状"判定，不解释语义：
+    类型不符就不搬，宁可留给校验器报错，也不制造新的类型错误。
+    """
+    default = DEFAULTS.get(collection, {}).get(field, _MISSING)
+    if default is _MISSING or field == "详情":
+        return False
+    if isinstance(default, bool):
+        # bool 是 int 的子类，必须先判，否则 False/True 会被当成重量级。
+        return isinstance(value, bool)
+    if isinstance(default, int):
+        return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(default, str):
+        return isinstance(value, str) and bool(value.strip())
+    if isinstance(default, list):
+        return isinstance(value, list) and bool(value) and all(isinstance(entry, str) for entry in value)
+    return False
+
+
 def relocate_element_fields(delta: Dict[str, Any]) -> List[str]:
     """按同一字段契约无损迁移位置；冲突原样保留，交原校验器/模型处理。
 
     保全比较也使用此函数，仅在内存中的副本上归一化位置，不改变文本、
     类型或列表内容。不能用其他元素、其他字段中的同文替代本字段。
+
+    双向迁移：
+    - 顶层 → 详情：顶层出现规范外字段时迁入详情（既有行为）。
+    - 详情 → 顶层：模型把标准字段整组写进详情、导致顶层"缺少标准字段"
+      且详情内类型不合规（如 ``重量级`` 写成 int）时，按顶层契约把原值搬回。
+      没有这一步，该错误在程序侧无任何消除路径，只能反复交给模型重写。
     """
     report = []
     for section_name in ("新增元素", "修改元素"):
@@ -93,6 +124,19 @@ def relocate_element_fields(delta: Dict[str, Any]) -> List[str]:
                         continue
                     detail[field] = item.pop(field)
                     report.append(f"{label} 从顶层迁回详情（原值完整保留）")
+                detail = item.get("详情")
+                if not isinstance(detail, dict):
+                    continue
+                for field in list(detail):
+                    # 名称由身份对齐负责，不从这里推断；顶层已有同名值时保留详情内副本。
+                    if field not in allowed or field in item or field in {"名称", "详情"}:
+                        continue
+                    value = detail[field]
+                    if not _fits_top_level_contract(collection, field, value):
+                        continue
+                    label = f"{section_name}.{collection}[{item.get('名称', '')}].{field}"
+                    item[field] = detail.pop(field)
+                    report.append(f"{label} 从详情迁回顶层（类型符合顶层契约，原值完整保留）")
     return report
 
 

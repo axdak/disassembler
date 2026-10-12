@@ -56,7 +56,8 @@ class RunConfig(BaseModel):
     worker_timeout_seconds: int = Field(default=1200, gt=0)
     # Token 容量与下面的字符分包阈值独立；运行时固定快照，不热改活跃任务。
     model_input_tokens: int = Field(default=300000, gt=0, strict=True)
-    model_output_tokens: int = Field(default=20000, gt=0, strict=True)
+    # 单次输出上限必须容纳单章 Delta/分析（含推理型模型的思维链），20000 会导致长输出被截断。
+    model_output_tokens: int = Field(default=64000, gt=0, strict=True)
     model_context_tokens: int = Field(default=300000, ge=0, strict=True)
     model_reserve_tokens: int = Field(default=30000, ge=0, strict=True)
     max_attempts: int = Field(default=10, gt=0)

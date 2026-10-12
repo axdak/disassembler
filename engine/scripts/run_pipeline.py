@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from chronology import chapter_time
+from engine_contract import contract_version
 from governance_contract import normalize_governance_patch, periodic_introduction_errors
 from merge_delta import save_json as save_atomic_json
 from story_schema_rules import COLLECTION_KEYS
@@ -106,6 +107,16 @@ MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d
 INTERNAL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("ND_COMMAND_TIMEOUT", "600"))
 DEFAULT_WORKER_TIMEOUT_SECONDS = int(os.getenv("ND_WORKER_TIMEOUT", "1200"))
 DEFAULT_WORKER_RETRIES = int(os.getenv("ND_WORKER_RETRIES", "2"))
+# 无进展（idle）超时上限：worker 连续多久没有任何输出即判定卡死，立即终止并快速重试。
+# 它与上面的墙钟超时是两个独立判据：墙钟按"总共跑了多久"终止，会误杀正在长时间
+# 生成的一次模型调用；idle 按"还有没有进展"终止。
+# 默认 900 秒来自实测（2026-10-11/12 斗破苍穹 worker 日志 335 份）：
+#   - 健康任务的最长合法无输出窗口约 600 秒（单轮长生成，delta_ch012）；
+#   - 真实卡死是全程零输出并撞满 1200 秒墙钟（audit_correction 两次 1171 秒，
+#     其后的成功尝试仅用 150 秒）。
+# 900 秒高于已知合法窗口、且低于墙钟，因此既不误杀又能更早收手。
+# 设 0 表示关闭该判据，仅受墙钟保护。可用 ND_WORKER_IDLE_TIMEOUT 覆盖。
+DEFAULT_WORKER_IDLE_SECONDS = int(os.getenv("ND_WORKER_IDLE_TIMEOUT", "900"))
 RUN_MODES = ("auto", "subagent", "serial", "worker")
 WORKER_PROVIDERS = ("manual", "auto", "agy", "codebuddy")
 WORKER_WINDOWS = ("hidden", "powershell", "powershell-keep")
@@ -282,13 +293,36 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     proc.wait()
 
 
+# 无进展判据的数值下限：防止误配置（例如 5 秒）把正常的启动/初始化阶段直接掐断。
+MIN_WORKER_IDLE_SECONDS = 60.0
+
+
+def worker_idle_limit(timeout: float = 0) -> float:
+    """无进展超时上限（秒）；0 表示关闭。
+
+    timeout>0 时上限不超过墙钟超时（更长没有意义），下限 MIN_WORKER_IDLE_SECONDS。
+    ND_WORKER_IDLE_TIMEOUT 可覆盖默认值；0 表示只保留墙钟判据。
+    """
+    value = DEFAULT_WORKER_IDLE_SECONDS
+    if value <= 0:
+        return 0.0
+    limit = max(MIN_WORKER_IDLE_SECONDS, float(value))
+    return min(limit, timeout) if timeout else limit
+
+
 def stream_shell_command(
     command: str,
     cwd: Path,
     env: Dict[str, str],
     timeout: float,
 ) -> Tuple[int, str]:
-    """Run a shell command while forwarding combined stdout/stderr live."""
+    """Run a shell command while forwarding combined stdout/stderr live.
+
+    两种独立的终止判据，返回码同为 124（可重试），但诊断信息必须能区分：
+    - 无进展：连续 idle_limit 秒没有任何 worker 输出，先于墙钟终止；
+    - 墙钟：总时长达到 timeout。
+    心跳行是自己打印的，不算进展，因此不会掩盖真正的卡死。
+    """
     proc = subprocess.Popen(
         command,
         shell=True,
@@ -319,6 +353,9 @@ def stream_shell_command(
     started = time.monotonic()
     heartbeat = started + 30
     deadline = started + timeout if timeout else None
+    idle_limit = worker_idle_limit(timeout)
+    last_output = started
+    longest_gap = 0.0
 
     def forward(line: str) -> None:
         output_parts.append(line)
@@ -331,41 +368,56 @@ def stream_shell_command(
                 stream.write(line)
 
     def drain_output() -> None:
+        nonlocal last_output, longest_gap
         while True:
             try:
                 line = output_queue.get_nowait()
             except queue.Empty:
                 break
+            gap = time.monotonic() - last_output
+            if gap > longest_gap:
+                longest_gap = gap
+            last_output = time.monotonic()
             forward(line)
+
+    def stop(message: str, returncode: int) -> Tuple[int, str]:
+        """统一的终止收尾：先杀进程树，再回传已转发过的完整输出。"""
+        nonlocal windows_job
+        _close_windows_job(windows_job)
+        windows_job = None
+        _kill_tree(proc)
+        reader.join(timeout=1)
+        drain_output()
+        forward(message)
+        return returncode, "".join(output_parts)
 
     try:
         while True:
             drain_output()
             _ce = _get_cancel_event()
             if _ce is not None and _ce.is_set():
-                _close_windows_job(windows_job)
-                windows_job = None
-                _kill_tree(proc)
-                reader.join(timeout=1)
-                drain_output()
-                message = "[cancelled by user]\n"
-                forward(message)
-                return 130, "".join(output_parts)
+                return stop("[cancelled by user]\n", 130)
             if proc.poll() is not None:
                 break
-            if deadline is not None and time.monotonic() >= deadline:
-                _close_windows_job(windows_job)
-                windows_job = None
-                _kill_tree(proc)
-                reader.join(timeout=1)
-                drain_output()
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
                 message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=""), timeout)
+                message += (f"本次最长无输出窗口 {longest_gap:.0f} 秒"
+                            f"（无进展上限 {idle_limit:g} 秒）。\n" if idle_limit else "")
+                return stop(message, 124)
+            if idle_limit and now - last_output >= idle_limit:
+                # 零输出的 worker 再等下去只会消耗墙钟预算：立即终止，交由上层
+                # 快速重试/切换 provider。进程退出后 stdout 关闭，读取线程自然结束。
+                message = (
+                    f"worker 连续 {idle_limit:g} 秒没有任何输出（无进展），已终止并交由上层立即重试。\n"
+                    f"已运行 {now - started:.0f} 秒，其中最长无输出窗口 {longest_gap:.0f} 秒；"
+                    f"墙钟上限 {timeout:g} 秒。\n"
+                )
+                return stop(message, 124)
+            if now >= heartbeat:
+                message = f"[任务仍在运行，已等待 {int(now - started)} 秒；尚未收到完成结果]\n"
                 forward(message)
-                return 124, "".join(output_parts)
-            if time.monotonic() >= heartbeat:
-                message = f"[任务仍在运行，已等待 {int(time.monotonic() - started)} 秒；尚未收到完成结果]\n"
-                forward(message)
-                heartbeat = time.monotonic() + 30
+                heartbeat = now + 30
             time.sleep(0.1)
 
         reader.join(timeout=1)
@@ -440,6 +492,12 @@ def run_visible_powershell_command(
         )
         windows_job = _create_windows_kill_on_close_job(proc)
         deadline = time.monotonic() + timeout + 10 if timeout else None
+        # 与 hidden 窗口同源的无进展判据：可见窗口把输出 Tee 到日志文件，
+        # 因此"日志文件不再增长"就等于"没有进展"。keep_open 模式下命令结束后
+        # 脚本还会停在 Read-Host 等用户按键，此时静默属于正常，故不启用该判据。
+        idle_limit = worker_idle_limit(timeout) if not keep_open else 0.0
+        last_size = log_path.stat().st_size if log_path.exists() else 0
+        last_progress = time.monotonic()
         try:
             while proc.poll() is None:
                 cancel_event = _get_cancel_event()
@@ -449,6 +507,21 @@ def run_visible_powershell_command(
                     _kill_tree(proc)
                     proc.wait()
                     return 130, "[cancelled by user]\n"
+                if idle_limit:
+                    size = log_path.stat().st_size if log_path.exists() else 0
+                    if size != last_size:
+                        last_size, last_progress = size, time.monotonic()
+                    elif time.monotonic() - last_progress >= idle_limit:
+                        _close_windows_job(windows_job)
+                        windows_job = None
+                        _kill_tree(proc)
+                        proc.wait()
+                        message = (f"worker 连续 {idle_limit:g} 秒没有任何输出（无进展），"
+                                   "已终止并交由上层立即重试。\n")
+                        previous = (log_path.read_text(encoding="utf-8", errors="replace")
+                                    if log_path.exists() else "")
+                        log_path.write_text(previous + message, encoding="utf-8")
+                        return 124, previous + message
                 if deadline is not None and time.monotonic() >= deadline:
                     _close_windows_job(windows_job)
                     windows_job = None
@@ -1286,6 +1359,23 @@ def _chapter_receipt_matches(paths: Dict[str, Path], receipt: dict) -> bool:
                 and hashlib.sha256(paths["after"].read_bytes()).hexdigest() == receipt.get("story_sha256"))
     except (OSError, TypeError, ValueError, AttributeError):
         return False
+
+
+def receipt_shortcut_allowed(paths: Dict[str, Path], receipt: dict) -> bool:
+    """回执快照的版本门禁：产物未变**且**签发契约与当前程序一致才可免检放行。
+
+    回执只证明"这份产物在该版本的程序下通过过"。程序之后收紧校验、修好纠错或改了
+    结构规则时，旧回执不再能证明当前程序也会接受它，此时必须放弃这条捷径，回落到
+    `is_chapter_complete` 的完整复验（重跑结构校验并核对校验报告状态）。
+    这是**只收紧、不放开**的改动：跨版本只会多验一遍，绝不会重跑模型或重新生成
+    已完成章节，也不会因此把章节判为未完成。
+    缺少 contract 字段的历史回执一律按跨版本处理。
+    """
+    return (
+        bool(receipt)
+        and receipt.get("contract") == contract_version()
+        and _chapter_receipt_matches(paths, receipt)
+    )
 
 
 def is_chapter_complete(project_dir: Path, chapter: Path) -> bool:
@@ -2513,13 +2603,17 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     p = artifact_paths(project_dir, chapter)
     receipt_path = p["after"].with_suffix(".commit.json")
     receipt = load_json(receipt_path, {})
-    if not force and receipt and _chapter_receipt_matches(p, receipt):
+    contract = contract_version()
+    if not force and receipt_shortcut_allowed(p, receipt):
         if receipt.get("published") or receipt.get("story_sha256") == hashlib.sha256(story.read_bytes()).hexdigest():
             result = _record_chapter_progress(project_dir, chapter, seq)
             receipt["published"] = True
             save_json(receipt_path, receipt)
             return result
     if is_chapter_complete(project_dir, chapter) and not force:
+        # 跨版本回执会走到这里：产物依然有效（本分支内含完整结构复验），
+        # 只是不能再凭旧回执免检。不重跑模型、不重新生成、也不改写进度，
+        # 避免把已推进的显示状态回退到步骤 2。
         print(f"第{seq:03d}章已完成，跳过。使用 --force 可重新提交。")
         return 0
     if not p["analysis"].is_file():
@@ -2604,7 +2698,7 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     # published once, after validation and diff succeed; no rollback window exists.
     # Invalidate old evidence before touching snapshots, including legacy --force
     # submissions whose historical snapshots predate publication receipts.
-    save_json(receipt_path, {"published": False})
+    save_json(receipt_path, {"published": False, "contract": contract})
     shutil.copy2(story, p["before"])
     candidate = p["before"].with_name(f".chapter_candidate_{seq:03d}.json")
     shutil.copy2(story, candidate)
@@ -2626,8 +2720,10 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
                 return rc
         # A pending receipt prevents prepublication snapshots from looking complete.
         # Hashes also allow recovery after replace but before the progress update.
+        # contract 记录"本回执由哪个版本的校验语义签发"，供跨版本门禁判定。
         receipt = {
             "published": False,
+            "contract": contract,
             "story_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
             "artifacts": {key: hashlib.sha256(p[key].read_bytes()).hexdigest()
                           for key in ("analysis", "delta", "before", "diff", "delta_report", "chapter_report")},

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import run_pipeline as pipeline
+from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED
 from merge_delta import save_json
 from provider_stream import CodeBuddyCapacityLog
 from story_delivery import ensure_delivery_governance, prepare_delivery, finish_introduction
@@ -23,8 +24,10 @@ def test_stream_length_stops_before_consuming_fake_success():
     rc, artifact, args = invoke_cli("codebuddy", "ND_CODEBUDDY_BIN",
                                     {"FAKE_CLI_STDOUT": "\n".join(json.dumps(e) for e in events)},
                                     output_name="correction.json", task_type="audit_correction")
-    assert rc.returncode == 64
+    # 输出被截断只说明输出预算不足，不能报成"输入材料超容量"（那会让上层不断拆分材料）。
+    assert rc.returncode == OUTPUT_TRUNCATED != CONTEXT_EXCEEDED
     assert artifact == ""
+    assert "不是输入材料超容量" in rc.stdout
     tools = args["argv"][args["argv"].index("--tools") + 1]
     assert tools == "StructuredOutput"
     assert "mcp__nd_context__read_context" in args["argv"][args["argv"].index("--allowedTools") + 1]
@@ -81,7 +84,7 @@ def test_codebuddy_masked_length_uses_matching_diagnostic_id(tmp_path):
                                    {"FAKE_CLI_STDOUT": json.dumps(event),
                                     "FAKE_CLI_CAPACITY_LOG": "1", "CODEBUDDY_CONFIG_DIR": str(tmp_path)},
                                    output_name="correction.json", task_type="audit_correction")
-    assert result.returncode == 64 and artifact == ""
+    assert result.returncode == OUTPUT_TRUNCATED and artifact == ""
 
 
 def test_capacity_log_ignores_old_and_other_worker_requests(tmp_path):

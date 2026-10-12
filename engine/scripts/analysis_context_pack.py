@@ -37,6 +37,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from story_schema_rules import COLLECTION_KEYS, SUPPLEMENTARY_TAGS_DETAIL_KEY, parse_supplementary_tags
 from prompt_loader import render_prompt
 from chapter_naming import title_slug_from_filename
+from synopsis_contract import SYNOPSIS_MAX_CHARS
 
 TYPE_TO_COLLECTION = {
     "角色": "角色集",
@@ -431,7 +432,9 @@ def summarize_story_structure(story: Dict[str, Any], max_items: int = 80) -> str
         lines.append(f"- 标题: {intro.get('标题', '')}")
         desc = intro.get("描述", "")
         if desc:
-            lines.append(f"- 描述: {str(desc)[:500]}")
+            # 任务包只消费简介前 SYNOPSIS_MAX_CHARS 字（与生成端契约同源）。
+            # 超过部分在这里被丢弃，因此让简介无限变长没有收益，只有体积与预算成本。
+            lines.append(f"- 描述: {str(desc)[:SYNOPSIS_MAX_CHARS]}")
     for key in COLLECTION_KEYS:
         items = story.get(key, []) if isinstance(story, dict) else []
         lines.append(f"- {key}: {len(items)}")

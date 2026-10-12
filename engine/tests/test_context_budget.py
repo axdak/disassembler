@@ -7,10 +7,21 @@ from context_budget import ContextBudget, admit_pack, inspect_pack
 
 
 def test_shared_window_reserves_output_and_overhead():
+    default = ContextBudget()
     budget = ContextBudget(input_tokens=300000, context_tokens=300000)
-    assert budget.usable_input == 250000
-    assert ContextBudget().usable_input == 250000
+    # 可用输入 = min(输入上限, 总窗口 - 单次输出上限) - 安全预留
+    assert budget.usable_input == 300000 - default.output_tokens - default.reserve_tokens
+    assert default.usable_input == 300000 - default.output_tokens - default.reserve_tokens
     assert ContextBudget(context_tokens=0).usable_input == 270000
+
+
+def test_default_output_budget_fits_long_structured_artifacts():
+    """单次输出上限必须容纳单章 Delta/分析（推理型模型的思维链也计入）。
+
+    实测单章 Delta 约 2 万~3.5 万 token（保守估算）；输出上限过小会让长产物
+    在输出侧被截断，而输入材料本身远未超容量。
+    """
+    assert ContextBudget().output_tokens >= 64000
 
 
 def test_overflow_preserves_complete_evidence(tmp_path, monkeypatch):
