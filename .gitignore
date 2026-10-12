@@ -23,6 +23,9 @@ out/
 # Superpowers task briefs, review packages, and durable progress ledger
 .superpowers/sdd/
 
+# Agent 工作记忆与本地会话数据（仅本机使用，不进版本库）
+.workbuddy/
+
 # OS
 Thumbs.db
 .DS_Store
