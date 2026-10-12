@@ -90,7 +90,7 @@ def test_commit_rejects_top_level_array_with_actionable_repair_context(tmp_path,
     chapter_dir = project / "原文拆解"
     chapter_dir.mkdir(parents=True)
     chapter = chapter_dir / "第001章_测试.md"
-    chapter.write_text("# 测试章节\n", encoding="utf-8")
+    chapter.write_text("# 测试章节\n\n用于验证损坏 Delta 修复流程的正文。\n", encoding="utf-8")
     (chapter_dir / "_索引.json").write_text(
         json.dumps(
             {"chapters": [{"seq": 1, "filename": chapter.name, "title": "测试"}]},

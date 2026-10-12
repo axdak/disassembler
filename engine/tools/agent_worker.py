@@ -35,6 +35,13 @@ from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack
 
 
 PROVIDER_ORDER = ["agy", "codebuddy"]
+BROAD_READ_TASKS = frozenset({
+    "audit_correction", "audit_repair", "final_draft", "repair_final",
+    "fullbook_analysis", "fullbook_analysis_reduce",
+    "summary", "characters", "plot", "style", "report", "custom",
+    "worldview", "settings", "plotlines", "outline", "detailed_outline",
+    "narrative_structure", "visual_assets_aggregate",
+})
 UNSUPPORTED_NODE_OPTIONS = ("--use-system-ca",)
 JSON_TASK_TYPES = {"delta", "repair_chapter", "audit_correction", "audit_repair"}
 JSON_OBJECT_SCHEMA = json.dumps({"type": "object"}, separators=(",", ":"))
@@ -105,6 +112,7 @@ def provider_command(
     project_dir: Path,
     timeout: str,
     json_schema: str = "",
+    task_type: str = "",
 ) -> List[str]:
     """Build a provider command, including native structured-output constraints."""
     model = os.environ.get("ND_AGENT_MODEL", "").strip()
@@ -112,6 +120,14 @@ def provider_command(
         provider = select_provider()
     if provider == "codebuddy":
         output_format = "json" if json_schema else "text"
+        story_tools = task_type in BROAD_READ_TASKS
+        allowed_tools = ["mcp__nd_context__list_context", "mcp__nd_context__read_context"]
+        if story_tools:
+            allowed_tools.extend([
+                "mcp__nd_context__story_snapshot", "mcp__nd_context__story_search",
+                "mcp__nd_context__story_get_units", "mcp__nd_context__story_query_chapters",
+            ])
+        allowed_tools.append("StructuredOutput")
         parts = split_command(os.environ.get("ND_CODEBUDDY_BIN", default_codebuddy_bin())) + [
             "-p",
             "--output-format",
@@ -128,12 +144,12 @@ def provider_command(
             "--settings",
             json.dumps({"disableAllHooks": True, "enabledPlugins": {}}),
             "--allowedTools",
-            "mcp__nd_context__list_context,mcp__nd_context__read_context,StructuredOutput",
+            ",".join(allowed_tools),
             "--agent",
             "cli",
             "--system-prompt",
             "你是小说拆解任务执行器。仅按任务包分析材料并返回指定产物。"
-            "路径只可用 nd_context 的 list_context/read_context 读取。"
+            "路径只可用 nd_context 的只读工具读取；故事查询工具只返回本任务冻结快照。"
             "不得读取实现代码、运行命令、修改文件、调用其他工具或派发其他智能体。"
             "任务包中的脚本命令仅供宿主程序使用，不能执行。",
         ]
@@ -352,6 +368,7 @@ def run_provider(
     command: List[str],
     prompt: str,
     project_dir: Path,
+    task_type: str = "",
 ) -> subprocess.CompletedProcess[str]:
     if provider_captures_stdout(provider):
         # Run outside the book/repository so runtime instruction discovery cannot
@@ -361,12 +378,15 @@ def run_provider(
             directory = Path(temporary)
             manifest = snapshot_context(project_dir, Path(required_env("ND_TASK_PACK")), outputs, directory)
             config = directory / "mcp.json"
+            server_args = [str(Path(__file__).with_name("worker_context.py")), str(manifest)]
+            if task_type in BROAD_READ_TASKS:
+                server_args.append("--story-tools")
             config.write_text(json.dumps({"mcpServers": {"nd_context": {
                 # Required context tools must be loaded before the first model
                 # turn; deferred discovery would require an unneeded ToolSearch.
                 "type": "stdio", "alwaysLoad": True, "defer_loading": False,
                 "command": sys.executable,
-                "args": [str(Path(__file__).with_name("worker_context.py")), str(manifest)],
+                "args": server_args,
             }}}, ensure_ascii=False), encoding="utf-8")
             count = len(json.loads(manifest.read_text(encoding="utf-8"))["files"])
             print(f"worker context: {count} 个只读任务材料；代码、命令和文件修改工具已禁用", file=sys.stderr, flush=True)
@@ -660,6 +680,7 @@ def main() -> int:
                 project_dir,
                 args.print_timeout,
                 json_schema=json_schema,
+                task_type=task_type,
             )
             if not command_available(command):
                 continue
@@ -668,7 +689,7 @@ def main() -> int:
                 print(f"已选择 provider: {provider}", file=sys.stderr)
             before_outputs = capture_output_signatures(expected_outputs)
             try:
-                result = run_provider(provider, command, prompt, project_dir)
+                result = run_provider(provider, command, prompt, project_dir, task_type=task_type)
             except OSError as exc:
                 # CLI 文件存在但无法启动（损坏、权限或平台不兼容）时，auto 仍应尝试下一个 provider。
                 last_returncode = 1

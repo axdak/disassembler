@@ -47,19 +47,13 @@ python {{ run_pipeline_path }} finalize {{ project_dir }}
 ### {{ ref.title }}
 
 文件：`{{ ref.path }}`
-
-```markdown
-{{ ref.excerpt }}
-```
 {% endfor %}{% endif %}
 {%- if audit_refs %}
 ## 周期审计参考
 {% for ref in audit_refs %}
 ### {{ ref.name }}
 
-```{{ ref.lang }}
-{{ ref.excerpt }}
-```
+文件：`{{ ref.path }}`
 {% endfor %}{% endif %}
 
 ## 整理清单

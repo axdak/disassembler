@@ -121,7 +121,7 @@ if DEFAULT_WORKER_LOOP not in WORKER_LOOPS:
 # 字符预算而不伪造精确 token 计数。默认 524288 = 512×1024，对应 512K 字符预算，
 # 适配长上下文模型；调用方可按实际模型覆盖。
 DEFAULT_AUDIT_MAX_CONTEXT_CHARS = 524_288
-AUDIT_CONTEXT_FORMAT_VERSION = 4
+AUDIT_CONTEXT_FORMAT_VERSION = 5
 AUDIT_RESOLVED_STATUSES = {"committed", "covered_by_children"}
 
 
@@ -1638,7 +1638,8 @@ def get_previous_correction(project_dir: Path, current_start: int) -> Optional[D
 
 
 def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, start: int, end: int) -> str:
-    names_mentioned = set()
+    """Select current formal records using Delta names only as typed routing hints."""
+    names_mentioned: Dict[str, set[str]] = {key: set() for key in COLLECTION_KEYS}
     for seq in range(start, end + 1):
         chapter = chapter_by_seq(project_dir, seq)
         if not chapter:
@@ -1653,136 +1654,80 @@ def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, sta
                 for c_key in COLLECTION_KEYS:
                     for item in bucket.get(c_key, []):
                         if isinstance(item, dict) and item.get("名称"):
-                            names_mentioned.add(item["名称"])
+                            names_mentioned[c_key].add(item["名称"])
 
-    if not names_mentioned:
+    if not any(names_mentioned.values()):
         return "无"
 
-    relevant = []
+    relevant: Dict[str, List[dict]] = {key: [] for key in COLLECTION_KEYS}
     for key in COLLECTION_KEYS:
         for item in story_data.get(key, []):
             if not isinstance(item, dict):
                 continue
             name = item.get("名称")
-            if name in names_mentioned:
-                relevant.append(json.dumps(item, ensure_ascii=False, indent=2))
+            if name in names_mentioned[key]:
+                relevant[key].append(item)
                 continue
             aliases = item.get("别名", [])
-            if isinstance(aliases, list) and any(a in names_mentioned for a in aliases):
-                relevant.append(json.dumps(item, ensure_ascii=False, indent=2))
+            if isinstance(aliases, list) and any(a in names_mentioned[key] for a in aliases):
+                relevant[key].append(item)
 
+    relevant = {key: items for key, items in relevant.items() if items}
     if not relevant:
         return "无"
-    res = "\n\n".join(relevant)
-    return res
+    return json.dumps(relevant, ensure_ascii=False, indent=2)
+
+
+def extract_relevant_elements_for_material(story_data: dict, material: str) -> str:
+    """Return current formal records whose name or alias occurs in task material.
+
+    Historical Delta files are merge provenance, while ``story_data`` is the
+    current single source of truth. One-character aliases are excluded from
+    automatic matching because they create broad false positives in Chinese
+    prose; their formal records remain visible in the complete name index.
+    """
+    selected: Dict[str, List[dict]] = {key: [] for key in COLLECTION_KEYS}
+    for collection in COLLECTION_KEYS:
+        for item in story_data.get(collection, []) or []:
+            if not isinstance(item, dict):
+                continue
+            names = [item.get("名称"), *(item.get("别名", []) or [])]
+            mentions = [name.strip() for name in names if isinstance(name, str) and len(name.strip()) >= 2]
+            if any(name in material for name in mentions):
+                selected[collection].append(item)
+    selected = {key: items for key, items in selected.items() if items}
+    return json.dumps(selected, ensure_ascii=False, indent=2) if selected else "无"
 
 
 # 历史表示分界，单位 KB；统一 Token 容量可以提前选择索引档，原档案不删除。
 DELTA_FULL_STORY_KB = 256
 
 
-def _recent_delta_name_summary(project_dir: Path, chapter_seq: int, count: int = 10) -> str:
-    """早于 chapter_seq 且已提交 Delta 的最近 count 章的元素名称级摘要。"""
-    start_seq = max(1, chapter_seq - count)
-    blocks: List[str] = []
-    for seq in range(start_seq, chapter_seq):
-        chapter = chapter_by_seq(project_dir, seq)
-        if not chapter:
-            continue
-        p = artifact_paths(project_dir, chapter)
-        if not p["delta"].is_file():
-            continue
-        data = load_json(p["delta"], {})
-        if not isinstance(data, dict):
-            continue
-        names: Dict[str, List[str]] = {}
-        for bucket in ("新增元素", "修改元素"):
-            bucket_data = data.get(bucket, {})
-            if not isinstance(bucket_data, dict):
-                continue
-            for c_key in COLLECTION_KEYS:
-                for item in bucket_data.get(c_key, []):
-                    if isinstance(item, dict) and item.get("名称"):
-                        names.setdefault(c_key, [])
-                        name = item["名称"]
-                        if name not in names[c_key]:
-                            names[c_key].append(name)
-        lines = [f"第{seq:03d}章:"]
-        for c_key in COLLECTION_KEYS:
-            ns = names.get(c_key)
-            if ns:
-                lines.append(f"  {c_key}: {'、'.join(ns)}")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) if blocks else "无"
-
-
-def _recent_delta_full_content(project_dir: Path, chapter_seq: int, count: int = 10) -> str:
-    """早于 chapter_seq 且已提交 Delta 的最近 count 章的实际 Delta 完整内容。"""
-    from full_context import chapter_evidence
-    start_seq = max(1, chapter_seq - count)
-    blocks: List[str] = []
-    for path, role in chapter_evidence(project_dir, start_seq, chapter_seq - 1):
-        if role.endswith("完整章节Delta"):
-            # A renamed/missing original cannot silently hide an existing Delta.
-            blocks.append(f"第{seq_from_file(path):03d}章 Delta:\n{path.read_text(encoding='utf-8')}")
-    return "\n\n".join(blocks) if blocks else "无"
-
-
-def _main_factions_detail(data: dict, protos: List[dict]) -> str:
-    """主角与主要阵营的完整档案。主要阵营=顶层阵营(无父级阵营)∪主角所属阵营。
-
-    规格 delta_extraction.md:118 ">200KB | 传主角/主要阵营"，故大故事只传主要阵营
-    而非全部阵营，避免阵营多时自己撑爆分级上下文预算。
-    """
-    blocks: List[str] = []
-    if protos:
-        blocks.append("主角档案：\n" + "\n\n".join(
-            json.dumps(c, ensure_ascii=False, indent=2) for c in protos))
-    proto_faction_names = set()
-    for c in protos:
-        for f in (c.get("所属阵营") or []):
-            if isinstance(f, str) and f.strip():
-                proto_faction_names.add(f.strip())
-    seen: set = set()
-    main: List[dict] = []
-    for f in (data.get("阵营集") or []):
-        if not isinstance(f, dict):
-            continue
-        name = f.get("名称")
-        if not (isinstance(name, str) and name.strip()):
-            continue
-        key = name.strip()
-        is_top = not str(f.get("父级阵营", "")).strip()
-        if (is_top or key in proto_faction_names) and key not in seen:
-            seen.add(key)
-            main.append(f)
-    if main:
-        blocks.append("主要阵营档案：\n" + "\n\n".join(
-            json.dumps(f, ensure_ascii=False, indent=2) for f in main))
-    return "\n\n".join(blocks) if blocks else "无"
-
-
 def build_delta_story_context(story: Path, project_dir: Path, chapter_seq: int,
                               full_story_kb: int = DELTA_FULL_STORY_KB, *, current_material: str = "") -> str:
-    """Select historical representation; never reread every historical chapter.
+    """Select the authoritative current story representation for one chapter.
 
-    The original byte threshold chooses full story versus index/recent Deltas.
-    Unified Token admission can switch to the lighter tier earlier.
+    Small stories use the complete current JSON. Large stories use the complete
+    formal name/alias index plus current records mentioned by this chapter. Raw
+    historical Deltas are audit provenance and never re-enter generation context.
     """
     full_json = story.read_text(encoding="utf-8")
     policy = ContextBudget.from_env()
     if len(full_json.encode("utf-8")) < full_story_kb * 1024 and policy.fits(current_material + full_json):
         return full_json
     index = build_lightweight_index(story)
-    recent = _recent_delta_full_content(project_dir, chapter_seq, count=10)
-    return (f"{index}\n\n## 最近10章Delta\n{recent}\n\n"
-            f"完整历史档案：{story}。索引只用于定位；涉及身份、合并和冲突时读取对应完整档案，不能猜测。")
+    details = extract_relevant_elements_for_material(load_json(story, {}) or {}, current_material)
+    base = ("## 当前故事全部正式名称与别名索引\n" + index
+            + "\n\n以上索引来自当前故事结构，是名称和分类的权威依据。")
+    with_details = base + "\n\n## 当前章命中的正式档案\n" + details
+    if details != "无" and policy.fits(current_material + with_details):
+        return with_details
+    return base + "\n\n当前章没有命中可在预算内提供的正式档案；不得从历史 Delta 猜测。"
 
 
 
 def write_governance_route(project_dir, start, end, pack, extra_sources=()):
     """Prepare complete bounded evidence without inventing subchapter identities."""
-    from full_context import chapter_evidence
     paths = audit_paths(project_dir, start, end)
     contract = render_prompt("流水线/周期审计.j2", start=start, end=end,
                              correction_path=paths["correction"], project_dir=project_dir,
@@ -1797,15 +1742,14 @@ def write_governance_route(project_dir, start, end, pack, extra_sources=()):
     current_intro = json.dumps(load_json(story, {}).get("介绍", {}), ensure_ascii=False)
     atomic_write_bytes(history, ("## 当前故事简介（需核对的旧版，不是原文证据）\n" + current_intro + "\n"
                                 + build_lightweight_index(story) + "\n## 本周期相关完整档案\n" + details).encode())
-    sources = [(history, "全局索引及本周期相关完整档案")] + chapter_evidence(project_dir, start, end)
+    sources = [(history, "全局索引及本周期相关完整档案")]
+    for seq in range(start, end + 1):
+        chapter = chapter_by_seq(project_dir, seq)
+        if chapter is not None:
+            sources.append((chapter, f"第{seq:03d}章完整原文；本周期事实依据"))
     taxonomy = Path(__file__).resolve().parent.parent / "schemas/narrative_taxonomy.json"
     sources += [(taxonomy, "完整标签规则；作为约束，不是故事事实")]
     sources += list(extra_sources)
-    previous = get_previous_correction(project_dir, start)
-    if previous:
-        old = paths["pack"].parent / previous["name"]
-        if old.is_file():
-            sources.append((old, "前周期治理记录；禁止重复应用"))
     save_json(pack.with_suffix(".governance.json"), {
         "contract": contract, "range": f"第{start:03d}章-第{end:03d}章",
         "references": [[str(story.resolve()), "当前完整故事；已包含本周期 Delta，按需核对历史档案"]],
@@ -1856,20 +1800,13 @@ def write_audit_pack(
             "seq": seq,
             "missing": False,
             "chapter_path": p["chapter"],
-            "analysis_path": p["analysis"],
-            "delta_path": p["delta"],
             "chapter_text": read_audit_evidence(p["chapter"]),
-            "analysis_text": read_audit_evidence(p["analysis"]),
-            "delta_text": read_audit_evidence(p["delta"]),
         })
 
     taxonomy_path = Path(__file__).resolve().parent.parent / "schemas" / "narrative_taxonomy.json"
     taxonomy_json = taxonomy_path.read_text(encoding="utf-8", errors="ignore") if taxonomy_path.is_file() else ""
-    previous_correction = get_previous_correction(project_dir, start)
     current_evidence_chars = sum(
         len(ch.get("chapter_text", ""))
-        + len(ch.get("analysis_text", ""))
-        + len(ch.get("delta_text", ""))
         for ch in chapters
     )
 
@@ -1901,7 +1838,7 @@ def write_audit_pack(
             full_story_json=candidate_full_story,
             story_index=candidate_index,
             relevant_details=candidate_details,
-            previous_correction=previous_correction,
+            previous_correction=None,
             chapters=chapters,
             taxonomy_json=taxonomy_json,
         )
@@ -1920,6 +1857,9 @@ def write_audit_pack(
         "current_evidence_chars": current_evidence_chars,
         "capacity_policy": capacity.__dict__,
         "attempts": attempts,
+        "fact_sources": ["current_story", "chapter_originals"],
+        "routing_sources": ["typed_delta_names"],
+        "excluded_from_model_facts": ["chapter_analysis", "raw_delta", "previous_correction"],
     }
     if not selected_content and start == end:
         selected_content = write_governance_route(project_dir, start, end, paths["pack"])
@@ -2355,9 +2295,54 @@ def mark_periodic_audit_committed(project_dir: Path, patch: Path, before: Path, 
     save_json(status_path, data)
 
 
+MAX_SINGLE_CHAPTER_SOURCE_BYTES = 256 * 1024
+EMBEDDED_CHAPTER_HEADING_RE = re.compile(
+    r"^\s*第[一二两三四五六七八九十百千万零〇\d]+[章节回卷集部篇]\s*.*$"
+)
+
+
+def validate_chapter_source(chapter: Path) -> List[str]:
+    """Reject malformed split units before they consume a model call.
+
+    A legitimate split file owns one Markdown H1 followed by its body. Embedded
+    chapter headings indicate that the source splitter merged multiple chapters;
+    an empty body usually comes from duplicate consecutive source headings.
+    """
+    text = chapter.read_text(encoding="utf-8", errors="ignore")
+    errors: List[str] = []
+    if len(text.encode("utf-8")) > MAX_SINGLE_CHAPTER_SOURCE_BYTES:
+        errors.append(
+            f"单章原文超过 {MAX_SINGLE_CHAPTER_SOURCE_BYTES // 1024}KB，疑似合并了多个章节"
+        )
+    lines = text.splitlines()
+    body = "\n".join(lines[1:]).strip() if lines else ""
+    if not body:
+        errors.append("章节正文为空，疑似重复标题产生的空章节")
+    embedded = [line.strip() for line in lines[1:] if EMBEDDED_CHAPTER_HEADING_RE.match(line)]
+    if embedded:
+        sample = "、".join(embedded[:3])
+        errors.append(f"章节正文内发现 {len(embedded)} 个额外章节标题：{sample}")
+    return errors
+
+
+def preflight_chapter_source(project_dir: Path, chapter: Path) -> int:
+    """Persist one actionable source report and stop before either model stage."""
+    source_errors = validate_chapter_source(chapter)
+    if not source_errors:
+        return 0
+    seq = seq_from_file(chapter)
+    report = project_dir / "质量治理" / "章节校验" / f"source_input_ch{seq:03d}.txt"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("\n".join(f"- {error}" for error in source_errors) + "\n", encoding="utf-8")
+    print(f"第{seq:03d}章原文拆分异常，已停止模型调用。见: {report}")
+    return 1
+
+
 def prepare_chapter_analysis(project_dir: Path, chapter: Path, force: bool = False) -> int:
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
+        return 1
+    if preflight_chapter_source(project_dir, chapter) != 0:
         return 1
     ensure_story(project_dir)
     p = artifact_paths(project_dir, chapter)
@@ -2385,6 +2370,8 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
+    if preflight_chapter_source(project_dir, chapter) != 0:
+        return 1
     story = ensure_story(project_dir)
     p = artifact_paths(project_dir, chapter)
     if not p["analysis"].is_file():
@@ -2397,13 +2384,11 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
         print("章节分析MD结构不合格，已交接重新生成；不会生成Delta任务。")
         return 2
     p["analysis_regenerate_task"].unlink(missing_ok=True)
-    contract_marker = f"<!-- tiered-history-v3 delta-contract:{prompt_fingerprint('流水线/单章增量提取.j2')} -->"
+    contract_marker = f"<!-- authoritative-story-v4 delta-contract:{prompt_fingerprint('流水线/单章增量提取.j2')} -->"
     context_metadata = load_json(p["delta_task"].with_suffix(".context.json"), {}) or {}
     from fault_recovery import digest
     inputs = {key: digest(p[key]) for key in ("chapter", "analysis")}
     inputs["story"] = digest(story)
-    from hashlib import sha256
-    inputs["recent_deltas"] = sha256(_recent_delta_full_content(project_dir, seq_from_file(chapter)).encode()).hexdigest()
     if (p["delta_task"].exists() and not force
             and context_metadata.get("full_story_kb") == full_story_kb
             and context_metadata.get("capacity_policy") == ContextBudget.from_env().__dict__
@@ -2427,8 +2412,8 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
     history_path = p["delta_task"].with_suffix(".history.md")
     atomic_write_bytes(history_path, summary.encode())
     save_json(p["delta_task"].with_suffix(".context.json"), {
-        "version": 3, "full_story_kb": full_story_kb,
-        "history_mode": "index_recent" if "## 最近10章Delta" in summary else "full_story",
+        "version": 4, "full_story_kb": full_story_kb,
+        "history_mode": "story_index_relevant" if "## 当前故事全部正式名称与别名索引" in summary else "full_story",
         "inputs": inputs, "history_sha256": digest(history_path),
         "capacity_policy": ContextBudget.from_env().__dict__,
     })
@@ -2539,7 +2524,9 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         return 0
     if not p["analysis"].is_file():
         print(f"缺章节分析MD: {p['analysis']}")
-        prepare_chapter(project_dir, seq)
+        rc = prepare_chapter(project_dir, seq)
+        if rc != 0:
+            return rc
         print("已交接：等待章节分析MD。")
         return 2
     analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
@@ -2758,7 +2745,9 @@ def _cmd_run_analysis_serial(project_dir, files, chapter_command, worker_timeout
     for chapter in files:
         p = artifact_paths(project_dir, chapter)
         if not p["analysis"].is_file():
-            prepare_chapter_analysis(project_dir, chapter)
+            rc = prepare_chapter_analysis(project_dir, chapter)
+            if rc != 0:
+                return rc
             print("已交接：等待章节分析MD。")
             if not chapter_command:
                 return 2
@@ -2825,7 +2814,9 @@ def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeo
         for chapter in files:
             p = artifact_paths(project_dir, chapter)
             if not p["analysis"].is_file():
-                prepare_chapter_analysis(project_dir, chapter)
+                rc = prepare_chapter_analysis(project_dir, chapter)
+                if rc != 0:
+                    return rc
                 pending.append((chapter, "analysis", p["analysis_task"], p["analysis"], seq_from_file(chapter)))
             else:
                 ok, errs = validate_chapter_analysis_file(p["analysis"])
@@ -2969,7 +2960,9 @@ def cmd_run_interleaved(
             p = artifact_paths(project_dir, chapter)
             try:
                 if not p["analysis"].is_file():
-                    prepare_chapter_analysis(project_dir, chapter)
+                    rc = prepare_chapter_analysis(project_dir, chapter)
+                    if rc != 0:
+                        fail(rc); return
                     rc = run_generation_worker(chapter_command, project_dir, "analysis", p["analysis_task"],
                                     p["analysis"], seq, timeout=worker_timeout_seconds,
                                     retries=worker_retries, worker_window=worker_window)
@@ -3012,7 +3005,9 @@ def cmd_run_interleaved(
                 if is_chapter_complete(project_dir, chapter):
                     continue
                 if not p["delta"].is_file():
-                    prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
+                    rc = prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
+                    if rc != 0:
+                        fail(rc); return
                     rc = run_generation_worker(chapter_command, project_dir, "delta", p["delta_task"],
                                     p["delta"], seq, timeout=worker_timeout_seconds,
                                     retries=worker_retries, worker_window=worker_window)
@@ -3114,7 +3109,9 @@ def cmd_run_delta(
     for chapter in files:
         p = artifact_paths(project_dir, chapter)
         if not p["analysis"].is_file():
-            prepare_chapter_analysis(project_dir, chapter)
+            rc = prepare_chapter_analysis(project_dir, chapter)
+            if rc != 0:
+                return rc
             print("Delta阶段已交接：等待全部章节分析MD通过校验。")
             if not chapter_command:
                 return 2
@@ -3294,7 +3291,9 @@ def cmd_run(
         seq = seq_from_file(nxt)
         p = artifact_paths(project_dir, nxt)
         if not p["analysis"].is_file():
-            prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
+            rc = prepare_chapter(project_dir, seq, full_story_kb=delta_full_story_kb)
+            if rc != 0:
+                return rc
             print("已交接：等待章节分析MD。")
             if not chapter_command:
                 return 2
@@ -3554,7 +3553,10 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     task_pack = audit_dir / "final_task_pack.md"
 
     report_excerpt = report.read_text(encoding="utf-8") if report.is_file() else ""
-    source_files = [draft, story]
+    # The draft is the only writable candidate and already starts as a copy of
+    # the current story. Do not require the worker to reread the duplicate process
+    # JSON; reports and historical corrections remain optional lookup evidence.
+    source_files = [draft]
 
     analysis_specs = [
         ("全书分析/剧情结构/章节梗概汇总.md", "章节梗概汇总"),
@@ -3576,11 +3578,9 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     for rel, title in analysis_specs:
         path = confined_project_path(project_dir, rel)
         if path.is_file() and path.stat().st_size > 0:
-            source_files.append(path)
             analysis_refs.append({
                 "title": title,
                 "path": path,
-                "excerpt": path.read_text(encoding="utf-8"),
             })
 
     audit_refs: List[Dict[str, Any]] = []
@@ -3589,20 +3589,19 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
         # Audit task packs repeat raw material; the actual accepted corrections
         # and original sources are authoritative and are included in full once.
         for cj in sorted(pa_dir.glob("correction_*.json")):
-            source_files.append(cj)
-            audit_refs.append({"name": cj.name, "lang": "json",
-                               "excerpt": cj.read_text(encoding="utf-8")})
-    for relatives in ANALYSIS_OUTPUTS.values():
-        source_files.extend(project_dir / rel for rel in relatives)
+            audit_refs.append({"name": cj.name, "path": cj})
     # Final governance audits the candidate, reports and accepted corrections.
     # Chapter originals remain complete lookup evidence, not another book rerun.
     reference_files = [path.resolve() for folder in ("原文拆解", "章节处理", "章节处理/Delta")
                        for path in sorted((project_dir / folder).glob("第*章*")) if path.is_file()]
+    reference_files.extend(ref["path"].resolve() for ref in analysis_refs)
+    reference_files.extend(ref["path"].resolve() for ref in audit_refs)
+    reference_files.append(story.resolve())
     source_files = list(dict.fromkeys(path.resolve() for path in source_files if path.is_file()))
     source_manifest = task_pack.with_suffix(task_pack.suffix + ".sources.json")
     save_json(source_manifest, [str(path) for path in source_files])
     reference_manifest = task_pack.with_suffix(".references.json")
-    save_json(reference_manifest, [str(path) for path in reference_files])
+    save_json(reference_manifest, [str(path) for path in dict.fromkeys(reference_files) if path.is_file()])
 
     content = render_prompt(
         "流水线/最终整理.j2",
@@ -3614,7 +3613,7 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
         audit_refs=audit_refs,
     )
 
-    content = (f"本次治理必读材料：{source_manifest}。\n按需核对原文、章节分析与 Delta：{reference_manifest}。"
+    content = (f"本次治理必读材料：{source_manifest}。\n按需核对原文、章节分析、Delta、全书报告与历史治理记录：{reference_manifest}。"
                "档案保留全文；身份合并、事实矛盾和证据不足时读取对应原件，不得据索引猜测。\n\n" + content)
     task_pack.write_text(content, encoding="utf-8")
     print(f"已生成最终整理任务包: {task_pack}")

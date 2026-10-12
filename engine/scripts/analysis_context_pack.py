@@ -532,7 +532,6 @@ def build_chapter_block(project_dir: Path, ch: Dict[str, Any], task: str, includ
     split_path = project_dir / "原文拆解" / filename
     analysis_path = project_dir / "章节处理" / filename
     base = filename[:-3] if filename.endswith(".md") else Path(filename).stem
-    delta_path = project_dir / "章节处理" / "Delta" / f"{base}.json"
 
     lines = []
     lines.append(f"### 第{ch['seq']:03d}章｜{ch.get('title') or ch.get('source_title') or base}")
@@ -549,12 +548,9 @@ def build_chapter_block(project_dir: Path, ch: Dict[str, Any], task: str, includ
     # Even persisted auto/sample/none settings must not skip source evidence.
     lines.extend(["#### 完整原文", "```markdown", read_text(split_path) or "【未找到原文章节】", "```", ""])
 
-    # Every analysis dimension retains the complete chapter Delta as evidence.
-    lines.append("#### 本章Delta")
-    lines.append("```json")
-    lines.append(read_text(delta_path) or "【未找到本章Delta】")
-    lines.append("```")
-    lines.append("")
+    # Delta is merge provenance, not an independent fact source. Its accepted
+    # state is already represented by the current story index above; feeding the
+    # raw pre-merge Delta back into reports can reintroduce stale names/types.
     return "\n".join(lines)
 
 
@@ -627,7 +623,7 @@ def split_batches(chapters: List[Dict[str, Any]], project_dir: Path, task: str, 
 def split_narrative_batches(project_dir: Path, chapters: List[Dict[str, Any]], max_pack_chars: int) -> List[List[Dict[str, Any]]]:
     """narrative_structure 专用分批：按分章 章节结构.md 的字符大小累加切批。
 
-    先按完整分章结构报告粗分章节组；全书资料、历史、原文、章节分析和 Delta
+    先按完整分章结构报告粗分章节组；全书资料、当前结构索引、原文和章节分析
     仍由 build_pack 完整加入，再由 split_rendered_pack 执行最终连续分片。
     此处预留值只是分组估算，不是截断上限或最终模型容量判定。
     """

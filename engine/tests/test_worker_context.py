@@ -131,3 +131,31 @@ def test_recovery_catalog_is_followed_but_story_json_paths_are_not(tmp_path):
     assert reader.read(str(evidence))["text"] == "完整修复材料"
     with pytest.raises(ValueError):
         reader.read(str(unrelated))
+
+
+def test_story_domain_queries_use_only_frozen_authoritative_material(tmp_path):
+    project = tmp_path / "book"
+    chapter = project / "原文拆解" / "第001章_相遇.md"
+    story = project / "故事结构_增量.json"
+    chapter.parent.mkdir(parents=True)
+    chapter.write_text("# 第一章\n萧炎在坊市遇见薰儿。", encoding="utf-8")
+    story.write_text(json.dumps({
+        "介绍": {"标题": "测试故事", "描述": "当前简介"},
+        "角色集": [{"名称": "萧炎", "别名": ["岩枭"], "介绍": "主角"}],
+        "事件集": [], "地点集": [{"名称": "坊市", "介绍": "交易地点"}],
+        "线索集": [], "阵营集": [], "物品集": [], "其他事项集": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    pack = project / "audit.md"
+    pack.write_text(f"故事：`{story}`\n原文：`{chapter}`", encoding="utf-8")
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    reader = ContextReader(snapshot_context(project, pack, [], sandbox))
+
+    original_revision = reader.story_snapshot()["revision"]
+    story.write_text("{}", encoding="utf-8")
+    assert reader.story_snapshot()["revision"] == original_revision
+    assert reader.story_search("岩枭")["items"][0]["名称"] == "萧炎"
+    full = reader.story_get_units([{"collection": "地点集", "name": "坊市"}], "L2")
+    assert full["items"][0]["record"]["介绍"] == "交易地点"
+    assert reader.story_query_chapters("search", query="薰儿")["matches"][0]["chapter"] == chapter.name
+    assert "萧炎" in reader.story_query_chapters("read", chapter=chapter.name, limit=100)["text"]

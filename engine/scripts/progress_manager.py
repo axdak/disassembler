@@ -431,9 +431,9 @@ def generate_summary(project_dir):
     elif json_size < 100000:
         print("建议: JSON中等，可只传元素名称列表（如上）")
     elif json_size < 200000:
-        print("建议: JSON较大，只传最近10章新增的元素名称")
+        print("建议: JSON较大，传全部正式名称索引与当前章命中的正式档案")
     else:
-        print("建议: JSON过大，只传主角和主要阵营相关元素名称")
+        print("建议: JSON过大，传全部正式名称索引，并按当前章确定性选择正式档案")
 
     return summary
 

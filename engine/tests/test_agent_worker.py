@@ -173,6 +173,23 @@ def test_codebuddy_only_exposes_scoped_context_without_inherited_capabilities():
     assert Path(payload["cwd"]).name.startswith("nd_worker_")
 
 
+@pytest.mark.parametrize("broad_task", ["audit_correction", "fullbook_analysis", "fullbook_analysis_reduce"])
+def test_story_domain_tools_are_exposed_only_for_broad_read_tasks(broad_task):
+    chapter_result, _, chapter_payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN", task_type="delta", output_name="out.json")
+    assert chapter_result.returncode != 0  # Empty fake output is not a valid Delta; arguments were still captured.
+    chapter_allowed = chapter_payload["argv"][chapter_payload["argv"].index("--allowedTools") + 1]
+    assert "story_search" not in chapter_allowed
+    assert "--story-tools" not in chapter_payload["mcp"]["mcpServers"]["nd_context"]["args"]
+
+    broad_result, _, broad_payload = run_worker(
+        "codebuddy", "ND_CODEBUDDY_BIN", task_type=broad_task, output_name="out.json"
+    )
+    assert broad_result.returncode != 0
+    broad_allowed = broad_payload["argv"][broad_payload["argv"].index("--allowedTools") + 1]
+    assert "mcp__nd_context__story_search" in broad_allowed
+    assert "--story-tools" in broad_payload["mcp"]["mcpServers"]["nd_context"]["args"]
+
+
 @pytest.mark.parametrize("extra", ["--tools Bash", "--permission-mode bypassPermissions", "--add-dir C:/", "--settings unsafe.json"])
 def test_codebuddy_deployment_args_cannot_restore_filesystem_or_command_access(extra):
     result, output, payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN", {"ND_CODEBUDDY_ARGS": extra})

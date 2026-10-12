@@ -156,7 +156,7 @@ def test_audit_pack_cli_creates_review_package():
         assert "程序负责规范化、校验、提交" in text
         assert "commit-governance" not in text
         assert "第001章_测试.md" in text
-        assert "第005章_测试.json" in text
+        assert "第005章_测试.json" not in text
         assert "测试原文。" in text
         assert "顶层介绍" in text
         assert "每次周期治理都检查" in text
@@ -729,8 +729,8 @@ def test_delta_story_context_passes_full_story_when_small():
     print("[OK] 小故事(<256KB) Delta 上下文传完整 JSON")
 
 
-def test_delta_story_context_uses_global_index_and_recent_deltas_when_medium():
-    # 达到阈值后采用全局索引和近期 Delta，完整档案仍保留。
+def test_delta_story_context_uses_global_index_when_medium():
+    # 达到阈值后采用当前正式索引，不回灌历史 Delta。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -750,7 +750,7 @@ def test_delta_story_context_uses_global_index_and_recent_deltas_when_medium():
     print("[OK] 达到阈值使用全局索引，完整详情可查证")
 
 
-def test_delta_story_context_large_tier_keeps_all_names_and_lookup_path():
+def test_delta_story_context_large_tier_keeps_all_names_without_live_file_lookup():
     # 超过阈值时恢复全局索引，不限制索引名称数量。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
@@ -764,12 +764,12 @@ def test_delta_story_context_large_tier_keeps_all_names_and_lookup_path():
 
         ctx = build_delta_story_context(story, project, chapter_seq=1)
 
-        assert "FULL_ONLY_MARKER" not in ctx  # 完整档案通过原件入口读取
+        assert "FULL_ONLY_MARKER" not in ctx
         assert "主角A" in ctx  # 全部名称都在
         assert "路人B" in ctx  # 全部名称都在（不只是主角）
-        assert "故事结构_增量.json" in ctx  # 附文件路径
+        assert "故事结构_增量.json" not in ctx  # 不要求模型扩展读取实时文件
 
-    print("[OK] 大故事(≥阈值) Delta 上下文传全部名称索引+文件路径")
+    print("[OK] 大故事(≥阈值) Delta 上下文传全部名称索引且不扩展读取")
 
 
 def test_delta_story_context_large_tier_all_faction_names():
@@ -797,8 +797,8 @@ def test_delta_story_context_large_tier_all_faction_names():
     print("[OK] ≥阈值档给全部阵营名称")
 
 
-def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
-    # ≥256KB（中量）：名称摘要 + 最近10章 Delta 实际内容（不只是名称）。
+def test_delta_story_context_medium_tier_uses_current_relevant_records_only():
+    # ≥256KB（中量）：名称索引 + 当前章命中的正式档案，不读取历史 Delta。
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         story = project / "故事结构_增量.json"
@@ -822,13 +822,17 @@ def test_delta_story_context_medium_tier_includes_actual_recent_deltas():
                           "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []},
         })
 
-        ctx = build_delta_story_context(story, project, chapter_seq=2)
+        ctx = build_delta_story_context(
+            story, project, chapter_seq=2,
+            current_material="本章主角A继续调查。",
+        )
 
-        assert "前章角色C" in ctx  # 实际 Delta 内容被嵌入
-        assert "FULL_ONLY_MARKER" not in ctx  # 完整档案通过原件入口读取
-        assert "第001章 Delta:" in ctx  # 实际 Delta 块标记
+        assert "前章角色C" not in ctx
+        assert "主角介绍" in ctx
+        assert "FULL_ONLY_MARKER" not in ctx
+        assert "第001章 Delta:" not in ctx
 
-    print("[OK] 达到阈值使用全局索引与最近十章完整 Delta")
+    print("[OK] 达到阈值使用全局索引与当前相关正式档案")
 
 
 if __name__ == "__main__":
@@ -842,7 +846,7 @@ if __name__ == "__main__":
     test_periodic_governance_skipped_when_no_committed_chapters()
     test_commit_governance_rejects_no_change_missing_metadata()
     test_delta_story_context_passes_full_story_when_small()
-    test_delta_story_context_uses_global_index_and_recent_deltas_when_medium()
-    test_delta_story_context_large_tier_keeps_all_names_and_lookup_path()
-    test_delta_story_context_medium_tier_includes_actual_recent_deltas()
+    test_delta_story_context_uses_global_index_when_medium()
+    test_delta_story_context_large_tier_keeps_all_names_without_live_file_lookup()
+    test_delta_story_context_medium_tier_uses_current_relevant_records_only()
     print("\n全部测试通过 [PASS]")

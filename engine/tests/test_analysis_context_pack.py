@@ -3,7 +3,7 @@
 
 import json
 
-from analysis_context_pack import collect_visual_tags, summarize_story_structure
+from analysis_context_pack import build_chapter_block, collect_visual_tags, summarize_story_structure
 from story_schema_rules import dump_supplementary_tags
 
 
@@ -104,6 +104,33 @@ def test_summary_does_not_decorate_non_event_collections():
     summary = summarize_story_structure(story)
     assert "主角(主角团)" in summary
     assert "主角(主角团)[" not in summary
+
+
+def test_chapter_block_excludes_raw_delta_provenance(tmp_path):
+    """全书普通分析只使用章节分析和原文，不回灌已合并的原始 Delta。"""
+    project = tmp_path / "novel"
+    filename = "第001章_序章.md"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理" / "Delta").mkdir(parents=True)
+    (project / "原文拆解" / filename).write_text("原文证据", encoding="utf-8")
+    (project / "章节处理" / filename).write_text("章节分析证据", encoding="utf-8")
+    (project / "章节处理" / "Delta" / "第001章_delta.json").write_text(
+        '{"角色集":[{"名称":"不应回灌的旧名称"}]}', encoding="utf-8"
+    )
+
+    block = build_chapter_block(
+        project,
+        {"seq": 1, "filename": filename, "title": "序章"},
+        "summary",
+        "full",
+        100_000,
+        100_000,
+    )
+
+    assert "原文证据" in block
+    assert "章节分析证据" in block
+    assert "不应回灌的旧名称" not in block
+    assert "本章Delta" not in block
 
 
 from analysis_context_pack import TASKS, output_contract

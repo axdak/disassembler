@@ -12,7 +12,7 @@ from test_capacity_tree import review_response
 import run_pipeline as pipeline
 
 
-def test_delta_threshold_keeps_global_names_all_aliases_and_recent_delta_tail(tmp_path):
+def test_delta_threshold_keeps_global_names_and_excludes_historical_deltas(tmp_path):
     story = empty_story()
     story['角色集'] = [{'名称': f'角色{i}', '介绍': '历史详情' * 300,
                        '别名': [f'别名{i}-{n}' for n in range(5)]} for i in range(100)]
@@ -24,8 +24,8 @@ def test_delta_threshold_keeps_global_names_all_aliases_and_recent_delta_tail(tm
         delta.write_text(f'历史Delta-{seq}:' + '完整记录' * 4000 + f'唯一尾部-{seq}', encoding='utf-8')
     context = pipeline.build_delta_story_context(path, tmp_path, 16, full_story_kb=10)
     assert '角色99' in context and '别名99-4' in context
-    assert '历史详情' not in context and str(path) in context
-    assert '唯一尾部-15' in context
+    assert '历史详情' not in context
+    assert '唯一尾部-15' not in context
     assert all(f'历史Delta-{seq}:' not in context for seq in [1, 5, 16])
     assert json.loads(path.read_text(encoding='utf-8')) == story
 
@@ -40,7 +40,7 @@ def test_delta_token_budget_can_switch_before_kb_threshold(tmp_path):
                              model_context_tokens=13000, model_reserve_tokens=1000)):
         context = pipeline.build_delta_story_context(path, tmp_path, 1, 1000,
                                                      current_material='本章必要证据' * 600)
-    assert '## 最近10章Delta' in context and '完整历史描述' not in context
+    assert '## 当前故事全部正式名称与别名索引' in context and '完整历史描述' not in context
 
 
 def test_delta_task_refreshes_on_policy_and_input_change(tmp_path):
@@ -54,7 +54,7 @@ def test_delta_task_refreshes_on_policy_and_input_change(tmp_path):
     before = task.read_text(encoding='utf-8')
     assert pipeline.prepare_chapter_delta(tmp_path, chapter, full_story_kb=10) == 0
     after = task.read_text(encoding='utf-8')
-    assert before != after and '## 最近10章Delta' in after
+    assert before != after and '## 当前故事全部正式名称与别名索引' in after
     story['角色集'] = [{'名称': '新增历史正式名'}]
     save_json(path, story)
     assert pipeline.prepare_chapter_delta(tmp_path, chapter, full_story_kb=10) == 0
@@ -104,7 +104,8 @@ def test_periodic_tiers_preserve_current_evidence_and_do_not_truncate_details(tm
     assert status['context']['render_mode'] == 'story_index'
     text = pack.read_text(encoding='utf-8')
     assert current.read_text(encoding='utf-8') in text
-    assert paths['analysis'].read_text(encoding='utf-8') in text
+    assert paths['analysis'].read_text(encoding='utf-8') not in text
+    assert paths['delta'].read_text(encoding='utf-8') not in text
     assert '不属于当前周期的原文' not in text
     assert str(tmp_path / '故事结构_增量.json') in text
 

@@ -19,7 +19,11 @@ def _write_project(project: Path, n: int = 3):
         json.dumps({"chapters": chapters}, ensure_ascii=False), encoding="utf-8"
     )
     for ch in chapters:
-        (project / "原文拆解" / ch["filename"]).write_text(f"# {ch['title']}\n", encoding="utf-8")
+        # Pipeline preflight requires a real body; concurrency tests should use
+        # structurally valid chapter input instead of relying on an empty stub.
+        (project / "原文拆解" / ch["filename"]).write_text(
+            f"# {ch['title']}\n\n这是第{ch['seq']}章的测试正文。\n", encoding="utf-8"
+        )
 
 
 def _write_worker(path: Path):

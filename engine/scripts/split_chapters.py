@@ -7,7 +7,7 @@ from typing import List, Tuple, Optional
 
 # 强特征模式：含有“第/章/卷/序/尾声/番外”等明确标记，误报率低。
 CHAPTER_PATTERNS_STRONG = [
-    r'^[\s]*第[一二三四五六七八九十百千万零〇\d]+[章节回卷集部篇][\s　]*.*',
+    r'^[\s]*第[一二两三四五六七八九十百千万零〇\d]+[章节回卷集部篇][\s　]*.*',
     r'^[\s]*[Cc]hapter[\s]+\d+.*',
     r'^[\s]*[卷回集部篇][一二三四五六七八九十百千万零〇\d]+.*',
     r'^[\s]*(?:序[章幕言]?|楔子|引[子言篇]|开篇)[\s　]*.*',
@@ -20,8 +20,8 @@ CHAPTER_PATTERNS_WEAK = [
     r'^[\s]*【[^】]+】.*',
 ]
 CHAPTER_PATTERNS = CHAPTER_PATTERNS_STRONG + CHAPTER_PATTERNS_WEAK
-CN_NUM_MAP={'零':0,'〇':0,'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10,'百':100,'千':1000,'万':10000}
-ORDER_PATTERNS=[r'第(\d+)',r'[Cc]hapter\s+(\d+)',r'^\s*(\d{1,5})',r'第([一二三四五六七八九十百千万零〇]+)']
+CN_NUM_MAP={'零':0,'〇':0,'一':1,'二':2,'两':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10,'百':100,'千':1000,'万':10000}
+ORDER_PATTERNS=[r'第(\d+)',r'[Cc]hapter\s+(\d+)',r'^\s*(\d{1,5})',r'第([一二两三四五六七八九十百千万零〇]+)']
 
 def cn_to_int(s:str)->int:
     if not s: return 0
@@ -86,7 +86,7 @@ def extract_order(title:str)->int:
 
 def normalize_title(title:str)->str:
     # 尽量去掉“第X章”等前缀，不强制。
-    t=re.sub(r'^\s*第[一二三四五六七八九十百千万零〇\d]+[章节回卷集部篇]\s*','',title).strip()
+    t=re.sub(r'^\s*第[一二两三四五六七八九十百千万零〇\d]+[章节回卷集部篇]\s*','',title).strip()
     t=re.sub(r'^\s*[Cc]hapter\s+\d+\s*','',t).strip()
     return t or title.strip()
 
@@ -117,12 +117,18 @@ def split_novel(input_file:str, output_dir:str, pattern:str='', preface_mode:str
             if cur_title is None:
                 if ''.join(cur).strip(): pre=cur[:]
             else:
-                chapters.append({'title':cur_title,'content':'\n'.join(cur)})
+                body='\n'.join(cur)
+                # 下载文本常把同一个章节标题连续写两次。没有正文的标题不是一个
+                # 独立章节；丢弃它可避免生成空章节和重复 source_order。
+                if body.strip():
+                    chapters.append({'title':cur_title,'content':body})
             cur_title=stripped; cur=[]
         else:
             cur.append(line)
     if cur_title is not None:
-        chapters.append({'title':cur_title,'content':'\n'.join(cur)})
+        body='\n'.join(cur)
+        if body.strip():
+            chapters.append({'title':cur_title,'content':body})
     if pre and ''.join(pre).strip():
         if preface_mode=='attach' and chapters:
             chapters[0]['content']='\n'.join(pre).strip()+'\n\n'+chapters[0]['content']
