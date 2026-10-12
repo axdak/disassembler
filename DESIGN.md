@@ -24,7 +24,7 @@
 
 复制策略：
 
-- 一次性复制**仅源码与资源**：`scripts\`、`tools\`、`schemas\`、`prompts\`、`references\`、`docs\`、`tests\`、`SKILL.md`、`requirements.txt`。
+- 初始基线一次性复制**仅源码与资源**：`scripts\`、`tools\`、`schemas\`、`prompts\`、`references\`、`docs\`、`tests\`、`SKILL.md`、`requirements.txt`。后续重构已删除 `SKILL.md` 与 `references\`，仍需使用的数据统一迁移至 `schemas\`。
 - 排除：`.git\`、`.pytest_cache\`、`__pycache__\`、`novel_disassembler_release.zip`、`故事结构_增量-*.json`、`archive\`、`.agents\`、`.codex\`、`.claude\`、`.superpowers\` 等非源码产物与缓存。
 - 复制进新项目 `engine\` 目录，纳入新项目 Git，作为自有代码。
 - 记录上游基线 commit `dba0213` 于 `engine\UPSTREAM_BASELINE`，便于日后人工对照；不再自动同步上游。
@@ -39,7 +39,7 @@
 - 向原引擎仓库 `novel-disassembler-v12\novel-disassembler` 写入或修改任何内容（复制后不再访问）。
 - 在运行时依赖原引擎仓库路径；所有运行只使用内置 `engine\` 副本与用户选择的 `拆书_*` 目录。
 
-启动时校验**内置引擎副本**完整性：`engine\scripts\run_pipeline.py`、`engine\tools\agent_worker.py`、必要 schemas/prompts/references 资源存在且可被私有 Runtime 导入；不兼容时提示用户，不自动修补。
+启动时校验**内置引擎副本**完整性：`engine\scripts\run_pipeline.py`、`engine\tools\agent_worker.py`、必要 schemas/prompts 资源存在且可被私有 Runtime 导入；不兼容时提示用户，不自动修补。
 
 ## 独立软件架构
 

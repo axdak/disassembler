@@ -2,7 +2,7 @@
 """里程碑1：校验内置 engine 副本可导入运行。
 
 校验项：
-1. engine 目录结构完整（scripts/tools/schemas/prompts/references/docs/tests + requirements.txt）。
+1. engine 目录结构完整（scripts/tools/schemas/prompts/docs/tests + requirements.txt）。
 2. 第三方依赖可导入（jinja2、json_repair）。
 3. 关键引擎模块可 import。引擎脚本使用扁平 import（from chronology import ...），
    运行时 sys.path[0] 即 scripts/，因此把 engine/scripts 与 engine/tools 加入 sys.path。
@@ -23,7 +23,7 @@ TOOLS = ENGINE / "tools"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(TOOLS))
 
-EXPECTED_DIRS = ["scripts", "tools", "schemas", "prompts", "references", "docs", "tests"]
+EXPECTED_DIRS = ["scripts", "tools", "schemas", "prompts", "docs", "tests"]
 # SKILL 体系已在 YH-20260723-010 中移除；校验器只检查当前运行真正依赖的文件。
 EXPECTED_FILES = ["requirements.txt"]
 
