@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拆书流水线 · 深度体检报告（2026-10-12）</title>
+<style>
+  :root{
+    --navy:#12305A; --blue:#1E4E8C; --blue-soft:#EEF3FA; --blue-line:#D3E0F0;
+    --champagne:#C9A961; --champagne-soft:#FBF6EA;
+    --ink:#1B2430; --ink-2:#4A5768; --ink-3:#7C8899;
+    --bg:#FFFFFF; --panel:#FBFCFE; --line:#E6EBF2;
+    --p0:#B42318; --p0-bg:#FEF3F2; --p1:#B54708; --p1-bg:#FFFAEB; --p2:#1E4E8C; --p2-bg:#EEF3FA;
+    --ok:#067647; --ok-bg:#ECFDF3;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+       font-size:14px;line-height:1.75;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 40px 96px;}
+
+  /* Header */
+  header{border-bottom:2px solid var(--navy);padding-bottom:26px;margin-bottom:34px;}
+  .eyebrow{font-size:11.5px;letter-spacing:.22em;color:var(--champagne);font-weight:700;text-transform:uppercase;}
+  h1{font-size:29px;margin:12px 0 10px;letter-spacing:-.01em;font-weight:750;color:var(--navy);}
+  .meta{font-size:12.5px;color:var(--ink-3);display:flex;gap:20px;flex-wrap:wrap;}
+  .meta b{color:var(--ink-2);font-weight:600;}
+
+  /* Section */
+  h2{font-size:17px;margin:46px 0 16px;padding-left:13px;border-left:4px solid var(--champagne);
+     color:var(--navy);font-weight:700;letter-spacing:.01em;}
+  h3{font-size:14.5px;margin:26px 0 10px;color:var(--ink);font-weight:700;}
+
+  /* Verdict */
+  .verdict{background:linear-gradient(180deg,#FCFDFF,#F6F9FE);border:1px solid var(--blue-line);
+           border-radius:12px;padding:26px 28px;margin-bottom:8px;}
+  .verdict-line{font-size:15.5px;color:var(--ink);margin:0 0 20px;padding-bottom:18px;
+                border-bottom:1px dashed var(--blue-line);}
+  .verdict-line strong{color:var(--navy);}
+  .score-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+  .score{background:#fff;border:1px solid var(--line);border-radius:9px;padding:14px 15px;}
+  .score .k{font-size:11.5px;color:var(--ink-3);letter-spacing:.06em;}
+  .score .v{font-size:24px;font-weight:750;color:var(--blue);margin:4px 0 2px;font-variant-numeric:tabular-nums;}
+  .score .v small{font-size:12px;font-weight:600;color:var(--ink-3);margin-left:2px;}
+  .score .d{font-size:11.5px;color:var(--ink-3);line-height:1.5;}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;margin:12px 0 6px;font-size:13px;}
+  th{background:var(--navy);color:#fff;text-align:left;padding:9px 12px;font-weight:600;font-size:12.5px;}
+  td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink-2);}
+  tr:nth-child(even) td{background:var(--panel);}
+  td b{color:var(--ink);}
+  code{background:#F2F5F9;border:1px solid #E3E9F1;border-radius:4px;padding:1px 5px;
+       font-family:"SF Mono",Consolas,"Cascadia Mono",monospace;font-size:12px;color:#24405F;}
+
+  /* Badges */
+  .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;
+       letter-spacing:.03em;white-space:nowrap;}
+  .t-ok{background:var(--ok-bg);color:var(--ok);border:1px solid #ABEFC6;}
+  .t-p0{background:var(--p0-bg);color:var(--p0);border:1px solid #FECDCA;}
+  .t-p1{background:var(--p1-bg);color:var(--p1);border:1px solid #FEDF89;}
+  .t-p2{background:var(--p2-bg);color:var(--p2);border:1px solid var(--blue-line);}
+  .t-na{background:#F2F4F7;color:var(--ink-3);border:1px solid #E4E7EC;}
+
+  /* Issue cards */
+  .issue{border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:13px 0;background:#fff;}
+  .issue.p0{border-left:4px solid var(--p0);}
+  .issue.p1{border-left:4px solid var(--p1);}
+  .issue.p2{border-left:4px solid var(--p2);}
+  .issue-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:9px;}
+  .issue-h .t{font-weight:700;color:var(--ink);font-size:14px;}
+  .issue .row{display:flex;gap:10px;margin:6px 0;font-size:13px;color:var(--ink-2);}
+  .issue .row .l{flex:0 0 60px;color:var(--ink-3);font-size:12px;font-weight:600;padding-top:1px;}
+  .issue .row .c{flex:1;}
+  .fix{background:var(--champagne-soft);border:1px solid #EFE0BE;border-radius:7px;
+       padding:9px 12px;margin-top:10px;font-size:12.5px;color:#6B5518;}
+  .fix b{color:#8A6D1F;}
+
+  /* Callout */
+  .note{background:var(--blue-soft);border:1px solid var(--blue-line);border-radius:9px;
+        padding:14px 18px;font-size:13px;color:var(--ink-2);margin:14px 0;}
+  .note b{color:var(--navy);}
+  .danger{background:var(--p0-bg);border:1px solid #FECDCA;border-radius:9px;
+          padding:14px 18px;font-size:13px;color:#7A271A;margin:14px 0;}
+  .danger b{color:var(--p0);}
+
+  ul{margin:8px 0 8px;padding-left:20px;}
+  li{margin:5px 0;color:var(--ink-2);font-size:13px;}
+  li b{color:var(--ink);}
+  footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);
+         font-size:11.5px;color:var(--ink-3);line-height:1.9;}
+  .kbd{font-family:Consolas,monospace;background:#0F2540;color:#DCE7F5;padding:2px 7px;border-radius:5px;font-size:11.5px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Pipeline Health Audit</div>
+  <h1>拆书流水线 · 深度体检报告</h1>
+  <div class="meta">
+    <span><b>日期</b> 2026-10-12 22:55</span>
+    <span><b>对象</b> novel-disassembler-desktop（engine / backend / desktop）</span>
+    <span><b>实证样本</b> 拆书_斗破苍穹（3620 章，实时推进至第 027 章）</span>
+  </div>
+</header>
+
+<!-- ============ 结论 ============ -->
+<h2>一、结论先行</h2>
+
+<div class="verdict">
+  <p class="verdict-line">
+    <strong>流水线当前健康、正在正常推进</strong>：第 025 章 Delta 已产出（22:20），周期审计 021-025 经历一次
+    网络失败后自动重试成功（22:42），<strong>实时已推进到第 027 章</strong>。<strong>但"零介入 + 鲁棒不卡"的目标尚未完全达到</strong>——
+    仍存在 <strong>3 条"程序侧零消除路径"的潜在死锁</strong>与 <strong>3 处确定的性能浪费</strong>。
+    正常路径很快（单章 3–9 分钟），异常路径很慢，瓶颈不在生成，而在<b>失败后的空等与恢复</b>。
+  </p>
+  <div class="danger" style="margin:0 0 20px">
+    <b>本次体检最高价值的一条</b>：实测抓到一起"CLI 早已终局、进程却僵死"的隐性空等——模型请求在
+    <b>22:20:32（第 10 秒）</b>就因 TLS 失败终局，进程却活到 <b>22:35:24</b> 才被 900 秒 idle 判据收手，
+    <b>白等约 15 分钟</b>。根因与修复见 P1-0。
+  </div>
+  <div class="score-grid">
+    <div class="score">
+      <div class="k">健壮性</div>
+      <div class="v">72<small>%</small></div>
+      <div class="d">主链路稳定；仍有 3 条无自动消除路径的硬 error</div>
+    </div>
+    <div class="score">
+      <div class="k">容错 / 恢复</div>
+      <div class="v">78<small>%</small></div>
+      <div class="d">账本、断点、回执门禁设计扎实；个别异常未分类</div>
+    </div>
+    <div class="score">
+      <div class="k">性能</div>
+      <div class="v">65<small>%</small></div>
+      <div class="d">正常 3–9 分钟/章；异常时 1.5–3 小时</div>
+    </div>
+    <div class="score">
+      <div class="k">自动化</div>
+      <div class="v">75<small>%</small></div>
+      <div class="d">基本无人值守；失败后偶需人工看日志重试</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 任务清单 ============ -->
+<h2>二、任务清单 · 逐项检查结果</h2>
+
+<table>
+  <tr>
+    <th style="width:36px">#</th>
+    <th style="width:190px">检查项</th>
+    <th style="width:88px">判定</th>
+    <th>核心发现</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td><b>运行时状态与卡点</b></td>
+    <td><span class="tag t-ok">健康</span></td>
+    <td>ch025 完成（22:20）；审计 021-025 首轮网络失败 → idle 915 秒收手 → 22:35 重试 → 22:42 成功；<b>实时正在跑第 027 章</b>。无死循环、无卡死。</td>
+  </tr>
+  <tr>
+    <td>2</td>
+    <td><b>编排与状态机</b></td>
+    <td><span class="tag t-p1">有短板</span></td>
+    <td>阶段推进有界（<code>stagnant_limit=3</code> / <code>max_attempts=10</code>），无死循环；但<b>编排器无顶层异常收敛</b>，未分类异常落 rc=-1（不符契约）。</td>
+  </tr>
+  <tr>
+    <td>3</td>
+    <td><b>错误分类 / 重试 / 断点</b></td>
+    <td><span class="tag t-p1">有短板</span></td>
+    <td>返回码契约完备、账本可跨重启续跑；但 <b>rc=67 在外层被当普通失败重试，必然再次截断</b>；恢复热路径重复哈希严重。</td>
+  </tr>
+  <tr>
+    <td>4</td>
+    <td><b>章节生成与容量分层</b></td>
+    <td><span class="tag t-ok">符合契约</span></td>
+    <td>容量分层内部对 rc=67 <b>不分包</b>（符合红线）；对 rc=64 二分材料。单章最多两棵容量树，全串行。</td>
+  </tr>
+  <tr>
+    <td>5</td>
+    <td><b>自动修复链路</b></td>
+    <td><span class="tag t-ok">修复良好</span></td>
+    <td>ch024 类卡死已由"详情→顶层反向搬迁"根治（真实工件 rc=0，零模型调用）；阶梯 targeted→evidence→diagnosed 完整走完，未被削减。</td>
+  </tr>
+  <tr>
+    <td>6</td>
+    <td><b>周期治理链路</b></td>
+    <td><span class="tag t-p0">有缺口</span></td>
+    <td>标题死锁已修（只拦显式破坏）；但发现 <b>3 条治理阶段零消除路径的硬 error</b>（见 P0）。</td>
+  </tr>
+  <tr>
+    <td>7</td>
+    <td><b>性能热点</b></td>
+    <td><span class="tag t-p1">可优化</span></td>
+    <td>恢复路径每次重算全引擎指纹；<code>dependencies()</code> 单次调用重算 ≥5 次；容量分层每策略重建整份证据。</td>
+  </tr>
+  <tr>
+    <td>8</td>
+    <td><b>测试基线</b></td>
+    <td><span class="tag t-p2">部分验证</span></td>
+    <td>26 个核心模块全部可导入；本次实跑 <b>106 项核心用例通过</b>。全量 591 项因 pipeline 并发挤占未能跑完（27 分钟未结束）。</td>
+  </tr>
+</table>
+
+<div class="note">
+  <b>关于测试基线</b>：全量回归在 pipeline 运行期间会严重争抢 CPU / 磁盘（单个长时用例含真实子进程与秒级阈值等待），
+  建议在 pipeline 空闲窗口执行 <span class="kbd">cd engine &amp;&amp; ../runtime/venv/Scripts/python.exe -m pytest tests -q</span> 取完整结论。
+</div>
+
+<!-- ============ P0 ============ -->
+<h2>三、P0 · 会造成"卡住需介入"的零消除路径</h2>
+
+<div class="danger">
+  <b>共同病根</b>：校验器在 <code>process/governance</code> 阶段对某类状态判 <b>硬 error</b>，
+  而程序侧<b>不存在</b>能自动消除它的确定性路径 → 模型被要求"等程序修"，程序却修不了 → 每次周期治理必失败。
+  这与已修复的两起事故（<code>介绍.标题</code> 死锁、ch024 字段错位）<b>结构同构</b>。
+  <br><b>实测</b>：在真实 126 个事件上模拟判定，当前命中数均为 <b>0</b>——是"已埋下的种子"，尚未发芽，但一旦触发即无解。
+</div>
+
+<div class="issue p0">
+  <div class="issue-h"><span class="tag t-p0">P0-1</span><span class="t">程序自相矛盾：normalize 产出的分组名被自己的校验器判死</span></div>
+  <div class="row"><div class="l">证据</div><div class="c">
+    <code>normalize_story_schema.py:479</code>、<code>merge_delta.py:439</code>、<code>chronology.py:273</code>
+    调用 <code>assign_event_group_orders()</code> 时使用默认 <code>split_repeated=False</code>；
+    只有迁移脚本 <code>migrate_chronology.py:42</code> 用了 <code>True</code>。
+    而为 <code>False</code> 时，同章内非连续的两段同名剧情段会被赋<b>相同的短名</b>；
+    紧接着校验器 <code>chronology.py:258-259</code> 判"同一章节内非连续复用剧情段名称"为 <b>error</b>。
+  </div></div>
+  <div class="row"><div class="l">影响</div><div class="c">程序自己产出的结构，被程序自己的校验器拒绝，且治理补丁无"重排/改名"能力 → 周期治理永久失败。</div></div>
+  <div class="row"><div class="l">实测</div><div class="c">当前 126 事件命中 0（未触发）；<code>test_chronology.py:366</code> 只覆盖了"跨章节复用不报错"，<b>未覆盖同章非连续复用</b>。</div></div>
+  <div class="fix"><b>修复</b>：将上述三处 <code>assign_event_group_orders(...)</code> 统一改为 <code>split_repeated=True</code>，让程序产出的段名天然唯一。改动 3 行，需补 1 条回归（同章非连续同名 → normalize 后校验通过）。</div>
+</div>
+
+<div class="issue p0">
+  <div class="issue-h"><span class="tag t-p0">P0-2</span><span class="t">事件数组时序 / 段序校验无 mode 分支，程序侧无重排路径</span></div>
+  <div class="row"><div class="l">证据</div><div class="c">
+    <code>story_schema_rules.py:582-583</code> 无条件执行
+    <code>chronological_event_order_errors()</code> 与 <code>event_group_order_errors()</code>，<b>没有 mode 判断</b>；
+    程序侧唯一的重排函数 <code>insert_event_in_chapter_order</code>（<code>chronology.py:276</code>）只用于
+    <b>新增</b>事件；<code>assign_event_group_orders</code> 明确 "without moving events"（不移动事件）。
+    同时治理提示词（<code>周期审计.j2:36</code>）与校验器（<code>validate_delta.py:425-433</code>）都<b>禁止</b>模型改动事件的
+    "时间 / 涉及章节 / 数组位置"。
+  </div></div>
+  <div class="row"><div class="l">影响</div><div class="c">一旦事件数组顺序倒置，模型被两边夹住（不能改位置、程序不重排）→ 无解。</div></div>
+  <div class="row"><div class="l">实测</div><div class="c">当前 126 事件时序倒置命中 0（未触发）。</div></div>
+  <div class="fix"><b>修复</b>：在 <code>normalize_story_schema</code> 增加"按首次涉及章节对事件集做<b>稳定排序</b>"的确定性步骤（程序负责重排，与提示词承诺一致）；或治理模式将顺序类 error 降级为 warning。<b>二者择一，勿同时做。</b></div>
+</div>
+
+<div class="issue p0">
+  <div class="issue-h"><span class="tag t-p0">P0-3</span><span class="t"><code>详情.补充标签</code> 非法值无消除路径，且会拖垮后续每次提交</span></div>
+  <div class="row"><div class="l">证据</div><div class="c">
+    <code>compress_tags.py:122-128</code> 读到不可解析的 <code>补充标签</code> 即 <code>raise ValueError</code>；
+    对<b>事件</b>元素，<code>设置字段.详情</code> 被明令禁止（<code>validate_delta.py:530</code>，<code>immutable_fields={"时间","详情"}</code>）；
+    <code>normalize_story_schema</code> 又不校验该字段 → 事件元素的该字段<b>没有任何出口</b>。
+  </div></div>
+  <div class="row"><div class="l">影响</div><div class="c">一旦某事件写坏该字段，后续每次 <code>commit_chapter</code> 的 <code>--structure</code> 步骤固定失败，形成跨章连锁。</div></div>
+  <div class="fix"><b>修复</b>：在 normalize 中把无法解析的 <code>补充标签</code> <b>确定性重建</b>（如规范化为空数组或转入"待确认引用"），使其不再是"唯一无法表达"的字段。</div>
+</div>
+
+<!-- ============ P1 ============ -->
+<h2>四、P1 · 确定的性能浪费（不卡死，但拖慢）</h2>
+
+<div class="issue p1" style="border-left-color:#B42318">
+  <div class="issue-h"><span class="tag t-p0">P1-0</span><span class="t">CLI 早已终局失败，进程却僵死等待——单次白等约 15 分钟 <span style="color:var(--champagne)">（本次体检最高价值）</span></span></div>
+  <div class="row"><div class="l">实测</div><div class="c">
+    以 <code>audit_correction_021-025</code> 为例，CLI 日志（<code>~/.codebuddy/logs/2026-10-12/nd_worker_xf66t2jx__*.log</code>）时间线：
+  </div></div>
+  <table style="margin:8px 0 4px">
+    <tr><th style="width:120px">时刻</th><th>事件</th></tr>
+    <tr><td>22:20:27.696</td><td><code>ECONNRESET</code>：TLS 连接建立失败，自动重试 1 次</td></tr>
+    <tr><td>22:20:32.762</td><td>重试同样失败 → <code>502 安全连接建立失败</code></td></tr>
+    <tr><td>22:20:32.781</td><td><code>AGENT_ENDED</code>（<code>elapsedSinceLastTransitionMs=10233</code>，即<b>只跑了 10.2 秒</b>）</td></tr>
+    <tr><td>22:20:32.833</td><td><code>stopReason=failed</code> → <code>FinalStop</code> hooks 完成（<b>终局</b>）</td></tr>
+    <tr><td>22:20:33 → 22:35:09</td><td><b>仅剩 <code>WorkflowMemProbe</code> 心跳，cpuPercent 0.0–0.3%，零模型请求，进程不退出</b></td></tr>
+    <tr><td>22:35:24</td><td>宿主 idle 900 秒到期，终止进程（"+已运行 915 秒，最长无输出窗口 15 秒"）</td></tr>
+  </table>
+  <div class="row"><div class="l">根因</div><div class="c">
+    ① <b>宿主只按 stdout 判活</b>，看不到 CLI 内部的终局状态；CLI 在 <code>FinalStop</code> 后不自行退出，宿主只能靠 idle 900 秒兜底。<br>
+    ② <b>请求走了代理</b>：错误信息显示 <code>NO_PROXY=127.0.0.1,localhost</code> <b>未包含 <code>token.ai-hf.cn</code></b>，导致该网关请求被代理接管后 TLS 握手失败。
+  </div></div>
+  <div class="row"><div class="l">影响</div><div class="c">
+    每次这类失败浪费 ~15 分钟。在 3620 章的长跑中，若日均触发数次，累计就是数小时级损耗。
+  </div></div>
+  <div class="fix">
+    <b>修复（两条，独立生效）</b><br>
+    ① <b>环境侧（零改码、收益最大）</b>：让 <code>token.ai-hf.cn</code> 进入 <code>NO_PROXY</code>/<code>no_proxy</code>。
+    当前代码里唯一的显式设置点是 <code>backend/smoke.py:14-15</code>（<code>"127.0.0.1,localhost"</code>），
+    建议在 <b>run_pipeline 构造 worker 子进程 env 处</b>统一保证该网关在直连名单内（不依赖全局环境）。
+    依据：实盘 <code>HTTP_PROXY/HTTPS_PROXY</code> 指向本机动态端口代理，而该端点直连正常返回 401——走代理反而失败。<br>
+    ② <b>代码侧</b>：在流式解析中识别终局事件（<code>AGENT_ENDED</code> / <code>stopReason=failed</code> / <code>FinalStop</code>），<b>立即 kill 并返回可重试码</b>，把 15 分钟等待压到 10 秒。注意保持"idle 900 秒"作为兜底，不要替换掉它。
+  </div>
+</div>
+
+<div class="issue p1">
+  <div class="issue-h"><span class="tag t-p1">P1-1</span><span class="t">rc=67（输出截断）在外层被当普通失败重试 → 必然再次截断</span></div>
+  <div class="row"><div class="l">证据</div><div class="c">
+    <code>run_pipeline.py:765</code> 只把 <code>{130, CONTEXT_EXCEEDED}</code> 提前返回；
+    rc=67 落到 <code>770-771</code> 的 <code>continue</code>，用<b>同一个 task_pack、同一个输出上限</b>重跑
+    （默认 <code>DEFAULT_WORKER_RETRIES=2</code>）。
+  </div></div>
+  <div class="row"><div class="l">影响</div><div class="c">每次截断白烧 2 轮 × 数百秒。截断的正确出路是"提高单次输出上限"，而不是原样重跑（<code>agent_worker</code> 自己都打印了这句提示）。</div></div>
+  <div class="fix"><b>修复</b>：把 <code>OUTPUT_TRUNCATED</code> 加入第 765 行的提前返回集合，与 64/130 同路，交给"提高输出预算"的路由。（注意：这与"容量分层内部不对 67 分包"的红线<b>不冲突</b>——那条约束的是分层内部，这里是外层重试。）</div>
+</div>
+
+<div class="issue p1">
+  <div class="issue-h"><span class="tag t-p1">P1-2</span><span class="t">恢复热路径重复计算全引擎指纹与证据哈希</span></div>
+  <div class="row"><div class="l">证据</div><div class="c">
+    每次 <code>recover_artifact</code> 都重新哈希全部 <code>prompts/*.j2</code> + <code>schemas/*.json</code>
+    + <code>run_pipeline.py</code>（4946 行）（<code>fault_recovery.py:258-270</code>）；
+    <code>dependencies()</code> 在单次调用内被重复计算 <b>≥5 次</b>（<code>:250/:295/:335/:346/:370</code>）；
+    <code>worker_checkpoint.py:44-53</code> 每分包重算 <code>code_hash</code>。
+  </div></div>
+  <div class="row"><div class="l">影响</div><div class="c">O(引擎体积) 的重复磁盘 IO，发生在每个修复任务、每次策略、每次重试上。</div></div>
+  <div class="fix"><b>修复</b>：按 <code>(路径, mtime_ns, size)</code> 在进程内缓存各文件 digest；<code>dependencies()</code> 结果存入局部变量复用。纯优化，不改语义。</div>
+</div>
+
+<div class="issue p1">
+  <div class="issue-h"><span class="tag t-p1">P1-3</span><span class="t">容量分层每策略重建整份证据（已记录为"有意识保留"）</span></div>
+  <div class="row"><div class="l">证据</div><div class="c">
+    真实案例：286KB 任务包 → 43~54 份只读材料 → 约 25 个 worker、约 31 分钟（<code>docs/架构加固实现与验收.md:400</code>）。
+    根因已在 ch024/标题两起事故中消除，但"内容缺口触发全量容量分层"的形态本身未改。
+  </div></div>
+  <div class="row"><div class="l">红线</div><div class="c">
+    <b>不得</b>用"提前熔断"削减修复策略阶梯——该契约被 9 个回归用例锁定，此前尝试已完整回退（同文档 <code>:500-504</code>）。
+  </div></div>
+  <div class="fix"><b>正确方向</b>：让容量分层的<b>证据索引按材料内容寻址</b>（而非按每次尝试的临时路径寻址），从而跨策略复用同一份索引，而不是减少策略数。</div>
+</div>
+
+<!-- ============ P2 ============ -->
+<h2>五、P2 · 健壮性短板（不致命，但值得清理）</h2>
+
+<table>
+  <tr>
+    <th style="width:52px">编号</th>
+    <th style="width:230px">问题</th>
+    <th style="width:210px">证据位置</th>
+    <th>影响与建议</th>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-1</span></td>
+    <td>编排器无顶层异常收敛</td>
+    <td><code>orchestrator.py:178-181</code></td>
+    <td>未分类异常落 rc=-1，<b>不符返回码契约</b>，且不发阶段级恢复事件。建议 <code>_run()</code> 包 <code>except Exception</code> 并映射契约码。</td>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-2</span></td>
+    <td>治理补丁绕过机械纠错层</td>
+    <td><code>run_pipeline.py:3568-3573</code> vs <code>:2675</code></td>
+    <td><code>commit_chapter</code> 调 <code>coerce_delta</code>，<code>commit_governance</code> 不调 → 字段搬迁等确定性修复对治理补丁不可用。建议治理路径对齐。</td>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-3</span></td>
+    <td>停滞签名含 mtime，修复包重写即清零</td>
+    <td><code>orchestrator.py:588</code></td>
+    <td>失败时重写的修复任务包在签名目录内，"无实质进展"仍被判为有变化，<code>stagnant_limit=3</code> 实际退化为 <code>max_attempts=10</code>。建议改用成果文件内容哈希。</td>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-4</span></td>
+    <td>契约指纹遗漏关键语义文件</td>
+    <td><code>engine_contract.py:24-34</code></td>
+    <td>已核实指纹仅含 9 个文件，<b>缺 <code>chronology.py</code>（事件顺序/分组语义）、<code>element_identity.py</code>（引用解析）</b>；<code>synopsis_contract.py</code> 也未登记进恢复指纹。改这些文件不会让旧回执失效 → 可能出现"新规则 + 旧回执"。建议补入。</td>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-5</span></td>
+    <td>简介上限在生成端仍是字面量</td>
+    <td><code>周期审计.j2:38</code></td>
+    <td>模板写死"硬性上限 1500 字"，未在运行期引用 <code>SYNOPSIS_MAX_CHARS</code>（已核实 =1500）。由测试断言守护，属漂移风险。建议模板改为变量注入。同时 <code>docs</code> 内旧文仍写 500，需一并更新。</td>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-6</span></td>
+    <td>进度写入非原子 + 读取无异常保护</td>
+    <td><code>progress_manager.py:69-72, 61-66</code></td>
+    <td><code>save_progress</code> 直接 <code>open('w')</code>，<code>load_progress</code> 无 try → 半写即抛 <code>JSONDecodeError</code>。建议改 <code>mkstemp+os.replace</code>。（注：当前工程根目录<b>无</b> <code>进度.json</code>，触发概率低。）</td>
+  </tr>
+  <tr>
+    <td><span class="tag t-p2">P2-7</span></td>
+    <td><code>agent_worker.py</code> 依赖隐式 sys.path</td>
+    <td><code>tools/agent_worker.py:21</code></td>
+    <td><code>from worker_context import ...</code> 依赖 tools 目录在 sys.path；<code>conftest.py</code> 只加了 <code>scripts/</code>。本次单跑 <code>test_governance_robustness</code> 即因此失败 1 项（全量跑因顺序侥幸通过）。建议显式插入自身目录。</td>
+  </tr>
+</table>
+
+<!-- ============ 澄清 ============ -->
+<h2>六、已澄清 · 这些是取舍，不是缺陷</h2>
+
+<div class="note">
+  为避免误报，以下几项经核对<b>属于有意设计或既有红线</b>，本报告不列为问题：
+</div>
+
+<table>
+  <tr><th style="width:250px">观察到的现象</th><th>澄清</th></tr>
+  <tr>
+    <td>idle（900 秒无进展）判据是否有效？ch018 曾被 1200 秒墙钟杀（最长无输出窗口仅 135 秒）</td>
+    <td><b>经本次实测，idle 判据有效且正在发挥作用</b>——audit_correction_021-025 于 22:35:24 被 idle 正确收手（915 秒），避免了跑满 1200 秒。而 ch018 属<b>另一类</b>：模型<b>持续</b>流式输出（最长间隔仅 135 秒），idle 依其定义（"<b>零输出</b>才判死"，文档 <code>:313-338</code>）本就不该杀它。若想进一步压缩"缓慢但持续"这一类，应引入"<b>产物是否在增长</b>"的实质进展信号，而非调小阈值（会误杀正常长生成）。</td>
+  </tr>
+  <tr>
+    <td>rc=67 未接入容量分层自动分包</td>
+    <td><b>有意识取舍</b>（文档 <code>:358</code>）：分层内部对 67 的语义是"再拆材料不会提高单次输出额度"。本条与 P1-1（外层重试浪费）是两件事。</td>
+  </tr>
+  <tr>
+    <td>恢复路径为内容缺口重建整份容量分层</td>
+    <td><b>红线保护</b>：<code>recover_artifact</code> 必须一次调用走完 targeted→evidence→diagnosed；任何"提前熔断"都等于削减恢复能力（9 个回归用例锁定，已回退一次）。正确方向见 P1-3。</td>
+  </tr>
+  <tr>
+    <td>简介上限 500 字</td>
+    <td><b>已过时</b>。代码实际为 <code>SYNOPSIS_MAX_CHARS = 1500</code>（本次实测确认），并已固定为四分节结构（主线 / 主角处境 / 核心冲突 / 当前进展）。</td>
+  </tr>
+</table>
+
+<!-- ============ 建议 ============ -->
+<h2>七、修复优先级建议</h2>
+
+<table>
+  <tr><th style="width:52px">序</th><th style="width:110px">档位</th><th>动作</th><th style="width:150px">成本 / 收益</th></tr>
+  <tr><td>1</td><td><span class="tag t-p0">P1-0</span></td><td>把 <code>token.ai-hf.cn</code> 加入 <code>NO_PROXY</code>（环境侧）+ 流式识别终局事件立即收手（代码侧）</td><td>0 行 / 小改，每次失败省 ~15 分钟</td></tr>
+  <tr><td>2</td><td><span class="tag t-p0">P0-1</span></td><td>三处 <code>assign_event_group_orders</code> 改 <code>split_repeated=True</code> + 补 1 条回归</td><td>改 3 行，消除一条潜在死锁</td></tr>
+  <tr><td>3</td><td><span class="tag t-p1">P1-1</span></td><td><code>run_pipeline.py:765</code> 的提前返回集合加入 <code>OUTPUT_TRUNCATED</code></td><td>改 1 行，每次截断省 2 轮</td></tr>
+  <tr><td>4</td><td><span class="tag t-p1">P1-2</span></td><td>为指纹 / 依赖哈希加 <code>(路径, mtime, size)</code> 进程内缓存</td><td>改 2 文件，恢复路径显著提速</td></tr>
+  <tr><td>5</td><td><span class="tag t-p0">P0-2</span></td><td>normalize 增加事件集按首次涉及章节的<b>稳定排序</b></td><td>小改，消除第二条潜在死锁</td></tr>
+  <tr><td>6</td><td><span class="tag t-p0">P0-3</span></td><td>normalize 确定性重建非法 <code>补充标签</code></td><td>小改，消除连锁失败</td></tr>
+  <tr><td>7</td><td><span class="tag t-p2">P2-4</span></td><td>契约指纹补入 <code>chronology.py</code> / <code>element_identity.py</code> / <code>synopsis_contract.py</code></td><td>改 2 行，堵住"旧回执放行新规则"</td></tr>
+  <tr><td>8</td><td><span class="tag t-p2">P2-1/3</span></td><td>编排器顶层异常收敛 + 停滞签名改内容哈希</td><td>中等，提升可观测性与止损准确度</td></tr>
+</table>
+
+<div class="danger">
+  <b>实施前必读（项目既定红线）</b>
+  <ul style="margin-bottom:0">
+    <li>校验器<b>新增字段要求前</b>，必须先核对同字段在同阶段的既有模式策略（<code>介绍.标题</code> 事故教训）。</li>
+    <li>校验器<b>新增硬 error 前</b>，必须先确认程序侧存在能自动消除它的确定性路径（ch024 事故教训）。</li>
+    <li>容量分层内部对 rc=67 <b>不做</b>分包；提示词<b>不纳入</b>契约指纹。</li>
+  </ul>
+</div>
+
+<footer>
+  <b>证据范围</b>：本次为只读体检，未修改任何源码或数据。<br>
+  运行时证据取自 <code>拆书_斗破苍穹/质量治理/</code>（worker 日志、编排状态、周期审计状态、自动恢复账本）
+  与 CLI 内部日志 <code>~/.codebuddy/logs/2026-10-12/nd_worker_*.log</code>；<br>
+  代码证据取自 <code>engine/scripts/</code>、<code>engine/tools/</code>、<code>docs/</code>；<br>
+  验证方式：26 个核心模块全量导入 + 106 项核心用例实跑 + 真实故事结构（126 事件）死锁种子模拟 + CLI 终局时间线逐行核对。<br>
+  未完成项：引擎全量 591 项 / 后端 187 项回归因 pipeline 并发挤占未能在本次窗口跑完，建议空闲窗口补跑。
+</footer>
+
+</div>
+</body>
+</html>

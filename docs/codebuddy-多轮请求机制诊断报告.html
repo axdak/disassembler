@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CodeBuddy Worker「多轮请求」机制诊断报告</title>
+<style>
+  :root{
+    --blue-900:#0d3163;
+    --blue-700:#1a4f9c;
+    --blue-500:#2f6fd0;
+    --blue-050:#f2f6fc;
+    --champagne:#c9a227;
+    --champagne-soft:#efe3bc;
+    --ink:#1c2333;
+    --ink-soft:#5a6478;
+    --line:#e3e8ef;
+    --ok:#1f7a4d;
+    --bad:#b4232a;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:#ffffff;
+    color:var(--ink);
+    font-family:"Microsoft YaHei","PingFang SC","Hiragino Sans GB","Source Han Sans SC",sans-serif;
+    font-size:15px;
+    line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:1000px;margin:0 auto;padding:64px 56px 96px;}
+
+  /* ── 页眉 ── */
+  .masthead{border-bottom:2px solid var(--blue-900);padding-bottom:26px;margin-bottom:44px;}
+  .eyebrow{
+    font-size:12px;letter-spacing:.22em;color:var(--champagne);
+    font-weight:700;text-transform:uppercase;margin-bottom:14px;
+  }
+  h1{font-size:31px;line-height:1.35;margin:0 0 12px;color:var(--blue-900);font-weight:700;letter-spacing:.01em;}
+  .subtitle{color:var(--ink-soft);font-size:14px;margin:0;}
+  .meta-line{margin-top:18px;display:flex;flex-wrap:wrap;gap:10px;}
+  .chip{
+    display:inline-block;padding:4px 13px;border:1px solid var(--line);
+    border-radius:999px;font-size:12.5px;color:var(--ink-soft);background:#fff;
+  }
+  .chip.gold{border-color:var(--champagne-soft);background:#fdf9ee;color:#8a6d10;}
+
+  /* ── 章节 ── */
+  h2{
+    font-size:20px;color:var(--blue-900);margin:56px 0 20px;font-weight:700;
+    padding-left:14px;border-left:4px solid var(--champagne);
+  }
+  h3{font-size:16px;color:var(--blue-700);margin:32px 0 12px;font-weight:700;}
+  p{margin:0 0 14px;}
+  .muted{color:var(--ink-soft);}
+  code{
+    font-family:"Cascadia Mono","Consolas","Courier New",monospace;
+    font-size:13px;background:var(--blue-050);color:var(--blue-900);
+    padding:1px 6px;border-radius:4px;border:1px solid #e2eaf6;
+  }
+
+  /* ── 结论卡 ── */
+  .verdict{
+    border:1px solid var(--line);border-left:5px solid var(--blue-700);
+    border-radius:10px;padding:24px 28px;background:linear-gradient(180deg,#fbfcfe,#fff);
+  }
+  .verdict ol{margin:0;padding-left:22px;}
+  .verdict li{margin-bottom:12px;}
+  .verdict li:last-child{margin-bottom:0;}
+  .verdict strong{color:var(--blue-900);}
+
+  /* ── 表格 ── */
+  table{width:100%;border-collapse:collapse;margin:18px 0 8px;font-size:13.5px;}
+  caption{caption-side:top;text-align:left;font-size:13px;color:var(--ink-soft);padding-bottom:8px;}
+  th{
+    background:var(--blue-050);color:var(--blue-900);font-weight:700;
+    text-align:left;padding:11px 13px;border-bottom:1.5px solid #cfdcf0;white-space:nowrap;
+  }
+  td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top;}
+  tbody tr:nth-child(even){background:#fbfcfe;}
+  td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap;}
+  .tag-ok{color:var(--ok);font-weight:700;}
+  .tag-bad{color:var(--bad);font-weight:700;}
+  .tag-warn{color:#8a6d10;font-weight:700;}
+
+  /* ── 代码块 ── */
+  pre{
+    background:#f7f9fc;border:1px solid var(--line);border-radius:8px;
+    padding:16px 18px;overflow-x:auto;font-size:12.5px;line-height:1.7;
+    font-family:"Cascadia Mono","Consolas","Courier New",monospace;
+    color:#243047;margin:14px 0;
+  }
+  pre .hl{background:#fff6d9;display:inline-block;width:100%;}
+
+  /* ── 清单条目 ── */
+  .check{
+    border:1px solid var(--line);border-radius:10px;margin-bottom:16px;overflow:hidden;
+  }
+  .check > .q{
+    background:var(--blue-050);padding:13px 18px;font-weight:700;color:var(--blue-900);
+    font-size:14.5px;display:flex;gap:12px;align-items:baseline;
+  }
+  .check > .q .no{
+    flex:0 0 auto;font-size:12px;color:#fff;background:var(--blue-700);
+    border-radius:5px;padding:2px 8px;letter-spacing:.05em;
+  }
+  .check > .a{padding:16px 18px;}
+  .check dl{margin:0;display:grid;grid-template-columns:74px 1fr;gap:6px 14px;font-size:13.5px;}
+  .check dt{color:var(--ink-soft);font-size:12.5px;padding-top:2px;}
+  .check dd{margin:0;}
+  .conc{
+    margin-top:12px;padding:10px 14px;border-radius:7px;font-size:13.5px;
+    background:#fdf9ee;border-left:3px solid var(--champagne);
+  }
+  .conc::before{content:"结论　";font-weight:700;color:#8a6d10;font-size:12.5px;letter-spacing:.1em;}
+
+  /* ── 时间线 ── */
+  .tl{position:relative;margin:22px 0 8px;padding-left:26px;}
+  .tl::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;background:var(--line);}
+  .tl-item{position:relative;margin-bottom:20px;}
+  .tl-item::before{
+    content:"";position:absolute;left:-26px;top:7px;width:10px;height:10px;
+    border-radius:50%;background:#fff;border:2px solid var(--blue-500);
+  }
+  .tl-item.crit::before{border-color:var(--bad);background:var(--bad);}
+  .tl-item.gold::before{border-color:var(--champagne);background:var(--champagne);}
+  .tl-time{font-size:12.5px;font-weight:700;color:var(--blue-700);font-variant-numeric:tabular-nums;}
+  .tl-body{font-size:13.5px;margin-top:2px;}
+
+  .note{
+    border:1px dashed var(--champagne-soft);background:#fefcf6;border-radius:8px;
+    padding:16px 20px;font-size:13.5px;margin:20px 0;
+  }
+  .note b{color:#8a6d10;}
+
+  .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:26px 0 6px;}
+  .kpi div{border:1px solid var(--line);border-radius:10px;padding:16px 14px;background:#fff;}
+  .kpi .k{font-size:11.5px;color:var(--ink-soft);letter-spacing:.08em;}
+  .kpi .v{font-size:22px;font-weight:700;color:var(--blue-900);font-variant-numeric:tabular-nums;margin-top:4px;}
+  .kpi .u{font-size:12px;color:var(--ink-soft);font-weight:400;margin-left:3px;}
+
+  footer{margin-top:64px;padding-top:20px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-soft);}
+  @media print{
+    body{font-size:12.5px;}
+    .page{max-width:none;padding:0;}
+    h2{page-break-after:avoid;}
+    .check,table,.tl-item{page-break-inside:avoid;}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">Diagnostic Report</div>
+    <h1>CodeBuddy Worker「多轮模型请求」机制诊断报告</h1>
+    <p class="subtitle">拆书_斗破苍穹 · 第 016–018 章 Delta 提取 worker 日志与 CLI 内部日志交叉核验</p>
+    <div class="meta-line">
+      <span class="chip">数据区间 2026-10-12 17:54 – 20:09</span>
+      <span class="chip">样本 4 次 worker 运行</span>
+      <span class="chip gold">模型 custom-local:Deepseek-V4.1-Flash-SS</span>
+      <span class="chip gold">provider = codebuddy</span>
+    </div>
+  </header>
+
+  <h2>一、结论摘要</h2>
+  <div class="verdict">
+    <ol>
+      <li>日志中的「<strong>CLI 模型请求第 N 轮</strong>」<strong>不是重试，也不是多次分包</strong>。它是同一次 agent 会话内部，模型与只读上下文工具之间往返所产生的一次次真实模型调用，每出现一个新的请求标识即计一轮。</li>
+      <li><strong>真实模型请求数 = 日志显示轮数 − 1</strong>。第 1 轮由会话标识占用，并非一次独立请求；该偏差来自计数表达式 <code>_messageId or _requestId</code> 的兜底顺序。</li>
+      <li>多轮的直接来源是<strong>工具调用循环</strong>：模型先以长思维链输出推理（单轮可达 1.18 MB、195 秒），随后调用 <code>mcp__nd_context__list_context</code>、<code>read_context</code> 读取冻结材料，读到结果后再请求一次，直至最终调用 <code>StructuredOutput</code> 提交产物。</li>
+      <li>第 018 章<strong>首次尝试失败（rc=124）的根因不在模型、提示词或流水线</strong>，而在操作系统于 <code>18:06:02</code> 进入现代待机（Modern Standby）并持续冻结至 <code>20:03:44</code>；唤醒瞬间墙钟判据已越过 1200 秒上限，worker 被立即判定超时。自动重试在唤醒后 1 秒启动，300 秒即完成。</li>
+    </ol>
+  </div>
+
+  <div class="kpi">
+    <div><div class="k">核验样本</div><div class="v">4<span class="u">次运行</span></div></div>
+    <div><div class="k">真实模型请求</div><div class="v">12<span class="u">次</span></div></div>
+    <div><div class="k">待机冻结时长</div><div class="v">1:57<span class="u">时:分</span></div></div>
+    <div><div class="k">失败尝试</div><div class="v">1<span class="u">/4</span></div></div>
+  </div>
+
+  <h2>二、核查清单与逐项结论</h2>
+  <p class="muted">以下 11 项按「谁打印 → 判据是什么 → 为何多轮 → 为何失败 → 为何又成功」的顺序逐项查证，每项均给出代码位置或日志原文作为证据。</p>
+
+  <div class="check">
+    <div class="q"><span class="no">01</span>「CLI 模型请求第 N 轮」这句话由谁打印？</div>
+    <div class="a">
+      <dl>
+        <dt>核查</dt><dd>全仓检索该文案，命中唯一来源。</dd>
+        <dt>证据</dt><dd><code>engine/tools/agent_worker.py:503</code>，位于 <code>run_structured_stream()</code> 的流式解析循环内。</dd>
+      </dl>
+      <div class="conc">该行由 worker 自己打印到 stderr，不是 CodeBuddy CLI 的输出，因此不受 CLI 日志缓冲影响。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">02</span>「一轮」的判定条件是什么？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd>
+<pre>request_id = value.get("_messageId") or value.get("_requestId")
+if isinstance(request_id, str) and request_id not in request_ids:
+    request_ids.add(request_id)
+    print(f"CLI 模型请求第 {len(request_ids)} 轮；等待结构化产物。")</pre>
+        </dd>
+        <dt>证据</dt><dd>同文件 498–500 行注释明确二者语义：<code>_requestId</code> 是 CodeBuddy 的<strong>会话 ID</strong>，<code>_messageId</code> 是 ModelProvider 记录的<strong>每次模型请求 ID</strong>。</dd>
+      </dl>
+      <div class="conc">轮数 = 去重集合 <code>{会话 ID} ∪ {各次请求 ID}</code> 的基数。由于会话 ID 与首个请求 ID 不同且都会被计入，显示轮数恒比真实请求数多 1。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">03</span>这个偏差在测试里是否被固化？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd><code>engine/tests/test_periodic_capacity_delivery.py:41-50</code> 构造 12 个不同 <code>_messageId</code>、共用同一个 <code>_requestId</code>（值即 <code>"same-conversation"</code>）的事件流，断言输出包含「CLI 模型请求第 12 轮」。该用例刻意避免独立断言第 1 轮的归属。</dd>
+      </dl>
+      <div class="conc">「多 ID 计多轮」是设计预期行为，不是偶发异常；但计数器把会话 ID 一并计入，属于可读性上的瑕疵。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">04</span>为什么会发起多次请求？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd>CLI 内部日志 <code>~/.codebuddy/logs/2026-10-12/nd_worker_b0muzlks__*.log</code>（第 016 章）显示：<code>17:57:22.665 broadcastMcpUiForToolCall tool=mcp__nd_context__list_context</code> → <code>17:57:22.670 TOOL_ENDED → agent_running</code> → <code>17:57:22.715 MODEL_REQUEST_STARTED</code> → 下一次 <code>Sending request</code>。</dd>
+        <dt>证据</dt><dd>第 017 章日志：<code>18:03:24.640 TOOL_STARTED</code> → <code>18:03:24.641 ToolManager execute tool=StructuredOutput</code> → <code>18:03:24.715 Structured output captured successfully</code>。</dd>
+      </dl>
+      <div class="conc">这是标准的 agent 工具循环：模型 → 工具调用 → 工具结果回填 → 再次请求模型 → … → 提交 <code>StructuredOutput</code> 后会话结束。轮数取决于模型自主决定读几次材料，因此各章不同。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">05</span>多轮是否等于「重试」或「分包」？</div>
+    <div class="a">
+      <dl>
+        <dt>核查</dt><dd>对比 worker 日志中的 attempt 标记与轮次标记。</dd>
+        <dt>证据</dt><dd>第 016 章在 <code>attempt=1/3</code> 内出现 5 轮；重试会新开 <code>attempt=2/3</code> 并生成新的日志文件。两者是不同层级的概念。</dd>
+        <dt>证据</dt><dd>容量保护返回码 <code>67</code>（输出预算不足）与 <code>64</code>（输入超容量）在本次样本中均未出现，侧面印证未发生分包。</dd>
+      </dl>
+      <div class="conc">轮次属于单次 attempt 内部的会话细节；重试属于 attempt 之间的调度层。二者不可混同。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">06</span>单轮输出规模有多大？是否逼近输出上限？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd>CLI 日志 <code>Stream completed</code> 记录：第 016 章第 1 轮 <code>chunks=5124, bytes=1179392, elapsed=195355ms</code>；第 017 章唯一一轮 <code>chunks=5358, bytes=1254311, elapsed=207545ms</code>；第 018 章重试第 4 轮 <code>chunks=3945, bytes=930955, elapsed=236265ms</code>。</dd>
+        <dt>证据</dt><dd>上述三条均无 <code>finish_reason="length"</code>，即模型为自然结束而非被输出上限截断。</dd>
+      </dl>
+      <div class="conc">字节数为 SSE 原始流量，含思维链增量与协议包装，不等于产物文本量；未触发截断保护属于正常结果，无需调整单次输出上限。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">07</span>为什么第 018 章首次尝试会失败？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd>worker 日志尾部：<code>命令执行超时（1200 秒），已终止。</code> 且 <code>本次最长无输出窗口 135 秒（无进展上限 900 秒）</code>。</dd>
+        <dt>证据</dt><dd>系统事件日志（Microsoft-Windows-Kernel-Power）：<code>18:06:02 ID=506 系统正在进入新型待机状态</code>；<code>20:03:44 ID=507 系统正在退出新型待机状态</code>；会话编号 <code>19 → 20</code>。</dd>
+        <dt>证据</dt><dd>CLI 内部日志 <code>nd_worker_fer771z8__*.log</code> 最后一条写入为 <code>18:05:34.864</code>，此后至 20:08 无任何记录。</dd>
+      </dl>
+      <div class="conc">真凶是操作系统的现代待机，而非模型卡死。worker 进程、CLI 进程、网络流三者同时被系统冻结，恢复供电的瞬间即被墙钟判据终止。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">08</span>日志写「超时 1200 秒」，为何实际横跨近 2 小时？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd><code>run_pipeline.py:355</code> <code>deadline = started + timeout</code>，判据基于 <code>time.monotonic()</code>。Windows 上该时钟包含待机时段。</dd>
+        <dt>证据</dt><dd>worker 启动于 <code>18:03:30</code>，唤醒于 <code>20:03:44</code>；若累计单调时间已越过 1200 秒，唤醒后首次循环即判定超时，与日志「1200 秒」文案一致。</dd>
+      </dl>
+      <div class="conc">文本中的 1200 秒是真实配置值（<code>DEFAULT_WORKER_TIMEOUT_SECONDS</code>，可由工程设置覆盖），并无计算错误；悬殊来自「有效运行时长 ≠ 墙钟时长」。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">09</span>既然冻结 2 小时，为何「最长无输出窗口」只有 135 秒？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd><code>run_pipeline.py:377-381</code>：<code>longest_gap</code> 仅在 <code>drain_output()</code> 取到队列新行时更新。待机期间主循环本身被冻结，不产生新的行，因而也不重算间隔。</dd>
+        <dt>证据</dt><dd>worker 日志中最后一条心跳为「已等待 150 秒」，此后直接跳到超时诊断，说明主循环在冻结前已停止推进。</dd>
+      </dl>
+      <div class="conc">135 秒反映的是冻结前模型的正常「思考—输出」间隔（约等于第 2 轮到第 3 轮之间），并未掩盖卡死，只是待机不计入该统计。这与无进展上限 900 秒未触发是自洽的。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">10</span>首次失败后如何恢复？有无残留损伤？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd>日志：<code>worker retry backoff: 1s</code> → <code>worker start: task=delta attempt=2/3</code>（<code>20:03:45</code>）→ <code>provider 已通过 stdout 捕获写入: 第018章_…_八极崩.json（14221 字符）</code> → <code>第018章提交完成。</code></dd>
+        <dt>证据</dt><dd>产物写入采用临时文件 + <code>os.replace</code> 原子替换（<code>_write_captured_output_atomically</code>），失败尝试不会留下半成品文件。</dd>
+      </dl>
+      <div class="conc">重试链路完整有效，先前的 Delta 产物与断点均未受影响，无需人工干预。</div>
+    </div>
+  </div>
+
+  <div class="check">
+    <div class="q"><span class="no">11</span>模型请求最终发往何处？</div>
+    <div class="a">
+      <dl>
+        <dt>证据</dt><dd>CLI 日志：<code>Using custom URL for model custom-local:Deepseek-V4.1-Flash-SS: https://token.ai-hf.cn/v1/chat/completions</code>。</dd>
+        <dt>证据</dt><dd>第 016 章日志含 <code>shouldCompact … totalTokens=30556, threshold=92.0%</code>，说明上下文余量充足，不存在因上下文超限而被迫重发的情形。</dd>
+      </dl>
+      <div class="conc">请求经网关直连纯文本模型，工具调用走 OpenAI 风格 <code>finish_reason="tool_calls"</code>，协议正常。</div>
+    </div>
+  </div>
+
+  <h2>三、轮次生成机制图解</h2>
+  <p class="muted">下图以第 016 章为例，说明一次 worker 运行内部的控制流与「显示轮数」的对应关系。</p>
+
+  <svg viewBox="0 0 900 430" width="100%" role="img" aria-label="轮次生成机制流程图" style="margin:10px 0 6px;">
+    <defs>
+      <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+        <path d="M0,0 L7,3.2 L0,6.4 z" fill="#8c9ab0"/>
+      </marker>
+      <style>
+        .bx{fill:#ffffff;stroke:#cfdcf0;stroke-width:1.4;rx:9;}
+        .bx.blue{fill:#f2f6fc;stroke:#9dbde8;}
+        .bx.gold{fill:#fdf9ee;stroke:#e0cb8a;}
+        .bx.grey{fill:#f7f8fa;stroke:#dfe3ea;}
+        .t{font-family:"Microsoft YaHei","PingFang SC",sans-serif;fill:#1c2333;font-size:13px;}
+        .ts{font-family:"Microsoft YaHei","PingFang SC",sans-serif;fill:#5a6478;font-size:11.5px;}
+        .tw{font-family:"Microsoft YaHei","PingFang SC",sans-serif;fill:#0d3163;font-size:12.5px;font-weight:700;}
+        .tg{font-family:"Microsoft YaHei","PingFang SC",sans-serif;fill:#8a6d10;font-size:12px;font-weight:700;}
+        .ln{stroke:#8c9ab0;stroke-width:1.4;fill:none;marker-end:url(#arw);}
+      </style>
+    </defs>
+
+    <!-- 左列：worker 视角 -->
+    <text class="tw" x="18" y="26">worker 日志视角</text>
+    <rect class="bx grey" x="18" y="40" width="212" height="46"/>
+    <text class="t" x="32" y="60">第 1 轮 = 会话 ID</text>
+    <text class="ts" x="32" y="77">（非独立请求，占用 1 个计数）</text>
+
+    <rect class="bx grey" x="18" y="100" width="212" height="40"/>
+    <text class="t" x="32" y="125">第 2 轮 = 请求 ①</text>
+    <rect class="bx grey" x="18" y="152" width="212" height="40"/>
+    <text class="t" x="32" y="177">第 3 轮 = 请求 ②</text>
+    <rect class="bx grey" x="18" y="204" width="212" height="40"/>
+    <text class="t" x="32" y="229">第 4 轮 = 请求 ③</text>
+    <rect class="bx grey" x="18" y="256" width="212" height="40"/>
+    <text class="t" x="32" y="281">第 5 轮 = 请求 ④</text>
+    <text class="tg" x="18" y="322">显示 5 轮 → 真实请求 4 次</text>
+
+    <!-- 中列：CLI 会话 -->
+    <text class="tw" x="292" y="26">CodeBuddy 会话内部（单次 attempt）</text>
+    <rect class="bx blue" x="292" y="40" width="268" height="60"/>
+    <text class="t" x="306" y="62">请求 ①：长思维链推理</text>
+    <text class="ts" x="306" y="80">5124 chunks / 1.18 MB / 195 秒</text>
+
+    <rect class="bx gold" x="292" y="124" width="268" height="52"/>
+    <text class="t" x="306" y="145">工具调用 list_context</text>
+    <text class="ts" x="306" y="163">读只读任务材料清单</text>
+
+    <rect class="bx blue" x="292" y="200" width="268" height="46"/>
+    <text class="t" x="306" y="222">请求 ②③：读材料后应答</text>
+    <text class="ts" x="306" y="238">9.5 KB / 8.8 秒　7.3 KB / 10.8 秒</text>
+
+    <rect class="bx blue" x="292" y="270" width="268" height="46"/>
+    <text class="t" x="306" y="292">请求 ④：生成完整 Delta</text>
+    <text class="ts" x="306" y="308">28 KB / 68.8 秒</text>
+
+    <!-- 右列：收尾 -->
+    <text class="tw" x="626" y="26">产物落地</text>
+    <rect class="bx" x="626" y="270" width="256" height="46"/>
+    <text class="t" x="640" y="291">StructuredOutput 提交</text>
+    <text class="ts" x="640" y="308">会话结束，产物原子写入</text>
+    <rect class="bx grey" x="626" y="336" width="256" height="46"/>
+    <text class="t" x="640" y="357">第016章 12585 字符</text>
+    <text class="ts" x="640" y="374">worker 总耗时 284 秒</text>
+
+    <!-- 连线 -->
+    <path class="ln" d="M230 60 L292 68"/>
+    <path class="ln" d="M230 120 L292 78"/>
+    <path class="ln" d="M426 100 L426 124"/>
+    <path class="ln" d="M426 176 L426 200"/>
+    <path class="ln" d="M426 246 L426 270"/>
+    <path class="ln" d="M560 293 L626 293"/>
+    <path class="ln" d="M754 316 L754 336"/>
+    <path class="ln" d="M230 172 L292 214"/>
+    <path class="ln" d="M230 224 L292 286"/>
+    <path class="ln" d="M230 276 L292 292"/>
+
+    <text class="ts" x="292" y="400">注：请求之间由 TOOL_ENDED → MODEL_REQUEST_STARTED 事件衔接，即 agent 工具循环；</text>
+    <text class="ts" x="292" y="418">各章轮数不同，取决于模型自主决定读取材料的次数。</text>
+  </svg>
+
+  <h2>四、四次运行的量化对照</h2>
+  <table>
+    <caption>轮数取自 worker 日志，请求明细取自 CodeBuddy CLI 内部日志（<code>~/.codebuddy/logs/2026-10-12/</code>）。</caption>
+    <thead>
+      <tr>
+        <th>任务</th><th>启动时刻</th><th class="num">显示轮数</th><th class="num">真实请求</th>
+        <th>各请求规模（chunks / bytes / 耗时）</th><th class="num">总耗时</th><th>结果</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>第 016 章 Delta</td><td>17:54:01</td><td class="num">5</td><td class="num">4</td>
+        <td>5124 / 1,179,392 / 195.4s<br>40 / 9,524 / 8.8s<br>30 / 7,293 / 10.8s<br>39 / 28,189 / 68.8s</td>
+        <td class="num">284s</td><td class="tag-ok">成功　12585 字符</td>
+      </tr>
+      <tr>
+        <td>第 017 章 Delta</td><td>17:58:54</td><td class="num">2</td><td class="num">1</td>
+        <td>5358 / 1,254,311 / 207.5s</td>
+        <td class="num">270s</td><td class="tag-ok">成功　13784 字符</td>
+      </tr>
+      <tr>
+        <td>第 018 章 Delta（首次）</td><td>18:03:30</td><td class="num">4</td><td class="num">3<span class="muted">（推定）</span></td>
+        <td>3097 / 712,041 / 116.3s<span class="muted">（被待机打断，未完成）</span><br><span class="muted">第 2、3 次请求发生于 18:05:34 之后，CLI 日志未及落盘</span></td>
+        <td class="num">7200s<span class="muted">（含待机）</span></td><td class="tag-bad">失败　rc=124</td>
+      </tr>
+      <tr>
+        <td>第 018 章 Delta（重试）</td><td>20:03:45</td><td class="num">5</td><td class="num">4</td>
+        <td>18 / 4,192 / 11.5s<br>10 / 2,674 / 6.2s<br>13 / 3,476 / 8.1s<br>3945 / 930,955 / 236.3s</td>
+        <td class="num">300s</td><td class="tag-ok">成功　14221 字符</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <b>读表提示</b>　同一章节两次运行的请求次数并不相同（3 次与 4 次），印证轮数由模型自身的工具调用决策产生，而非流水线固定切分。首次尝试真正完成的只有第 1 轮，其规模与另两章首轮处于同一量级，说明该轮本身并无异常。
+  </div>
+
+  <h2>五、第 018 章首次失败的时间线证据链</h2>
+  <p class="muted">三条独立来源在同一时刻收敛，构成闭环证据。所有时刻均为本机本地时间（UTC+8）。</p>
+
+  <div class="tl">
+    <div class="tl-item">
+      <div class="tl-time">18:03:30</div>
+      <div class="tl-body">worker <code>attempt=1/3</code> 启动，日志文件 <code>delta_ch018_20261012_180330_104891.txt</code>。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">18:03:38 – 18:05:34</div>
+      <div class="tl-body">CLI 发起请求 ①，持续流式输出 <code>chunks=3097，bytes=712,041</code>，<code>idle</code> 始终小于 1 秒——模型活跃，未卡死。</div>
+    </div>
+    <div class="tl-item crit">
+      <div class="tl-time">18:06:02</div>
+      <div class="tl-body"><b>Microsoft-Windows-Kernel-Power ID=506「系统正在进入新型待机状态」</b>。worker 日志最后一条心跳停在「已等待 150 秒」，CLI 内部日志最后写入停在 18:05:34.864，两条时间线同时中断。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">18:06:18 – 18:06:20</div>
+      <div class="tl-body">备用连接状态转为 Disconnected（Adaptive Connected Standby / NIC compliance），Intel Wi-Fi 6 AX101 驱动 Miniport Halt——网络流被系统掐断，与该机型既有断连现象同源。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">18:24:23 – 18:24:28</div>
+      <div class="tl-body">短暂唤醒抖动：Service Control Manager 记录 <code>gwservice</code>、<code>gwupdater</code> 事务响应超时（30000 毫秒）；ID=507 退出待机后 <b>ID=506 立即再次进入待机</b>。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-time">18:25:37 – 20:03:40</div>
+      <div class="tl-body">系统事件静默，持续处于现代待机。</div>
+    </div>
+    <div class="tl-item crit">
+      <div class="tl-time">20:03:40 – 20:03:44</div>
+      <div class="tl-body"><b>Win32k ID=701 解除输入屏蔽</b>；<b>Kernel-Power ID=507「系统正在退出新型待机状态」</b>，会话编号 19 → 20。恢复运行的第一时间，墙钟判据立即命中，worker 写入「命令执行超时（1200 秒），已终止」，日志文件时间戳定格在 20:03。</div>
+    </div>
+    <div class="tl-item gold">
+      <div class="tl-time">20:03:45 – 20:08:53</div>
+      <div class="tl-body"><code>worker retry backoff: 1s</code> 后 <code>attempt=2/3</code> 启动。4 次模型请求，最后一轮 236 秒生成完整 JSON，20:08:53 提交 <code>StructuredOutput</code>，产物 14221 字符，章节提交完成。</div>
+    </div>
+  </div>
+
+  <h2>六、结论与建议</h2>
+
+  <h3>6.1 关于「多轮」的判定</h3>
+  <p>多轮属<strong>正常且必要</strong>的行为，无需干预。冻结材料以只读 MCP 工具暴露给模型后，模型需要先枚举材料、再逐项读取，每次工具往返都构成一次新的模型请求；最后一轮才产出结构化产物。这也是任务包使用 <code>--allowedTools</code> 精确授权而<strong>刻意不设 <code>--max-turns</code> 上限</strong>的原因——<code>agent_worker.py:169-172</code> 的注释已说明：隐式的低轮数上限会在工具提交之前终止会话，产生空结果。</p>
+
+  <h3>6.2 可选的观测性改进</h3>
+  <p>当前计数表达式 <code>value.get("_messageId") or value.get("_requestId")</code> 会把会话 ID 计入轮次，导致读者把「5 轮」误读为 5 次模型调用。若希望日志更直观，可将会话标识与请求标识分列计数（例如输出「会话 x1，模型请求 N 次」）。此项属观测口径调整，不改变调度语义，亦不涉及契约指纹。</p>
+
+  <h3>6.3 针对本次失败的环境级建议</h3>
+  <p>本次失败已由自动重试闭环解决，代码侧无需改动。若要降低同类中断概率，可在长时间批量运行期间抑制系统待机：</p>
+  <ul>
+    <li>接通电源时将待机超时设为「从不」，例如在管理员终端执行 <code>powercfg /change standby-timeout-ac 0</code>；此为会话级或用户级电源设置，不触及项目配置。</li>
+    <li>批量运行期间避免合盖，或在电源计划中将「合盖操作」设为「不采取任何操作」。</li>
+    <li>本机 Intel Wi-Fi 6 AX101 在待机过渡期反复出现 <code>Miniport Halt</code> 与 <code>DRIPS</code> 设备重枚举，与已知的间歇断连现象一致；若需彻底规避，可在此基础上进一步排查驱动版本。</li>
+  </ul>
+
+  <div class="note">
+    <b>判定口径说明</b>　第 018 章首次尝试的「3 次请求」中，仅第 1 次有 CLI 日志直接留痕，后 2 次依据轮数公式与首个请求在 18:05:34 被打断的事实推定。其余三组数据均有逐条日志支撑。
+  </div>
+
+  <footer>
+    报告生成于 2026-10-12　·　依据来源：worker 日志（<code>拆书_斗破苍穹/质量治理/worker日志/</code>）、CodeBuddy CLI 内部日志（<code>~/.codebuddy/logs/2026-10-12/</code>）、Windows 系统事件日志（Microsoft-Windows-Kernel-Power / Win32k / Service Control Manager）、引擎源码（<code>engine/tools/agent_worker.py</code>、<code>engine/scripts/run_pipeline.py</code>、<code>engine/scripts/provider_stream.py</code>）。
+  </footer>
+
+</div>
+</body>
+</html>
