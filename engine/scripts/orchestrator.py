@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import threading
+import traceback
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -113,17 +115,41 @@ class Orchestrator:
         self.bus.emit(Event(type, stage=stage, detail=detail, data=data or {}))
 
     def run(self) -> int:
-        """Freeze this run's capacity without changing another project's environment."""
-        with capacity_scope(asdict(self.config)):
-            return self._run()
+        """Freeze capacity and convert unexpected failures into the blocked contract."""
+        try:
+            with capacity_scope(asdict(self.config)):
+                return self._run()
+        except Exception as exc:
+            # Only ordinary failures are converted: cancellation/system-exit
+            # BaseExceptions still propagate. Never retry an unexplained crash.
+            stage = self.state.current_stage
+            diagnostic = traceback.format_exc()
+            self.state.last_error = (
+                f"{stage}: {type(exc).__name__}: {exc}。"
+                "请根据诊断堆栈检查输入文件、配置或目录权限，修复后从当前阶段续跑。"
+            )
+            data = {"traceback": diagnostic, "exception_type": type(exc).__name__}
+            try:
+                self.state.save()
+            except Exception as persistence_error:
+                # Keep the original traceback even when the checkpoint itself
+                # cannot be written; the event/log remains actionable.
+                data["persistence_error"] = f"{type(persistence_error).__name__}: {persistence_error}"
+                self.state.last_error += f" 状态保存失败：{data['persistence_error']}"
+            print(diagnostic, file=sys.stderr)
+            self.emit("stage_fail", stage=stage, detail=self.state.last_error, data=data)
+            self.emit("pipeline_blocked", stage=stage, detail=self.state.last_error, data=data)
+            return 1
 
     def _run(self) -> int:
         """运行全流程。返回 0=全部完成，1=硬阻塞/致命，2=已取消。"""
-        begin_retry_session(self.project_dir)
-        set_cancel_event(self._cancel)
-        set_recovery_observer(lambda detail, data: self.emit(
-            "recovery_progress", stage=self.state.current_stage, detail=detail, data=data))
         try:
+            # Preparation also belongs to this lifetime so partially installed
+            # cancellation/recovery hooks are cleaned up after setup errors.
+            begin_retry_session(self.project_dir)
+            set_cancel_event(self._cancel)
+            set_recovery_observer(lambda detail, data: self.emit(
+                "recovery_progress", stage=self.state.current_stage, detail=detail, data=data))
             self._reconcile_chapter_scope()
             self._reconcile_recovery_state()
             self.emit("pipeline_start", stage=self.state.current_stage)
@@ -571,18 +597,47 @@ class Orchestrator:
     }
 
     def _signature(self, stage: str) -> str:
-        """阶段关键产物签名，用于停滞检测。按阶段选取关键路径，递归统计文件数/大小/最新mtime。"""
+        """Hash result contents and semantic progress, excluding repair diagnostics.
+
+        Task regeneration, file touches, and progress heartbeat timestamps do
+        not mean a failed stage advanced. Content hashes also detect equal-size
+        revisions made within one filesystem timestamp interval.
+        """
+        def semantic_progress(value):
+            if isinstance(value, dict):
+                return {key: semantic_progress(item) for key, item in value.items()
+                        if key not in {"创建时间", "更新时间", "完成时间"}}
+            if isinstance(value, list):
+                return [semantic_progress(item) for item in value]
+            return value
+
         rels = self._SIG_PATHS.get(stage, ("进度.json",))
-        files = size = max_mtime = 0
+        digest = hashlib.sha256()
+        files = 0
         for rel in rels:
             p = self.project_dir / rel
             if not p.exists():
                 continue
-            candidates = [p] if p.is_file() else [f for f in p.rglob("*") if f.is_file()]
+            candidates = [p] if p.is_file() else sorted(f for f in p.rglob("*") if f.is_file())
             for f in candidates:
-                st = f.stat()
-                size += st.st_size
-                if st.st_mtime > max_mtime:
-                    max_mtime = st.st_mtime
+                relative = f.relative_to(self.project_dir)
+                if (any(part in {"_任务包", "_修复任务", "_诊断", "自动恢复"} for part in relative.parts)
+                        or f.name.startswith(".")
+                        or f.name.endswith((".tmp", ".log", ".capacity.json", ".capacity-partial.json", ".context-inputs.json"))):
+                    continue
+                content = f.read_bytes()
+                if f.suffix.lower() == ".json":
+                    try:
+                        value = json.loads(content)
+                        if relative.as_posix() == "进度.json":
+                            value = semantic_progress(value)
+                        content = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                             separators=(",", ":")).encode("utf-8")
+                    except (ValueError, UnicodeError):
+                        # Malformed output still has meaningful bytes; its
+                        # validation belongs to the owning stage.
+                        pass
+                digest.update(relative.as_posix().encode("utf-8") + b"\0")
+                digest.update(hashlib.sha256(content).digest())
                 files += 1
-        return f"{stage}|files={files}|size={size}|mtime={int(max_mtime)}"
+        return f"{stage}|files={files}|sha256={digest.hexdigest()}"

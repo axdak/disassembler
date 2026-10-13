@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from context_budget import CONTEXT_EXCEEDED, ContextBudget, admit_pack, estimate_tokens, inspect_pack
+from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, ContextBudget, admit_pack, estimate_tokens, inspect_pack
 
 import argparse
 import hashlib
@@ -762,8 +762,9 @@ def _run_worker(
         if returncode != 0:
             finish_repair(ticket, returncode)
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
-            if returncode in {130, CONTEXT_EXCEEDED}:
-                return returncode  # Capacity and user cancellation have different recovery routes.
+            if returncode in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
+                # 输出截断必须交上层处理预算；原样重试既不增加输出上限，也不能分包输入解决。
+                return returncode
             if (defer_artifact_repair and returncode == 1 and expected_output.is_file()
                     and expected_output.stat().st_size and invalid_output_artifacts([expected_output])):
                 return 1  # Give deterministic repair the malformed artifact first.
@@ -1109,7 +1110,8 @@ def _run_multi_output_worker(
             log_path.write_text(output, encoding="utf-8")
         if returncode != 0:
             print(f"worker failed: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
-            if returncode in {130, CONTEXT_EXCEEDED}:
+            if returncode in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
+                # 与单产物入口一致，保留输出预算错误，不重新发送相同请求。
                 return returncode
             if attempt < attempts:
                 continue
@@ -1816,10 +1818,18 @@ def build_delta_story_context(story: Path, project_dir: Path, chapter_seq: int,
 
 
 
+def render_audit_prompt(**context) -> str:
+    """周期治理生成端实时引用简介软契约，避免模板、归并和消费端漂移。"""
+    import synopsis_contract
+    return render_prompt("流水线/周期审计.j2", **context,
+                         synopsis_max_chars=synopsis_contract.SYNOPSIS_MAX_CHARS,
+                         synopsis_sections=synopsis_contract.synopsis_section_spec())
+
+
 def write_governance_route(project_dir, start, end, pack, extra_sources=()):
     """Prepare complete bounded evidence without inventing subchapter identities."""
     paths = audit_paths(project_dir, start, end)
-    contract = render_prompt("流水线/周期审计.j2", start=start, end=end,
+    contract = render_audit_prompt(start=start, end=end,
                              correction_path=paths["correction"], project_dir=project_dir,
                              run_pipeline_path=script_path("run_pipeline.py"), full_story_json="",
                              story_index="", relevant_details="", previous_correction=None,
@@ -1918,8 +1928,7 @@ def write_audit_pack(
     selected_mode = ""
     for mode in fallback_modes:
         candidate_full_story, candidate_index, candidate_details = mode_contexts[mode]
-        candidate = render_prompt(
-            "流水线/周期审计.j2",
+        candidate = render_audit_prompt(
             start=start,
             end=end,
             correction_path=paths["correction"],
@@ -3540,6 +3549,8 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         patch.with_suffix(".repair.md").write_text(content, encoding="utf-8")
         return 1
 
+    # 在语法、形状和字段位置纠错之前逐字保存输入；失败和重复提交均有独立证据。
+    shutil.copy2(patch, governance_dir / f"original_input_{ts}.json")
     rc = repair_llm_json(patch, report_repair_json, backup=True)
     if rc != 0:
         print(f"治理补丁 LLM JSON 语法修复失败: {report_repair_json}")
@@ -3548,6 +3559,12 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     range_match = re.fullmatch(r"correction_(\d+)-(\d+)\.json", patch.name) if is_periodic_patch else None
     known_range = f"第{range_match[1]}章-第{range_match[2]}章" if range_match else ""
     normalized, changes = normalize_governance_patch(patch_doc, known_range)
+    # 治理只复用无损的位置搬迁，不套用章节类型转换或补齐规则，避免改变稀疏补丁语义。
+    # 未知目标、冲突字段及时间/涉及章节仍交原治理校验器判断，绝不删除来换取通过。
+    from coerce_delta import relocate_element_fields
+    if isinstance(normalized, dict):
+        changes.extend(relocate_element_fields(normalized))
+    # 非对象根节点保留原状，经原校验/failed 路径提供修复上下文，而不是在纠错层崩溃。
     if changes:
         # Keep the complete original before any reversible shape correction.
         shutil.copy2(patch, governance_dir / f"original_contract_{ts}.json")

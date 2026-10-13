@@ -24,6 +24,8 @@ import os
 import json
 from datetime import datetime
 
+from merge_delta import save_json
+
 PROGRESS_FILE = "进度.json"
 
 STEPS = {
@@ -59,17 +61,29 @@ def get_progress_path(project_dir):
 
 
 def load_progress(project_dir):
+    """Read a checkpoint without overwriting corruption or inventing completion."""
     path = get_progress_path(project_dir)
     if os.path.isfile(path):
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("进度根节点必须为 JSON 对象")
+            return data
+        except (ValueError, UnicodeError) as exc:
+            # Reconciliation requires a trustworthy checkpoint and cannot
+            # reconstruct all report/stage metadata from chapter files alone.
+            raise ValueError(
+                f"进度文件损坏，原文件已保留：{path}。"
+                "请先从可信备份恢复该文件，再运行 progress_manager.py reconcile 核对产物。"
+                f" 原因：{exc}"
+            ) from exc
     return None
 
 
 def save_progress(project_dir, data):
-    path = get_progress_path(project_dir)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """Atomically publish a complete checkpoint using the shared JSON writer."""
+    save_json(get_progress_path(project_dir), data)
 
 
 def get_all_chapters(project_dir):

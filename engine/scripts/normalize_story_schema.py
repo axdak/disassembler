@@ -33,6 +33,8 @@ from story_schema_rules import (
     TYPE_TO_COLLECTION, COLLECTION_TO_TYPE, DETAIL_REF_RE, DETAIL_KEY_RE,
     DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS, is_cumulative_detail_field,
     make_empty_structure, exact_name_sets, alias_to_name_maps,
+    SUPPLEMENTARY_TAGS_DETAIL_KEY, canonicalize_supplementary_tags,
+    exclude_primary_supplementary_tags, dump_supplementary_tags,
 )
 from chronology import (
     BASE_TIME,
@@ -390,7 +392,15 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
                 logs.append(f"{raw.get('名称','?')}.详情.{k} 已移出最终元素；紧凑追溯字段保留在详情")
                 continue
             safe_key = sanitize_key(k)
-            normalized_value = normalize_detail_value(v, logs)
+            if safe_key == SUPPLEMENTARY_TAGS_DETAIL_KEY:
+                # 专用规则必须先于普通数组转换，避免混合 JSON 证据在转字符串时丢失。
+                normalized_value = canonicalize_supplementary_tags(v)
+                if normalized_value != v:
+                    logs.append(f"{raw.get('名称','?')}.详情.{safe_key} 已按原内容规范化")
+                if not normalized_value:
+                    continue
+            else:
+                normalized_value = normalize_detail_value(v, logs)
             if safe_key in detail:
                 safe_key = ensure_unique_key(detail, safe_key)
             detail[safe_key] = normalized_value
@@ -423,6 +433,16 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
         logs.append(f"{raw.get('名称','?')}.生日 不合规，已回填未知生日{BASE_TIME}")
 
     item["详情"] = detail
+    if SUPPLEMENTARY_TAGS_DETAIL_KEY in detail:
+        # 与压缩入口共用跨区去重规则；带空白的原始证据归档后再移除重复标签。
+        tags = json.loads(detail[SUPPLEMENTARY_TAGS_DETAIL_KEY])
+        retained = exclude_primary_supplementary_tags(tags, item["标签集"], detail)
+        if retained != tags:
+            if retained:
+                detail[SUPPLEMENTARY_TAGS_DETAIL_KEY] = dump_supplementary_tags(retained)
+            else:
+                detail.pop(SUPPLEMENTARY_TAGS_DETAIL_KEY)
+            logs.append(f"{raw.get('名称','?')}.详情.补充标签 已去除主标签副本并保全原文差异")
     if collection_key == "事件集":
         if not detail.get("涉及章节") and legacy_sources:
             detail["涉及章节"] = legacy_sources

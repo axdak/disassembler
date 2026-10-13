@@ -218,13 +218,21 @@ def test_bounded_governance_reviews_one_synopsis_and_resumes(tmp_path):
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
 
+def rendered_periodic_prompt():
+    """检查模型实际收到的模板，包含运行期注入的简介软契约。"""
+    return pipeline.render_audit_prompt(start=1, end=1, correction_path="patch.json",
+        run_pipeline_path="run_pipeline.py", project_dir="project", chapters=[],
+        full_story_json="", story_index="", relevant_details="", previous_correction=None,
+        taxonomy_json="")
+
+
 def test_periodic_prompt_states_the_char_budget():
     """篇幅契约必须写在生成端提示词里——那才是真正约束模型的一层。
 
     实测背景：《斗破苍穹》简介随周期增长 0 → 257 → 376 → 510 字，每周期约 +120~134 字，
     当时提示词对篇幅完全没有要求，程序侧也没有任何上限。
     """
-    text = (ENGINE_ROOT / "prompts" / "流水线" / "周期审计.j2").read_text(encoding="utf-8")
+    text = rendered_periodic_prompt()
     assert f"上限 {SYNOPSIS_MAX_CHARS} 字" in text
     assert "不得逐周期累加" in text and "入口而不是索引" in text
     # 既有语义不能被这次改动挤掉
@@ -237,7 +245,7 @@ def test_periodic_prompt_requires_structured_sections():
     分节写在提示词里而不是做程序侧硬门禁：篇幅与结构都是软契约
     （见 test_overlong_synopsis_is_never_a_periodic_failure 的既有模式策略）。
     """
-    text = (ENGINE_ROOT / "prompts" / "流水线" / "周期审计.j2").read_text(encoding="utf-8")
+    text = rendered_periodic_prompt()
     for heading in synopsis_section_headings():
         assert heading in text, f"提示词缺少分节标题 {heading}"
     assert "四个分节必须齐全且顺序固定" in text

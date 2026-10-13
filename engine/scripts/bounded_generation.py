@@ -1,6 +1,7 @@
 """Capacity fallback adapters; the normal chapter/report contracts stay in charge."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -299,7 +300,43 @@ def run_bounded_governance(command, project, pack, output, worker, **options):
         return REPAIR_EXHAUSTED
 
 
-def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq=0, **options):
+def _immutable_recovery_index(worker, command, root, sources, **options):
+    """Index immutable evidence snapshots independently of any repair strategy.
+
+    Logical source roles and full byte digests identify this set. Only source
+    routing indices are reusable: candidates, errors, contracts and review
+    verdicts stay in their attempt's tree. Complete sources remain addressable.
+    """
+    identities = [(origin, digest(path)) for path, origin in sources]
+    key = hashlib.sha256(json.dumps(identities, ensure_ascii=False).encode()).hexdigest()
+    snapshot_root = root / "snapshots" / key
+    snapshots = []
+    for index, ((source, origin), (_, signature)) in enumerate(zip(sources, identities)):
+        snapshot = snapshot_root / f"{index:05d}{source.suffix}"
+        if digest(snapshot) != signature or not snapshot.is_file():
+            content = source.read_bytes()
+            if hashlib.sha256(content).hexdigest() != signature:
+                raise TreeFailure(REPAIR_EXHAUSTED)
+            atomic_write_bytes(snapshot, content)
+        snapshots.append((snapshot, "不可变修复证据；逻辑来源与角色：" + origin))
+    tree = CapacityTree(root, command, worker,
+                        "逐片阅读不可变修复证据，只建立事实位置、身份、时序与关联索引。"
+                        "禁止判断任何候选是否正确；不得生成修复内容或复核结论。索引不能替代完整原件。",
+                        "原始证据索引.md", snapshots,
+                        **{key: value for key, value in options.items() if key in {"timeout", "worker_window"}})
+    overview, _, refs = tree.run(overview_only=True)
+    if not tree.unchanged() or any(digest(path) != signature
+                                  for (path, _), (_, signature) in zip(sources, identities)):
+        raise TreeFailure(REPAIR_EXHAUSTED)
+    index = tree.root / "evidence_index.md"
+    atomic_write_bytes(index, (overview + f"\n完整证据根节点：{refs[-1]}\n"
+                               f"完整证据目录：{tree.root / 'materials'}\n"
+                               "来源角色及内容指纹：\n" + json.dumps(identities, ensure_ascii=False)).encode())
+    return tree, index
+
+
+def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq=0, *,
+                       evidence_index_root=None, immutable_sources=(), **options):
     """Page oversized repair evidence while retaining the original repair scope.
 
     The recovery scheduler still owns program repair, scope validation, independent
@@ -311,9 +348,29 @@ def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq
         return worker(command, project, kind, pack, output, chapter_seq, **options)
     sources = [(Path(item["path"]), "完整修复材料") for item in report["sources"]]
     try:
+        # Share only explicitly nominated immutable inputs. Absolute paths in
+        # task/candidate/error text retain their original meaning and identity.
+        nominated = {path.resolve(): origin for path, origin in immutable_sources}
+        immutable = [(path, nominated[path.resolve()]) for path, _ in sources if path.resolve() in nominated]
+        shared_tree = None
+        indexed_signatures = []
+        protected = list(options.get("protected_materials", []))
+        references = list(options.get("reference_sources", []))
+        if evidence_index_root is not None and immutable:
+            shared_tree, index = _immutable_recovery_index(
+                worker, command, evidence_index_root, immutable, **options)
+            # Keep the shared index's byte identity through dispatch. Re-reading
+            # references for the attempt must not legitimize an intervening edit.
+            indexed_signatures = [(path, signature) for (path, _), (_, signature, _)
+                                  in zip(immutable, shared_tree.sources)]
+            sources = [(path, role) for path, role in sources if path.resolve() not in nominated]
+            sources.append((index, "已完整逐片读取的不可变证据索引；完整原件仍须按需核对"))
+            references.extend((path, "完整修复证据；逻辑来源与角色：" + origin) for path, origin in immutable)
+            protected.extend(path for path in shared_tree.root.rglob("*") if path.is_file())
         tree = CapacityTree(project, command, worker,
                             "逐片阅读修复材料，索引错误路径、原文证据、候选变化和约束。禁止把待修产物当作原文事实。",
-                            "修复材料索引.md", sources, **options)
+                            "修复材料索引.md", sources,
+                            **{**options, "protected_materials": protected, "reference_sources": references})
         overview, _, refs = tree.run(overview_only=True)
         routed = tree.root / "dispatch" / "task.md"
         routed.parent.mkdir(exist_ok=True)
@@ -323,9 +380,17 @@ def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq
                           "索引不是证据，修复值和复核结论必须核对原件。只写原来指定的产物，不改修复范围。",
                           encoding="utf-8")
         from bounded_final import guarded_worker
-        protected = [path for path in tree.root.rglob("*") if path.is_file() and path != output]
+        protected += [path for path in tree.root.rglob("*") if path.is_file() and path != output]
+        # Final dispatch runs in the attempt workspace, while shared indices live
+        # beside it. Explicit aliases make original logical paths resolve to
+        # protected copies through the worker's scoped read-only context server.
+        aliases = [(Path(source[0]), material[0]) for current in (tree, shared_tree) if current is not None
+                   for source, material in zip(current.sources, current.materials)]
+        aliases += [(Path(source), copy) for source, copy in tree.reference_paths.items()]
         rc, changed = guarded_worker(worker, command, project, kind, routed, output, protected,
-                                     {**options, "chapter_seq": chapter_seq})
-        return rc if not changed and tree.unchanged() else REPAIR_EXHAUSTED
+                                     {**options, "chapter_seq": chapter_seq}, context_aliases=aliases)
+        return rc if (not changed and tree.unchanged()
+                      and all(digest(path) == signature for path, signature in indexed_signatures)
+                      and (shared_tree is None or shared_tree.unchanged())) else REPAIR_EXHAUSTED
     except TreeFailure as exc:
         return exc.code

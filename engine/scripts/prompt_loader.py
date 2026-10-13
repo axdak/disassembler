@@ -119,5 +119,9 @@ def list_prompts() -> List[Dict[str, Any]]:
 
 
 def prompt_fingerprint(name: str) -> str:
-    """Invalidate cached task contracts when their source template changes."""
-    return hashlib.sha256((PROMPTS_DIR / name).read_bytes()).hexdigest()
+    """模板和其生成参数共同使任务包失效，不影响提交回执的校验契约。"""
+    digest = hashlib.sha256((PROMPTS_DIR / name).read_bytes())
+    if name == "流水线/周期审计.j2":
+        # 简介字数/分节是生成约束；改变后必须重建任务包，但不能重生成历史章节。
+        digest.update(Path(__file__).with_name("synopsis_contract.py").read_bytes())
+    return digest.hexdigest()

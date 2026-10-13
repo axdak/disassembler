@@ -289,7 +289,8 @@ def test_corrupted_supplementary_is_repaired_by_structure_pass():
 
 def test_salvage_supplementary_tags_keeps_every_shape_of_content():
     """抢救规则覆盖数组 / JSON 字符串 / 纯文本 / 其它类型，且不猜分隔符。"""
-    assert salvage_supplementary_tags(["甲", " 乙 ", "甲", "", None]) == ["甲", "乙"]
+    # 混合数组整体保留，null 及原文空白不能因仅提取字符串项而静默丢失。
+    assert salvage_supplementary_tags(["甲", " 乙 ", "甲", "", None]) == ['["甲"," 乙 ","甲","",null]']
     assert salvage_supplementary_tags('["甲","乙"]') == ["甲", "乙"]
     assert salvage_supplementary_tags('"甲"') == ["甲"]
     assert salvage_supplementary_tags("甲,乙") == ["甲,乙"]

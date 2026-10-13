@@ -260,8 +260,9 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
     of the same name, so an assigner that re-emits the bare name would produce a
     structure its own validator rejects — an error with no program-side removal
     path.  Splitting is therefore part of the contract, not a migration extra.
-    The uniquifying suffix is size-bounded so a legal 40-character name never
-    grows past ``MAX_EVENT_GROUP_NAME_LENGTH``.
+    Reserve authored and generated names chapter-locally before allocating a
+    size-bounded suffix. If that suffix truncates semantic text, retain the
+    complete source name in detail rather than discarding the missing ending.
     """
     runs: list[tuple[tuple[str, int | None], list[dict[str, Any]]]] = []
     for event in events:
@@ -277,17 +278,37 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
         else:
             runs.append((run_key, [event]))
 
+    reserved: dict[int | None, set[str]] = {}
+    for (base_name, chapter_scope), _ in runs:
+        reserved.setdefault(chapter_scope, set()).add(base_name)
     occurrences: dict[tuple[str, int | None], int] = {}
     for run_index, ((base_name, chapter_scope), members) in enumerate(runs, start=1):
         occurrence_key = (base_name, chapter_scope)
         occurrences[occurrence_key] = occurrences.get(occurrence_key, 0) + 1
         display_name = base_name
         if split_repeated and occurrences[occurrence_key] > 1:
-            suffix = f"续{occurrences[occurrence_key]}"
-            display_name = f"{base_name[:MAX_EVENT_GROUP_NAME_LENGTH - len(suffix)]}{suffix}"
+            suffix_number = occurrences[occurrence_key]
+            while True:
+                suffix = f"续{suffix_number}"
+                display_name = f"{base_name[:MAX_EVENT_GROUP_NAME_LENGTH - len(suffix)]}{suffix}"
+                if display_name not in reserved[chapter_scope]:
+                    break
+                suffix_number += 1
+            reserved[chapter_scope].add(display_name)
         rank = run_index * 10
         rank_text = format_event_group_rank(rank)
         for member in members:
+            if not display_name.startswith(base_name):
+                # Preserve the original semantic name without overwriting an
+                # authored archive field; repeated runs remain idempotent.
+                detail = member.setdefault("详情", {})
+                if isinstance(detail, dict):
+                    key = "原始分组"
+                    key_number = 2
+                    while key in detail and detail[key] != base_name:
+                        key = f"原始分组{key_number}"
+                        key_number += 1
+                    detail[key] = base_name
             member["分组"] = f"{rank_text}-{display_name}"
 
 

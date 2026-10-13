@@ -18,6 +18,7 @@ from fault_recovery import digest
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 from worker_checkpoint import atomic_write_bytes
+from code_fingerprint import code_digest
 
 
 class TreeFailure(Exception):
@@ -138,7 +139,9 @@ class CapacityTree:
         self.reference_sources = list(options.get("reference_sources", []))
         references = [(str(path.resolve()), digest(path), role) for path, role in self.reference_sources]
         engine = Path(__file__).resolve().parents[1]
-        code = [(str(path.relative_to(engine)), digest(path)) for path in sorted(
+        # Only installed engine files use metadata-aware memoization. Evidence
+        # hashes above and publication fences below always read current bytes.
+        code = [(str(path.relative_to(engine)), code_digest(path)) for path in sorted(
             [*engine.joinpath("scripts").glob("*.py"), *engine.joinpath("prompts").rglob("*.j2"),
              *engine.joinpath("schemas").glob("*.json"), engine / "tools/agent_worker.py",
              engine / "tools/worker_context.py"])]

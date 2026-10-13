@@ -18,9 +18,14 @@ import tempfile
 from pathlib import Path
 from typing import List
 
-from worker_context import snapshot_context
+# Both CLI execution and importlib loading must resolve our sibling/context
+# modules without inheriting a caller's working directory or test import order.
+_TOOLS_DIR = Path(__file__).resolve().parent
+for _module_dir in (_TOOLS_DIR, _TOOLS_DIR.parent / "scripts"):
+    if str(_module_dir) not in sys.path:
+        sys.path.insert(0, str(_module_dir))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from worker_context import snapshot_context
 from prompt_loader import render_prompt
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, recovery_output_errors
 from worker_artifacts import (

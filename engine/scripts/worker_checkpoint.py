@@ -13,6 +13,7 @@ from pathlib import Path
 
 from merge_delta import save_json
 from context_budget import ContextBudget
+from code_fingerprint import code_digest
 
 
 def atomic_write_bytes(path: Path, content: bytes) -> None:
@@ -46,11 +47,12 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
                         *engine.joinpath("schemas").glob("*.json"),
                         *(engine / "scripts" / name for name in (
                             "capacity_tree.py", "bounded_generation.py", "context_budget.py",
-                            "run_pipeline.py", "analysis_context_pack.py")),
+                            "run_pipeline.py", "analysis_context_pack.py", "worker_checkpoint.py",
+                            "code_fingerprint.py", "prompt_loader.py", "synopsis_contract.py")),
                         engine / "tools" / "agent_worker.py",
                         engine / "tools" / "worker_context.py"]):
         code_hash.update(str(path.relative_to(engine)).encode())
-        code_hash.update(path.read_bytes())
+        code_hash.update(code_digest(path).encode())
     settings = {key: value for key, value in os.environ.items()
                 if key.startswith(("ND_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
     settings.update(ContextBudget.from_env().to_env())

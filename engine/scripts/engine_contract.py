@@ -31,6 +31,8 @@ _CONTRACT_SCRIPTS = (
     "scripts/story_schema_rules.py",
     "scripts/registered_types.py",
     "scripts/governance_contract.py",
+    "scripts/chronology.py",
+    "scripts/element_identity.py",
 )
 
 _cache: str | None = None

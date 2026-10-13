@@ -7,7 +7,7 @@ from element_identity import build_lookup_index, find_index
 from chronology import parse_chapter_numbers, format_chapter
 from story_schema_rules import (
     COLLECTION_KEYS, TYPE_TO_COLLECTION, STRUCTURAL_REF_FIELDS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
-    dump_supplementary_tags, is_cumulative_detail_field, parse_supplementary_tags,
+    dump_supplementary_tags, is_cumulative_detail_field, merge_supplementary_tag_values,
 )
 
 CUMULATIVE_DETAIL_ARRAY_FIELDS=DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
@@ -87,10 +87,8 @@ def append_detail_value(existing, incoming, detail_key=''):
     if incoming in (None,'',[],{}):
         return existing
     if detail_key == '补充标签':
-        # This field is one serialized JSON array, never two concatenated
-        # strings. Preserve and deduplicate both sides without changing format.
-        old_tags = parse_supplementary_tags(existing) if existing not in (None, '') else []
-        return dump_supplementary_tags(append_unique(old_tags, parse_supplementary_tags(incoming)))
+        # Validate strictly while retaining raw evidence whitespace across appends.
+        return merge_supplementary_tag_values(existing, incoming)
     if existing in (None,'',[],{}):
         if is_cumulative_detail_field(detail_key):
             return dump_json_string_array(parse_json_string_array_or_lines(incoming))
@@ -267,10 +265,10 @@ def apply_ops(data, patch):
             item.setdefault('详情',{})
             if not isinstance(item['详情'],dict): raise ValueError('目标元素详情必须是对象')
             existing=item['详情'].get('补充标签')
-            existing_tags=[] if existing is None else parse_supplementary_tags(existing)
-            merged=append_unique(existing_tags,demoted)
+            # 复用无损追加规则；严格校验失败时不修改主标签，整份补丁仍按原规则回滚。
+            merged=merge_supplementary_tag_values(existing, dump_supplementary_tags(demoted) if demoted else '')
             item['标签集']=[tag for tag in current if tag not in set(demoted)]
-            item['详情']['补充标签']=dump_supplementary_tags(merged)
+            item['详情']['补充标签']=merged
             logs.append(f'治理标签 {typ}:{item["名称"]}，降级{len(demoted)}项；理由:{reason.strip()}')
         except Exception as e: warns.append(f'治理标签失败: {e}')
     # 降级/删除

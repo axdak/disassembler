@@ -32,8 +32,8 @@ from story_schema_rules import (
     NARRATIVE_TAXONOMY,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
     dump_supplementary_tags,
-    parse_supplementary_tags,
-    salvage_supplementary_tags,
+    canonicalize_supplementary_tags,
+    exclude_primary_supplementary_tags,
 )
 
 
@@ -124,23 +124,23 @@ def compress_item(item: Dict[str, Any], limit: int) -> Tuple[int, int]:
     existing = detail.get(SUPPLEMENTARY_TAGS_DETAIL_KEY)
     existing_tags: List[str] = []
     needs_repair = False
-    if existing is not None:
-        try:
-            existing_tags = parse_supplementary_tags(existing)
-        except ValueError:
-            # 损坏的补充标签必须在本层修好，不能 raise：结构侧压缩是每次提交
-            # 都要过的关口，抛出异常会让整份结构永久无法提交；而既有事件
-            # 不允许改 详情 整块，模型也修不了，等于零消除路径。抢救规则把
-            # 原始内容逐字保留（非 JSON 文本整体作为一个标签），不丢证据。
-            existing_tags = salvage_supplementary_tags(existing)
-            needs_repair = True
+    if SUPPLEMENTARY_TAGS_DETAIL_KEY in detail:
+        # 显式 null 也是待保全证据；使用共同规则，且不再经严格解析器裁剪原文空白。
+        canonical = canonicalize_supplementary_tags(existing)
+        existing_tags = json.loads(canonical) if canonical else []
+        needs_repair = canonical != existing
 
     # 合并旧档案时主标签可能与补充标签重叠。主标签仍供界面直读，
     # 只移除补充区中的同文副本，不删除任何独有标签或重新解释标签含义。
-    duplicate_tags = set(keep_free).intersection(existing_tags)
+    retained_existing = exclude_primary_supplementary_tags(existing_tags, keep_free, detail)
+    # 新降级项也会进入补充区：先归档仅空白不同的旧副本，避免合并后严格解析判重。
+    # 完全同文的旧标签保留原位置，由追加去重处理，不改变既有标签顺序。
+    demotion_overlaps = [tag for tag in demoted_new if tag not in retained_existing]
+    retained_existing = exclude_primary_supplementary_tags(retained_existing, demotion_overlaps, detail)
+    duplicate_tags = retained_existing != existing_tags
     if not demoted_new and keep_free == cleaned and not duplicate_tags and not needs_repair:
         return 0, 0
-    merged = [tag for tag in _append_unique(existing_tags, demoted_new) if tag not in keep_free]
+    merged = [tag for tag in _append_unique(retained_existing, demoted_new) if tag not in keep_free]
 
     item["标签集"] = keep_free
     item["详情"] = detail

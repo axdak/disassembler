@@ -197,54 +197,81 @@ def dump_supplementary_tags(tags: List[str]) -> str:
 
 
 def salvage_supplementary_tags(value: Any) -> List[str]:
-    """从损坏的 详情.补充标签 里按固定规则抢救标签，绝不抛异常。
+    """按确定性规则保全补充标签，供所有机械修复入口共同使用。
 
-    与 :func:`parse_supplementary_tags` 的分工：后者是严格的契约校验，也是
-    校验器报错的依据；本函数是程序侧的确定性消除路径。没有它，"补充标签
-    不可解析"就是一条模型改不掉、程序也修不好的死错误。
-
-    抢救规则（确定性、幂等）：
-    - JSON 字符串数组 → 去空、去重、保序规范化；
-    - 其它字符串 → 先按 JSON 解析；解析出的字符串数组同上；解析出单个字符串
-      取该字符串；完全不是 JSON 时，整段原文逐字保留为**一个**标签
-      （不做分隔符猜测，避免把含逗号的标签切坏）；
-    - 数组 → 只取非空字符串项；
-    - 其它类型 → 保留其 JSON 文本形式。
-
-    只有在原值确实不含任何内容（空串、空数组）时才返回空列表，此时调用方
-    可以安全地移除该键；任何非空内容都不会被丢弃。
+    字符串数组只去空和完全同文的重复项，不裁剪证据空白。混合数组、对象和
+    标量保留为一个完整 JSON 证据项，避免丢失类型、位置或非字符串内容。
+    原值为字符串时，未知形状和不可解析文本逐字保存；仅空白及空数组可移除。
+    严格解析器仍独立负责校验，本函数不降低其格式要求。
     """
-    candidates: List[Any]
-    if isinstance(value, list):
-        candidates = value
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text:
+    original = value
+    if isinstance(value, str):
+        if not value.strip():
             return []
         try:
-            decoded = json.loads(text)
+            value = json.loads(value)
         except json.JSONDecodeError:
-            return [text]
-        if isinstance(decoded, list):
-            candidates = decoded
-        elif isinstance(decoded, str):
-            candidates = [decoded]
-        else:
-            return [text]
-    else:
-        rendered = json.dumps(value, ensure_ascii=False)
-        return [rendered] if rendered.strip() else []
+            return [original]
+        if isinstance(value, str):
+            return [value] if value.strip() else []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        tags = list(dict.fromkeys(item for item in value if item.strip()))
+        # 不同空白写法经严格解析后会成为重复标签，整体封存才能同时保留证据和合法性。
+        if len({item.strip() for item in tags}) == len(tags):
+            return tags
+    evidence = original if isinstance(original, str) else json.dumps(
+        original, ensure_ascii=False, separators=(",", ":")
+    )
+    return [evidence]
 
-    tags: List[str] = []
+
+def canonicalize_supplementary_tags(value: Any) -> str:
+    """返回可逆且幂等的规范值；空字符串仅表示原值确实不含内容。"""
+    tags = salvage_supplementary_tags(value)
+    return dump_supplementary_tags(tags) if tags else ""
+
+
+def merge_supplementary_tag_values(existing: Any, incoming: Any) -> str:
+    """严格校验后按原始字符串追加去重，不用解析器的裁剪结果改写证据。
+
+    仅空白不同的标签无法同时满足严格去重规则；冲突的后来项以 JSON 字符串
+    文本保留，避免丢失原文。再次追加同项会命中其既有表示，保持幂等。
+    非空损坏输入仍抛出校验异常，由显式规范化步骤负责修复。
+    """
+    merged: List[str] = []
     seen: set[str] = set()
-    for item in candidates:
-        if not isinstance(item, str):
+    normalized: set[str] = set()
+    for value in (existing, incoming):
+        if value in (None, ""):
             continue
-        tag = item.strip()
-        if tag and tag not in seen:
-            tags.append(tag)
-            seen.add(tag)
-    return tags
+        parse_supplementary_tags(value)
+        for tag in json.loads(value):
+            while tag not in seen and tag.strip() in normalized:
+                tag = json.dumps(tag, ensure_ascii=False)
+            if tag not in seen:
+                merged.append(tag)
+                seen.add(tag)
+                normalized.add(tag.strip())
+    return dump_supplementary_tags(merged)
+
+
+def exclude_primary_supplementary_tags(
+    tags: List[str], primary_tags: List[str], detail: Dict[str, Any],
+) -> List[str]:
+    """去掉主标签中的同义副本；空白不同的原文单独归档，保全严格解析会裁剪的字节。"""
+    primary = set(primary_tags)
+    overlap = [tag for tag in tags if tag.strip() in primary]
+    evidence = [tag for tag in overlap if tag not in primary]
+    if evidence:
+        archived = dump_supplementary_tags(evidence)
+        key = "补充标签原文"
+        index = 2
+        # 作者已有档案不能覆盖；重复执行遇到同文归档时复用现有键。
+        while key in detail and detail[key] != archived:
+            key = f"补充标签原文{index}"
+            index += 1
+        detail[key] = archived
+    return [tag for tag in tags if tag.strip() not in primary]
 
 
 def final_disallowed_detail_fields(collection_key: str) -> Set[str]:

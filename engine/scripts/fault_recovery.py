@@ -27,6 +27,7 @@ from repair_budget import REPAIR_EXHAUSTED
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, REVIEW_CHECKS, recovery_output_errors
 from recovery_materials import RecoveryMaterials, read_material_document, rebase_material_paths, write_change_index
 from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, salvage_supplementary_tags
+from code_fingerprint import code_digest
 
 STRATEGIES = (
     ("targeted", "按最新校验错误逐项定点修复；保留已正确字段和全部分析内容。"),
@@ -104,7 +105,8 @@ def _tag_evidence_view(item: dict) -> tuple[dict, set[str]] | None:
     while keeping the original text, so comparing it as raw text would report a
     false "原标签内容被删除".
     """
-    tags, detail = item.get("标签集"), item.get("详情")
+    # Sparse governance modifications may carry supplementary evidence only.
+    tags, detail = item.get("标签集", []), item.get("详情")
     if (not isinstance(tags, list) or not isinstance(detail, dict)
             or any(not isinstance(tag, str) or not tag.strip() for tag in tags)):
         return None
@@ -114,6 +116,40 @@ def _tag_evidence_view(item: dict) -> tuple[dict, set[str]] | None:
     view = {key: value for key, value in item.items() if key != "标签集"}
     view["详情"] = {key: value for key, value in detail.items() if key != SUPPLEMENTARY_TAGS_DETAIL_KEY}
     return view, {tag.strip() for tag in tags + supplementary}
+
+
+def _raw_tag_evidence(item: dict, *, include_primary: bool = False) -> set[str]:
+    """Read exact evidence only from this element's tag and explicit archive fields.
+
+    JSON string quoting is the lossless merge representation for trim-colliding
+    tags. Decode only string layers; arbitrary prose or another element's text
+    cannot substitute for the original. Ordinary primary-tag normalization stays
+    outside this additional supplementary-evidence guard.
+    """
+    detail = item.get("详情", {})
+    primary = item.get("标签集")
+    values = [tag for tag in primary if isinstance(tag, str)] if include_primary and isinstance(primary, list) else []
+    if not isinstance(detail, dict):
+        return set(values)
+    if SUPPLEMENTARY_TAGS_DETAIL_KEY in detail:
+        values.extend(salvage_supplementary_tags(detail[SUPPLEMENTARY_TAGS_DETAIL_KEY]))
+    for key, value in detail.items():
+        if re.fullmatch(r"补充标签原文(?:[2-9]|[1-9]\d+)?", key) and isinstance(value, str):
+            try:
+                archived = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(archived, list) and all(isinstance(tag, str) for tag in archived):
+                values.extend(archived)
+    evidence = set()
+    for value in values:
+        while isinstance(value, str) and value not in evidence:
+            evidence.add(value)
+            try:
+                value = json.loads(value)
+            except ValueError:
+                break
+    return evidence
 
 
 def preservation_errors(before: Path, after: Path, current: dict | None = None) -> list[str]:
@@ -166,6 +202,11 @@ non-heading content line. Semantic correctness still needs evidence-based review
             if not isinstance(b, dict):
                 errors.append(f"{path} 对象被替换为其他类型")
                 return
+            # Run independently of the optional primary-tag shape: sparse or
+            # malformed tag containers must not bypass exact evidence protection.
+            raw_required = {tag for tag in _raw_tag_evidence(a) if tag != tag.strip()}
+            if raw_required - _raw_tag_evidence(b, include_primary=True):
+                errors.append(f"{path} 原补充标签文本被裁剪且未在同一元素保全")
             old_tags, new_tags = _tag_evidence_view(a), _tag_evidence_view(b)
             if old_tags is not None and new_tags is not None:
                 missing = old_tags[1] - new_tags[1]
@@ -257,19 +298,20 @@ def recover_artifact(
     ledger = directory / "state.json"
     state = json.loads(ledger.read_text(encoding="utf-8")) if ledger.is_file() else {}
     engine = Path(__file__).resolve().parents[1]
-    contracts = (sorted((engine / "prompts").rglob("*.j2"))
+    # Recovery includes every script because validation, normalization and
+    # publication callbacks span modules. A code change reopens the incident;
+    # unchanged code cannot refund its budget. This is deliberately broader
+    # than the separate submission-receipt contract, and code_digest amortizes I/O.
+    contracts = (sorted((engine / "scripts").glob("*.py"))
+                 + sorted((engine / "prompts").rglob("*.j2"))
                  + sorted((engine / "schemas").glob("*.json"))
-                 + [engine / "scripts/run_pipeline.py", engine / "tools/agent_worker.py",
-                    engine / "scripts/coerce_delta.py", engine / "scripts/recovery_contract.py",
-                    engine / "scripts/recovery_materials.py", engine / "scripts/local_json_patch.py",
-                    engine / "scripts/context_budget.py",
-                    engine / "scripts/registered_types.py", engine / "scripts/story_schema_rules.py",
-                    engine / "scripts/governance_contract.py", engine / "scripts/governance_introduction.py",
-                    engine / "scripts/compress_tags.py", engine / "tools/worker_context.py"])
+                 + [engine / "tools/agent_worker.py", engine / "tools/worker_context.py"])
     configuration = {key: value for key, value in os.environ.items()
                      if key.startswith(("ND_RECOVERY_", "ND_AGY_", "ND_CODEBUDDY_", "ND_AGENT_"))}
-    fingerprint = hashlib.sha256((digest(Path(__file__)) + command + json.dumps(configuration, sort_keys=True)
-                                  + "".join(digest(path) for path in contracts)).encode()).hexdigest()
+    code_identity = [(path.relative_to(engine).as_posix(), code_digest(path)) for path in contracts]
+    fingerprint = hashlib.sha256(json.dumps(
+        [command, configuration, code_identity], sort_keys=True, ensure_ascii=False
+    ).encode()).hexdigest()
 
     def emit(event, **fields):
         print(f"自动恢复：{event} {fields}", flush=True)
@@ -446,7 +488,10 @@ def recover_artifact(
             try:
                 from bounded_generation import run_paged_recovery
                 rc = run_paged_recovery(worker, selected_command, workspace, kind, task_pack, expected, chapter_seq,
-                                        timeout=timeout, retries=0, worker_window=worker_window)
+                                        timeout=timeout, retries=0, worker_window=worker_window,
+                                        evidence_index_root=directory / "evidence_index",
+                                        immutable_sources=[(workspace / source.relative_to(project),
+                                                            str(source.relative_to(project))) for source in inputs])
             except (OSError, RuntimeError) as exc:
                 # Provider launch/transport failures must leave a durable attempt
                 # and allow a different configured strategy, never erase history.

@@ -49,9 +49,8 @@ from story_schema_rules import (
     DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
     STRICT_DETAIL_KEY_FIELDS,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
-    dump_supplementary_tags,
+    merge_supplementary_tag_values,
     is_cumulative_detail_field,
-    parse_supplementary_tags,
 )
 
 
@@ -278,10 +277,8 @@ def merge_json_string_array_field(old_v, new_v, *, strip_chapter_marker=False):
 
 
 def merge_supplementary_tags_field(old_v, new_v):
-    """详情.补充标签 是 JSON 字符串数组，语义上必须追加去重。"""
-    old_tags = [] if old_v in (None, "") else parse_supplementary_tags(old_v)
-    new_tags = [] if new_v in (None, "") else parse_supplementary_tags(new_v)
-    return dump_supplementary_tags(merge_list_field(old_tags, new_tags))
+    """严格校验并追加补充标签，保全原始空白和不同写法的证据。"""
+    return merge_supplementary_tag_values(old_v, new_v)
 
 
 def deep_merge_item(existing_item, delta_item, collection_key="", chapter_prefix=""):

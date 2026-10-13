@@ -48,10 +48,8 @@ from story_schema_rules import (
     STRICT_DETAIL_KEY_FIELDS,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
     TYPE_TO_COLLECTION,
-    dump_supplementary_tags,
+    canonicalize_supplementary_tags,
     is_cumulative_detail_field,
-    parse_supplementary_tags,
-    salvage_supplementary_tags,
 )
 
 
@@ -177,11 +175,7 @@ def _coerce_supplementary_tags(detail: Dict[str, Any], label: str, report: List[
     if SUPPLEMENTARY_TAGS_DETAIL_KEY not in detail:
         return
     original = detail[SUPPLEMENTARY_TAGS_DETAIL_KEY]
-    try:
-        canonical = dump_supplementary_tags(parse_supplementary_tags(original))
-    except ValueError:
-        tags = salvage_supplementary_tags(original)
-        canonical = dump_supplementary_tags(tags) if tags else ""
+    canonical = canonicalize_supplementary_tags(original)
     if not canonical:
         detail.pop(SUPPLEMENTARY_TAGS_DETAIL_KEY, None)
         report.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} 不含有效标签 → 已移除")
