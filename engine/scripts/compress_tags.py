@@ -8,7 +8,10 @@ FIFO 截断（截断部分一并降级）。
 - 单一职责：只搬运标签，不评判 LLM 的内容质量；不读写章节分析或原文。
 - 确定性：同一输入两次执行结果完全一致。
 - 保留标签内容：新降级项追加去重；两处重复的标签仅保留在主标签中。
-- 复用现有零件：`SUPPLEMENTARY_TAGS_DETAIL_KEY`、parse/dump 补充标签、taxonomy。
+- 损坏值自愈：无法解析的 `详情.补充标签` 按原内容就地重建为可解析标签（非 JSON
+  文本整段逐字保留为一个标签），不抛异常——结构侧压缩是每次提交都要过的关口，
+  抛异常会让整份结构永久无法提交，而既有事件不允许改 `详情` 整块。
+- 复用现有零件：`SUPPLEMENTARY_TAGS_DETAIL_KEY`、parse/dump/抢救补充标签、taxonomy。
 
 CLI:
     python compress_tags.py --delta     <delta.json>      [--limits <path>] [--report <path>]
@@ -30,6 +33,7 @@ from story_schema_rules import (
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
     dump_supplementary_tags,
     parse_supplementary_tags,
+    salvage_supplementary_tags,
 )
 
 
@@ -119,18 +123,22 @@ def compress_item(item: Dict[str, Any], limit: int) -> Tuple[int, int]:
 
     existing = detail.get(SUPPLEMENTARY_TAGS_DETAIL_KEY)
     existing_tags: List[str] = []
-    if isinstance(existing, str) and existing.strip():
+    needs_repair = False
+    if existing is not None:
         try:
             existing_tags = parse_supplementary_tags(existing)
-        except ValueError as exc:
-            # A malformed old value is still evidence. Do not overwrite it with
-            # the newly demoted tags; the existing repair path owns this failure.
-            raise ValueError("补充标签不可解析，保留原值等待修复") from exc
+        except ValueError:
+            # 损坏的补充标签必须在本层修好，不能 raise：结构侧压缩是每次提交
+            # 都要过的关口，抛出异常会让整份结构永久无法提交；而既有事件
+            # 不允许改 详情 整块，模型也修不了，等于零消除路径。抢救规则把
+            # 原始内容逐字保留（非 JSON 文本整体作为一个标签），不丢证据。
+            existing_tags = salvage_supplementary_tags(existing)
+            needs_repair = True
 
     # 合并旧档案时主标签可能与补充标签重叠。主标签仍供界面直读，
     # 只移除补充区中的同文副本，不删除任何独有标签或重新解释标签含义。
     duplicate_tags = set(keep_free).intersection(existing_tags)
-    if not demoted_new and keep_free == cleaned and not duplicate_tags:
+    if not demoted_new and keep_free == cleaned and not duplicate_tags and not needs_repair:
         return 0, 0
     merged = [tag for tag in _append_unique(existing_tags, demoted_new) if tag not in keep_free]
 
@@ -138,7 +146,7 @@ def compress_item(item: Dict[str, Any], limit: int) -> Tuple[int, int]:
     item["详情"] = detail
     if merged:
         detail[SUPPLEMENTARY_TAGS_DETAIL_KEY] = dump_supplementary_tags(merged)
-    elif duplicate_tags:
+    elif duplicate_tags or needs_repair:
         detail.pop(SUPPLEMENTARY_TAGS_DETAIL_KEY, None)
 
     return len(prefix_tags), len(extra_free)

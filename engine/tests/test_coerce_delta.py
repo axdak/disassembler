@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import sys
 
@@ -461,6 +462,37 @@ def test_补充标签_数组_转json字符串():
     assert any("补充标签" in line for line in report)
 
 
+def test_补充标签_损坏字符串_按原内容重建():
+    """损坏的补充标签必须在纠错层被确定性消除，否则相关元素永远无法提交。"""
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "赖床装病", "详情": {"补充标签": "不是JSON"}}
+    )
+    report = coerce_delta_in_place(delta)
+    value = delta["新增元素"]["事件集"][0]["详情"]["补充标签"]
+    assert json.loads(value) == ["不是JSON"]
+    assert any("补充标签" in line for line in report)
+
+
+def test_补充标签_空数组_移除该键():
+    delta = _empty_delta()
+    delta["新增元素"]["角色集"].append(
+        {"名称": "甲", "详情": {"补充标签": []}}
+    )
+    report = coerce_delta_in_place(delta)
+    assert "补充标签" not in delta["新增元素"]["角色集"][0]["详情"]
+    assert any("补充标签" in line for line in report)
+
+
+def test_补充标签_已合规_不产生纠错记录():
+    delta = _empty_delta()
+    delta["新增元素"]["角色集"].append(
+        {"名称": "甲", "详情": {"补充标签": '["莽撞"]'}}
+    )
+    report = coerce_delta_in_place(delta)
+    assert not any("补充标签" in line for line in report)
+
+
 def test_普通详情数组_转json字符串数组():
     delta = _empty_delta()
     delta["新增元素"]["事件集"].append(
@@ -591,3 +623,151 @@ def test_反向搬迁幂等():
     )
     assert len(relocate_element_fields(delta)) == 2
     assert relocate_element_fields(delta) == []
+
+
+# ---------------------------------------------------------------------------
+# 修改目标无法唯一归属时保留业务内容，由校验器/合并端阻止错误入库。
+# 本批新增后的合法修改仍可合入；未知或冲突条目不得通过删除换取成功。
+# ---------------------------------------------------------------------------
+
+
+def _mod_delta(name: str) -> dict:
+    delta = _empty_delta()
+    # 提供已有规范化默认值，让完整性断言只检测条目/内容丢失。
+    delta["修改元素"]["角色集"].append({"名称": name, "生日": "0001-01-01T00:00:00",
+                                    "详情": {"提取理由": "本章变化"}})
+    return delta
+
+
+def test_档案中不存在的修改目标保留并阻止入库():
+    """无法归属不代表内容无效，必须保留完整补丁交给校验器。"""
+    from validate_delta import validate_elements
+
+    delta = _mod_delta("不存在的角色")
+    original = deepcopy(delta["修改元素"]["角色集"])
+    story = {"角色集": [{"名称": "萧炎"}]}
+    coerce_delta_in_place(delta, story)
+    assert delta["修改元素"]["角色集"] == original
+    assert any("修改目标[不存在的角色]不存在" in e for e in validate_elements(story, delta, "process")[0])
+
+
+def test_跨集合歧义的修改目标完整保留():
+    """第037章事故：不能确定萧家的类别时不得丢弃本章格局。"""
+    from validate_delta import validate_elements
+
+    delta = _mod_delta("萧家")
+    delta["修改元素"]["角色集"][0]["详情"]["本章格局"] = "族内势力发生变化，必须保留以便核对原文。"
+    original = deepcopy(delta["修改元素"]["角色集"])
+    story = {"角色集": [{"名称": "萧炎"}],
+             "地点集": [{"名称": "萧家"}],
+             "阵营集": [{"名称": "萧家"}]}
+    coerce_delta_in_place(delta, story)
+    assert delta["修改元素"]["角色集"] == original
+    assert any("修改目标[萧家]不存在" in e for e in validate_elements(story, delta, "process")[0])
+
+
+def test_档案中存在的修改目标被保留():
+    delta = _mod_delta("萧炎")
+    coerce_delta_in_place(delta, {"角色集": [{"名称": "萧炎"}]})
+    assert [item["名称"] for item in delta["修改元素"]["角色集"]] == ["萧炎"]
+
+
+def test_按别名命中的修改目标被保留():
+    delta = _mod_delta("萧家族长")
+    coerce_delta_in_place(delta, {"角色集": [{"名称": "萧战", "别名": ["萧家族长"]}]})
+    assert [item["名称"] for item in delta["修改元素"]["角色集"]] == ["萧家族长"]
+
+
+def test_未提供正式结构时不做移除():
+    """没有可依据的正式档案，保持既有行为不变。"""
+    delta = _mod_delta("任意名称")
+    report = coerce_delta_in_place(delta)
+    assert not any("已移除" in line for line in report)
+    assert len(delta["修改元素"]["角色集"]) == 1
+
+
+def test_正式结构缺少该集合时不做移除():
+    """目标集合缺失说明传入的结构不完整，交给原校验器而不是代为丢弃。"""
+    delta = _mod_delta("任意名称")
+    coerce_delta_in_place(delta, {"事件集": []})
+    assert len(delta["修改元素"]["角色集"]) == 1
+
+
+def test_唯一类别迁移与无归属保留协同():
+    """安全迁移不受影响，仍无法归属的内容留在原集合等待修复。"""
+    delta = _empty_delta()
+    delta["修改元素"]["角色集"].append({"名称": "某地点", "详情": {"提取理由": "x"}})
+    delta["修改元素"]["角色集"].append({"名称": "查无此名", "生日": "0001-01-01T00:00:00", "详情": {"提取理由": "x"}})
+    coerce_delta_in_place(delta, {"角色集": [], "地点集": [{"名称": "某地点"}]})
+    assert delta["修改元素"]["角色集"] == [{"名称": "查无此名", "生日": "0001-01-01T00:00:00", "详情": {"提取理由": "x"}}]
+    assert [item["名称"] for item in delta["修改元素"]["地点集"]] == ["某地点"]
+
+
+def test_无归属修改重复纠错仍完整保留():
+    """重跑不能让待处理条目消失，也不能把原有硬错误洗成成功。"""
+    delta = _mod_delta("萧家")
+    story = {"角色集": [{"名称": "萧炎"}],
+             "地点集": [{"名称": "萧家"}],
+             "阵营集": [{"名称": "萧家"}]}
+    original = deepcopy(delta)
+    coerce_delta_in_place(delta, story)
+    coerce_delta_in_place(delta, story)
+    assert delta == original
+
+
+def test_唯一类别目标完整迁移():
+    """档案中唯一类别存在的目标仍按正式名称完整迁移。"""
+    delta = _mod_delta("萧家")
+    report = coerce_delta_in_place(delta, {"角色集": [{"名称": "萧炎"}], "阵营集": [{"名称": "萧家"}]})
+    assert not any("已移除" in line for line in report)
+    assert delta["修改元素"]["阵营集"]
+    assert delta["修改元素"]["角色集"] == []
+
+
+@pytest.mark.parametrize("target", ["萧玉", "萧玉的别名"])
+def test_同章新增后的修改保留并实际合入(target):
+    """新增和修改承载不同信息，正式名及新增别名都不能被当成无效修改丢弃。"""
+    from merge_delta import merge_collection
+    from validate_delta import validate_elements
+
+    delta = _mod_delta(target)
+    delta["新增元素"]["角色集"] = [{"名称": "萧玉", "别名": ["萧玉的别名"],
+                                    "详情": {"提取理由": "本章首次出场", "原始信息": "回到家族"}}]
+    delta["修改元素"]["角色集"][0]["详情"]["补充信息"] = "与萧炎发生争执"
+    coerce_delta_in_place(delta, {"角色集": []})
+    assert validate_elements({"角色集": []}, delta, "process")[0] == []
+    merged, *_ = merge_collection([], delta["新增元素"]["角色集"],
+                                  delta["修改元素"]["角色集"], "角色集")
+    assert len(merged) == 1
+    assert merged[0]["详情"]["原始信息"] == "回到家族"
+    assert merged[0]["详情"]["补充信息"] == "与萧炎发生争执"
+
+
+def test_迁移目的集合已有补丁时保留两处内容():
+    """迁移被同名补丁阻止时，不能把另一份独有信息当成重复内容删除。"""
+    delta = _mod_delta("萧家")
+    delta["修改元素"]["角色集"][0]["详情"]["本章格局"] = "待确认的完整变化"
+    delta["修改元素"]["阵营集"] = [{"名称": "萧家", "详情": {"提取理由": "阵营信息"}}]
+    original = deepcopy(delta)
+    coerce_delta_in_place(delta, {"角色集": [], "阵营集": [{"名称": "萧家"}]})
+    assert delta == original
+
+
+def test_cli重跑保留失败条目且仍无法通过校验(tmp_path, monkeypatch):
+    """覆盖写入磁盘及重复运行，防止仅验证内存而漏掉实际 CLI 丢数据。"""
+    from coerce_delta import main
+    from validate_delta import validate_elements
+
+    delta = _mod_delta("萧家")
+    delta["修改元素"]["角色集"][0]["详情"]["本章格局"] = "必须留存的本章独有信息"
+    story = {"角色集": [], "地点集": [{"名称": "萧家"}], "阵营集": [{"名称": "萧家"}]}
+    delta_path, story_path, report_path = [tmp_path / name for name in ("delta.json", "story.json", "report.json")]
+    delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
+    story_path.write_text(json.dumps(story, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["coerce_delta", str(delta_path), "--current", str(story_path),
+                                    "--report", str(report_path)])
+    for _ in range(2):
+        assert main() == 0  # 机械纠错完成不代表章节校验通过。
+        actual = json.loads(delta_path.read_text(encoding="utf-8"))
+        assert actual == delta
+        assert any("修改目标[萧家]不存在" in e for e in validate_elements(story, actual, "process")[0])

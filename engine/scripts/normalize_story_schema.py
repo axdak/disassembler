@@ -39,6 +39,7 @@ from chronology import (
     is_iso_time,
     normalize_chapter_value,
     normalize_event_temporal_fields,
+    order_events_by_chapter,
     parse_chapter_numbers,
     assign_event_group_orders,
 )
@@ -476,7 +477,14 @@ def normalize_structure(data: Any, *, quarantine_invalid_refs: bool = False) -> 
             normalize_refs(item, collection_key, name_sets, alias_maps, logs, quarantine_invalid_refs)
             normalize_detail_refs(item.get("详情", {}), name_sets, alias_maps, logs, quarantine_invalid_refs)
 
-    assign_event_group_orders(result["事件集"])
+    # 事件数组顺序是派生不变量（"数组顺序即章节逻辑顺序"），不是创作内容：模型既不能
+    # 移动既有事件、也不能改写 详情.涉及章节，而 chronological_event_order_errors 在
+    # 所有阶段都是硬 error。逐章解析形成的自然顺序已合规，此处不会改动；只有在顺序
+    # 确实被破坏（如治理合并并集了 详情.涉及章节）时才重排，并把变更写进日志。
+    logs.extend(order_events_by_chapter(result["事件集"]))
+    # 与 merge_delta 保持一致：开启重名拆分，避免产出的分组名被
+    # event_group_order_errors 判为"同章节内非连续复用"而无法消除。
+    assign_event_group_orders(result["事件集"], split_repeated=True)
 
     return result, logs
 

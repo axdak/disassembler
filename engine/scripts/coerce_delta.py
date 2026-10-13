@@ -3,6 +3,7 @@
 
 设计契约：
 - 只做确定性类型/格式及字段位置修复，不改语义、不评判 LLM 内容质量。
+- 无法唯一归属的修改必须保留，由校验器阻止入库；不得删除内容换取通过。
 - 复用 normalize_story_schema.py 已有的 coerce_* 工具，不重复造轮子。
 - 输入是 LLM 写的 Delta dict（in-place 修改）；返回纠错操作 list[str]。
 - 修复点覆盖 validate_delta.py 中"机械可推断"的硬约束错误，
@@ -49,6 +50,8 @@ from story_schema_rules import (
     TYPE_TO_COLLECTION,
     dump_supplementary_tags,
     is_cumulative_detail_field,
+    parse_supplementary_tags,
+    salvage_supplementary_tags,
 )
 
 
@@ -164,24 +167,29 @@ def _coerce_involved_chapters(detail: Dict[str, Any], label: str, report: List[s
 
 
 def _coerce_supplementary_tags(detail: Dict[str, Any], label: str, report: List[str]) -> None:
-    """详情.补充标签 若写成数组，转为可逆的紧凑 JSON 字符串。"""
+    """把 详情.补充标签 统一成可逆的紧凑 JSON 字符串数组。
+
+    数组、被写坏的字符串、以及其它类型都走同一套抢救规则：能解析的按标签
+    规范化，不能解析的把原文逐字保留为单个标签，确实不含内容的键直接移除。
+    校验器对"补充标签不可解析"是硬 error，而既有事件既不能改 详情 整块、
+    也不能改数组位置，所以必须在纠错层把它变成确定性可消除的问题。
+    """
     if SUPPLEMENTARY_TAGS_DETAIL_KEY not in detail:
         return
-    value = detail[SUPPLEMENTARY_TAGS_DETAIL_KEY]
-    if not isinstance(value, list):
+    original = detail[SUPPLEMENTARY_TAGS_DETAIL_KEY]
+    try:
+        canonical = dump_supplementary_tags(parse_supplementary_tags(original))
+    except ValueError:
+        tags = salvage_supplementary_tags(original)
+        canonical = dump_supplementary_tags(tags) if tags else ""
+    if not canonical:
+        detail.pop(SUPPLEMENTARY_TAGS_DETAIL_KEY, None)
+        report.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} 不含有效标签 → 已移除")
         return
-    tags = []
-    seen = set()
-    for item in value:
-        if not isinstance(item, str):
-            continue
-        tag = item.strip()
-        if tag and tag not in seen:
-            tags.append(tag)
-            seen.add(tag)
-    if tags:
-        detail[SUPPLEMENTARY_TAGS_DETAIL_KEY] = dump_supplementary_tags(tags)
-        report.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} 数组 → JSON字符串")
+    if canonical == original:
+        return
+    detail[SUPPLEMENTARY_TAGS_DETAIL_KEY] = canonical
+    report.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} 非法值 → 按原内容重建为可解析标签")
 
 
 def _coerce_archive_arrays(detail: Dict[str, Any], label: str, report: List[str]) -> None:
@@ -453,6 +461,8 @@ def coerce_delta_in_place(delta: Dict[str, Any], current: Dict[str, Any] | None 
         return report
 
     if current is not None:
+        # 只迁移正式索引能唯一确定的类别。其余条目完整保留，让校验器结合
+        # 正式档案和本批新增判定；跨类别歧义、未知目标及迁移冲突不能靠删除消除。
         report.extend(align_registered_types(delta, current))
     report.extend(relocate_element_fields(delta))
 

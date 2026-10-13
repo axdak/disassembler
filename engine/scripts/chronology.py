@@ -95,6 +95,58 @@ def first_involved_chapter(event: dict[str, Any]) -> int | None:
     return chapters[0] if chapters else None
 
 
+def event_chapter_sort_key(event: dict[str, Any]) -> int:
+    """Sort key for ``事件集``: first involved chapter, unknown chapters last."""
+    chapter = first_involved_chapter(event)
+    return chapter if chapter is not None else 10**12
+
+
+def chapter_order_violation_indices(events: list[dict[str, Any]]) -> list[int]:
+    """返回首章早于前一事件的下标；与 :func:`chronological_event_order_errors` 同一判据。
+
+    校验器对"缺少有效涉及章节"的事件不进单调链，这里保持一致（直接跳过）。
+    该助手只服务于"是否需要修复"的判断，不改变任何数据。
+    """
+    indices: list[int] = []
+    previous: int | None = None
+    for index, event in enumerate(events):
+        current = first_involved_chapter(event)
+        if current is None:
+            continue
+        if previous is not None and current < previous:
+            indices.append(index)
+        previous = current
+    return indices
+
+
+def order_events_by_chapter(events: list[dict[str, Any]]) -> list[str]:
+    """只在数组顺序**确实被破坏**时按最小涉及章节稳定重排，并返回变更日志。
+
+    `事件集` 的数组顺序是派生不变量（"数组顺序即章节逻辑顺序"），不是创作内容：
+    提示词禁止模型移动既有事件或改写 `详情.涉及章节`，而
+    :func:`chronological_event_order_errors` 在**所有阶段**都是硬 error。
+    程序侧有两处会破坏它——治理合并会并集 `详情.涉及章节`（`merge_items`），
+    让靠后的事件拿到更早的首章——而模型与此后的其它步骤都无法消除，
+    因此重排是这条错误唯一的确定性消除路径。
+
+    **已合规的数组一个字节都不动**：逐章解析形成的自然顺序（"解析顺序"）不会被重写。
+    `list.sort` 是稳定排序，同首章的事件保持原有相对顺序。仅在发生修复时返回日志，
+    调用方应把它并入变更报告，避免静默重排。
+    """
+    violations = chapter_order_violation_indices(events)
+    if not violations:
+        return []
+    position_before = {id(event): index for index, event in enumerate(events)}
+    events.sort(key=event_chapter_sort_key)
+    moved = sum(
+        1 for index, event in enumerate(events) if position_before[id(event)] != index
+    )
+    return [
+        f"事件数组顺序倒置 {len(violations)} 处（首个为事件[{violations[0]}]）→ "
+        f"已按最小涉及章节稳定重排，移动 {moved} 个事件；同章节内保持原顺序"
+    ]
+
+
 def last_involved_chapter(event: dict[str, Any]) -> int | None:
     detail = event.get("详情", {})
     involved = detail.get("涉及章节") if isinstance(detail, dict) else None
@@ -202,6 +254,14 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
     A group is a page-level plot segment scoped to its first involved chapter.
     The same short name may be used again in another chapter, but a same-chapter
     non-contiguous reuse remains a separate segment during migration.
+
+    ``split_repeated`` must stay enabled on every production path: the validator
+    (:func:`event_group_order_errors`) rejects a same-chapter non-contiguous reuse
+    of the same name, so an assigner that re-emits the bare name would produce a
+    structure its own validator rejects — an error with no program-side removal
+    path.  Splitting is therefore part of the contract, not a migration extra.
+    The uniquifying suffix is size-bounded so a legal 40-character name never
+    grows past ``MAX_EVENT_GROUP_NAME_LENGTH``.
     """
     runs: list[tuple[tuple[str, int | None], list[dict[str, Any]]]] = []
     for event in events:
@@ -223,7 +283,8 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
         occurrences[occurrence_key] = occurrences.get(occurrence_key, 0) + 1
         display_name = base_name
         if split_repeated and occurrences[occurrence_key] > 1:
-            display_name = f"{base_name}续{occurrences[occurrence_key]}"
+            suffix = f"续{occurrences[occurrence_key]}"
+            display_name = f"{base_name[:MAX_EVENT_GROUP_NAME_LENGTH - len(suffix)]}{suffix}"
         rank = run_index * 10
         rank_text = format_event_group_rank(rank)
         for member in members:
@@ -270,7 +331,7 @@ def event_group_order_errors(events: list[dict[str, Any]]) -> list[str]:
 
 def recompute_event_group_prefixes(events: list[dict[str, Any]]) -> None:
     """Compatibility alias for callers still using the old function name."""
-    assign_event_group_orders(events)
+    assign_event_group_orders(events, split_repeated=True)
 
 
 def insert_event_in_chapter_order(events: list[dict[str, Any]], event: dict[str, Any]) -> int:

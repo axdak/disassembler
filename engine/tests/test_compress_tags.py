@@ -13,7 +13,11 @@ from compress_tags import (
     compress_structure,
     load_limits,
 )
-from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, parse_supplementary_tags
+from story_schema_rules import (
+    SUPPLEMENTARY_TAGS_DETAIL_KEY,
+    parse_supplementary_tags,
+    salvage_supplementary_tags,
+)
 
 
 def _event(name, tags, supplementary=None, detail_extra=None):
@@ -263,10 +267,33 @@ def test_load_limits_handles_missing_file(tmp_path):
         assert limits[k] == FALLBACK_LIMIT
 
 
-def test_corrupted_supplementary_is_preserved_for_repair():
-    """无法解释的旧内容交给修复流程，不以空数组覆盖已有材料。"""
+def test_corrupted_supplementary_is_rebuilt_keeping_original_content():
+    """损坏的补充标签就地重建为可解析标签：原内容逐字保留，不以空数组覆盖。
+
+    结构侧压缩是每次提交都要过的关口，抛异常会让整份结构永久无法提交；而既有
+    事件不允许改 详情 整块，模型也修不了，所以必须在这里自愈。
+    """
     item = _event("退婚事件", ["剧情母题:武力对峙"], supplementary="not a json")
-    before = json.dumps(item, ensure_ascii=False)
-    with pytest.raises(ValueError, match="保留原值"):
-        compress_item(item, limit=8)
-    assert json.dumps(item, ensure_ascii=False) == before
+    compress_item(item, limit=8)
+    assert parse_supplementary_tags(item["详情"]["补充标签"]) == ["not a json", "剧情母题:武力对峙"]
+
+
+def test_corrupted_supplementary_is_repaired_by_structure_pass():
+    """结构级压缩不再抛错，修复后幂等，可重新通过解析。"""
+    item = _event("退婚事件", ["剧情母题:武力对峙"], supplementary="not a json")
+    data = {"事件集": [item]}
+    compress_structure(data, {"事件集": 8})
+    assert parse_supplementary_tags(item["详情"]["补充标签"]) == ["not a json", "剧情母题:武力对峙"]
+    assert compress_structure(data, {"事件集": 8}) == []
+
+
+def test_salvage_supplementary_tags_keeps_every_shape_of_content():
+    """抢救规则覆盖数组 / JSON 字符串 / 纯文本 / 其它类型，且不猜分隔符。"""
+    assert salvage_supplementary_tags(["甲", " 乙 ", "甲", "", None]) == ["甲", "乙"]
+    assert salvage_supplementary_tags('["甲","乙"]') == ["甲", "乙"]
+    assert salvage_supplementary_tags('"甲"') == ["甲"]
+    assert salvage_supplementary_tags("甲,乙") == ["甲,乙"]
+    assert salvage_supplementary_tags(123) == ["123"]
+    assert salvage_supplementary_tags("") == []
+    assert salvage_supplementary_tags([]) == []
+

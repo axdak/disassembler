@@ -26,7 +26,7 @@ from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, REVIEW_CHECKS, recovery_output_errors
 from recovery_materials import RecoveryMaterials, read_material_document, rebase_material_paths, write_change_index
-from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, parse_supplementary_tags
+from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, salvage_supplementary_tags
 
 STRATEGIES = (
     ("targeted", "按最新校验错误逐项定点修复；保留已正确字段和全部分析内容。"),
@@ -98,6 +98,11 @@ def _tag_evidence_view(item: dict) -> tuple[dict, set[str]] | None:
     Mechanical tag compression may relocate or deduplicate the same tag. Only
     parseable string tags participate; malformed evidence keeps the ordinary
     field-by-field preservation check and must not be silently discarded.
+
+    Malformed 补充标签 is salvaged rather than treated as opaque prose: the
+    deterministic repair in ``coerce_delta``/``compress_tags`` canonicalizes it
+    while keeping the original text, so comparing it as raw text would report a
+    false "原标签内容被删除".
     """
     tags, detail = item.get("标签集"), item.get("详情")
     if (not isinstance(tags, list) or not isinstance(detail, dict)
@@ -105,10 +110,7 @@ def _tag_evidence_view(item: dict) -> tuple[dict, set[str]] | None:
         return None
     supplementary = []
     if SUPPLEMENTARY_TAGS_DETAIL_KEY in detail:
-        try:
-            supplementary = parse_supplementary_tags(detail[SUPPLEMENTARY_TAGS_DETAIL_KEY])
-        except ValueError:
-            return None
+        supplementary = salvage_supplementary_tags(detail[SUPPLEMENTARY_TAGS_DETAIL_KEY])
     view = {key: value for key, value in item.items() if key != "标签集"}
     view["详情"] = {key: value for key, value in detail.items() if key != SUPPLEMENTARY_TAGS_DETAIL_KEY}
     return view, {tag.strip() for tag in tags + supplementary}

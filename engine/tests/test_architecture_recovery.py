@@ -27,6 +27,30 @@ def chapter_project(root):
     return chapter, paths, story
 
 
+def test_unresolved_modification_survives_repeated_commit_without_success_receipt(tmp_path):
+    """真实提交链必须保留失败补丁、生成修复任务，不能删掉错误后发布成功。"""
+    chapter, paths, story = chapter_project(tmp_path)
+    delta = empty_delta(1)
+    item = {"名称": "未登记角色", "生日": "0001-01-01T00:00:00",
+            "详情": {"提取理由": "本章发生变化", "本章状态": "不可丢失的独有信息"}}
+    # 此场景只有修改，独立构造分区以免测试夹具的共享字典同时生成新增。
+    delta["修改元素"] = {"角色集": [item]}
+    write_json(paths["delta"], delta)
+    original = story.read_bytes()
+
+    for _ in range(2):
+        assert pipeline.commit_chapter(tmp_path, 1) == 1
+        assert json.loads(paths["delta"].read_text(encoding="utf-8"))["修改元素"]["角色集"] == [item]
+        assert story.read_bytes() == original
+        assert not paths["after"].exists()
+        assert not paths["after"].with_suffix(".commit.json").exists()
+        assert not pipeline.is_chapter_complete(tmp_path, chapter)
+        report = json.loads(paths["delta_report"].read_text(encoding="utf-8"))
+        assert report["passed"] is False
+        assert any("修改目标[未登记角色]不存在" in error for error in report["errors"])
+        assert "不可丢失的独有信息" in paths["repair"].read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("failed_step", ["merge_delta.py", "normalize_story_schema.py",
                                          "compress_tags.py", "validate_structure.py", "diff_structure.py"])
 def test_chapter_failure_never_publishes_partial_structure(tmp_path, monkeypatch, failed_step):

@@ -436,7 +436,9 @@ def merge_delta(incremental_path, delta_path, *, replace_description=False):
             "当前总数": len(merged),
         }
 
-    assign_event_group_orders(incremental["事件集"])
+    # 必须开启重名拆分：校验器会拒绝"同一章节内非连续复用同一剧情段名"，
+    # 若此处沿用裸名重排，产出的结构会被自己的校验器判死且程序侧无消除路径。
+    assign_event_group_orders(incremental["事件集"], split_repeated=True)
 
     # 顶层介绍
     if "介绍" in delta:

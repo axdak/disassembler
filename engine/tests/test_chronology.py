@@ -9,6 +9,7 @@ import tempfile
 HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, HERE)
 
+from apply_governance_ops import merge_items
 from chronology import (
     BASE_TIME,
     assign_event_group_orders,
@@ -367,6 +368,160 @@ def test_structure_validator_allows_same_plot_segment_name_in_different_chapters
     print("[OK] 结构校验允许跨章节复用同一剧情段短名")
 
 
+def test_production_assignment_splits_same_chapter_noncontiguous_group_name():
+    """生产重排必须开启重名拆分，否则产出的分组会被自家校验器判死且无消除路径。"""
+    events = [
+        event("坊市筹资", "0003", "经济线"),
+        event("魔兽山脉历练", "0003", "历练事件"),
+        event("拍卖会竞价", "0003", "经济线"),
+    ]
+    assign_event_group_orders(events, split_repeated=True)
+    assert [item["分组"] for item in events] == [
+        "00000010-经济线",
+        "00000020-历练事件",
+        "00000030-经济线续2",
+    ]
+    story = empty_story()
+    story["事件集"] = events
+    errors, _ = validate_exact_story_schema(story, mode="process")
+    assert not any("非连续复用" in error for error in errors), errors
+    print("[OK] 生产重排拆分同章节非连续复用分组名")
+
+
+def test_structure_validator_rejects_noncontiguous_reuse_of_plot_segment_name():
+    """裸名复用仍必须被校验器拦住——这正是生产路径必须拆分的依据。"""
+    story = empty_story()
+    story["事件集"] = [
+        event("坊市筹资", "0003", "00000010-经济线"),
+        event("魔兽山脉历练", "0003", "00000020-历练事件"),
+        event("拍卖会竞价", "0003", "00000030-经济线"),
+    ]
+    errors, _ = validate_exact_story_schema(story, mode="process")
+    assert any("非连续复用" in error for error in errors), errors
+    print("[OK] 结构校验拒绝同章节内非连续复用剧情段名称")
+
+
+def test_split_suffix_keeps_group_name_within_length_limit():
+    """拆分后缀不得把合法的 40 字剧情段短名挤超上限。"""
+    long_name = "退" * 40
+    events = [
+        event("甲", "0003", long_name),
+        event("乙", "0003", "另一段"),
+        event("丙", "0003", long_name),
+    ]
+    assign_event_group_orders(events, split_repeated=True)
+    for item in events:
+        _, name = item["分组"].split("-", 1)
+        assert is_semantic_event_group_name(name), item["分组"]
+    print("[OK] 重名拆分后缀不突破剧情段短名长度上限")
+
+
+def test_merge_and_normalize_split_same_chapter_noncontiguous_group_name():
+    """合并与规范化两条生产路径都必须产出校验器接受的分组名（重名拆分已开启）。"""
+    story = empty_story()
+    story["事件集"] = [
+        event("坊市筹资", "0003", "经济线"),
+        event("魔兽山脉历练", "0003", "历练事件"),
+        event("拍卖会竞价", "0003", "经济线"),
+    ]
+    normalized, _ = normalize_structure(story)
+    assert normalized["事件集"][2]["分组"] == "00000030-经济线续2", normalized["事件集"][2]["分组"]
+    errors, _ = validate_exact_story_schema(normalized, mode="process")
+    assert not any("非连续复用" in error for error in errors), errors
+
+    with tempfile.TemporaryDirectory() as directory:
+        story_path = os.path.join(directory, "story.json")
+        delta_path = os.path.join(directory, "delta.json")
+        base = empty_story()
+        base["事件集"] = [
+            event("坊市筹资", "0003", "经济线"),
+            event("魔兽山脉历练", "0003", "历练事件"),
+        ]
+        write_json(story_path, base)
+        write_json(delta_path, {
+            "章节范围": "第003章-第003章",
+            "新增元素": {"事件集": [event("拍卖会竞价", "0003", "经济线")]},
+            "修改元素": {},
+        })
+        merge_delta(story_path, delta_path)
+        merged = json.loads(open(story_path, "r", encoding="utf-8").read())
+        assert [item["分组"] for item in merged["事件集"]] == [
+            "00000010-经济线",
+            "00000020-历练事件",
+            "00000030-经济线续2",
+        ], merged["事件集"]
+    print("[OK] 合并与规范化均拆分同章节非连续复用分组名")
+
+
+def test_normalization_removes_event_order_violation():
+    """顺序倒置必须能由程序侧确定性消除：规范化按章节稳定重排。"""
+    story = empty_story()
+    story["事件集"] = [
+        event("后续事件", "0018", "00000010-后续线"),
+        event("开篇事件", "0003", "00000020-开篇线"),
+    ]
+    errors, _ = validate_exact_story_schema(story, mode="process")
+    assert any("早于前一事件" in error for error in errors), errors
+
+    normalized, _ = normalize_structure(story)
+    assert [item["名称"] for item in normalized["事件集"]] == ["开篇事件", "后续事件"]
+    errors, _ = validate_exact_story_schema(normalized, mode="process")
+    assert not any("早于前一事件" in error for error in errors), errors
+    print("[OK] 规范化按章节稳定重排事件并消除顺序倒置")
+
+
+def test_normalization_keeps_authored_order_within_same_chapter():
+    """同一章节内的事件必须保持作者给出的相对顺序（稳定排序）。"""
+    story = empty_story()
+    story["事件集"] = [
+        event("乙事件", "0003", "同章线"),
+        event("甲事件", "0003", "同章线"),
+    ]
+    normalized, _ = normalize_structure(story)
+    assert [item["名称"] for item in normalized["事件集"]] == ["乙事件", "甲事件"]
+    print("[OK] 同章节事件保持原始相对顺序")
+
+
+def test_normalization_leaves_compliant_event_order_untouched():
+    """已合规的数组顺序（逐章解析形成的自然顺序）不得被重排，也不产生重排日志。"""
+    story = empty_story()
+    story["事件集"] = [
+        event("开篇事件", "0003", "00000010-开篇线"),
+        event("中期事件", "0010", "00000020-中期线"),
+        event("最新事件", "0018", "00000030-最新线"),
+    ]
+    normalized, logs = normalize_structure(story)
+    assert [item["名称"] for item in normalized["事件集"]] == [
+        "开篇事件",
+        "中期事件",
+        "最新事件",
+    ], normalized["事件集"]
+    assert not any("重排" in line for line in logs), logs
+    print("[OK] 已合规的事件顺序不被重排，且不产生重排日志")
+
+
+def test_governance_merge_reorder_is_repaired_and_reported():
+    """治理合并并集 详情.涉及章节 造成的顺序倒置，必须由规范化确定性消除并留下日志。"""
+    story = empty_story()
+    story["事件集"] = [
+        event("早期事件", "0005", "00000010-早期线"),
+        event("中期事件", "0010", "00000020-中期线"),
+        event("聚合事件", "0020", "00000030-聚合线"),
+    ]
+    # 真实成因：治理合并把早期事件并入聚合事件，聚合事件首章回到 0005，位置仍在末尾。
+    merge_items(story["事件集"][2], story["事件集"][0])
+    errors, _ = validate_exact_story_schema(story, mode="process")
+    assert any("早于前一事件" in error for error in errors), errors
+
+    normalized, logs = normalize_structure(story)
+    names = [item["名称"] for item in normalized["事件集"]]
+    assert names.index("聚合事件") < names.index("中期事件"), names
+    errors, _ = validate_exact_story_schema(normalized, mode="process")
+    assert not any("早于前一事件" in error for error in errors), errors
+    assert any("重排" in line for line in logs), logs
+    print("[OK] 治理合并造成的顺序倒置被确定性消除并写入变更日志")
+
+
 if __name__ == "__main__":
     test_chapter_time_and_involved_chapters_are_canonical()
     test_normalization_adds_birthday_and_compact_chapter_fields()
@@ -387,4 +542,11 @@ if __name__ == "__main__":
     test_merge_assigns_new_segment_rank_and_governance_reorders_after_insertion()
     test_migration_splits_noncontiguous_legacy_group_runs()
     test_structure_validator_rejects_noncontiguous_reuse_of_plot_segment_name()
+    test_production_assignment_splits_same_chapter_noncontiguous_group_name()
+    test_split_suffix_keeps_group_name_within_length_limit()
+    test_merge_and_normalize_split_same_chapter_noncontiguous_group_name()
+    test_normalization_removes_event_order_violation()
+    test_normalization_keeps_authored_order_within_same_chapter()
+    test_normalization_leaves_compliant_event_order_untouched()
+    test_governance_merge_reorder_is_repaired_and_reported()
     print("\n全部测试通过 [PASS]")

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from chronology import assign_event_group_orders, first_involved_chapter
+from chronology import assign_event_group_orders, order_events_by_chapter
 from normalize_story_schema import normalize_structure, save_json
 
 
@@ -37,10 +37,11 @@ def index_sequences(project_dir: Path) -> list[int]:
 def migrate_story(data: Any) -> tuple[dict[str, Any], list[str]]:
     story, logs = normalize_structure(data)
     events = story["事件集"]
-    # 这是一次性迁移：稳定排序建立“数组顺序即章节逻辑顺序”的新约定。
-    events.sort(key=lambda event: first_involved_chapter(event) if first_involved_chapter(event) is not None else 10**12)
+    # 规范化已按需要重排过；迁移在这里保留显式一步，以便把"是否发生重排"记进迁移日志。
+    reorder_logs = order_events_by_chapter(events)
+    logs.extend(reorder_logs or ["事件数组顺序已符合章节逻辑顺序，未做重排"])
     assign_event_group_orders(events, split_repeated=True)
-    logs.append("事件集已按最小涉及章节稳定重排，并改为剧情段序号分组；后续治理修改既有事件不得移动数组位置")
+    logs.append("事件集按最小涉及章节确定顺序，并改为剧情段序号分组；后续治理修改既有事件不得移动数组位置")
     return story, logs
 
 

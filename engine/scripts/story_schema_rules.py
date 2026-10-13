@@ -196,6 +196,57 @@ def dump_supplementary_tags(tags: List[str]) -> str:
     return json.dumps(tags, ensure_ascii=False, separators=(",", ":"))
 
 
+def salvage_supplementary_tags(value: Any) -> List[str]:
+    """从损坏的 详情.补充标签 里按固定规则抢救标签，绝不抛异常。
+
+    与 :func:`parse_supplementary_tags` 的分工：后者是严格的契约校验，也是
+    校验器报错的依据；本函数是程序侧的确定性消除路径。没有它，"补充标签
+    不可解析"就是一条模型改不掉、程序也修不好的死错误。
+
+    抢救规则（确定性、幂等）：
+    - JSON 字符串数组 → 去空、去重、保序规范化；
+    - 其它字符串 → 先按 JSON 解析；解析出的字符串数组同上；解析出单个字符串
+      取该字符串；完全不是 JSON 时，整段原文逐字保留为**一个**标签
+      （不做分隔符猜测，避免把含逗号的标签切坏）；
+    - 数组 → 只取非空字符串项；
+    - 其它类型 → 保留其 JSON 文本形式。
+
+    只有在原值确实不含任何内容（空串、空数组）时才返回空列表，此时调用方
+    可以安全地移除该键；任何非空内容都不会被丢弃。
+    """
+    candidates: List[Any]
+    if isinstance(value, list):
+        candidates = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            return [text]
+        if isinstance(decoded, list):
+            candidates = decoded
+        elif isinstance(decoded, str):
+            candidates = [decoded]
+        else:
+            return [text]
+    else:
+        rendered = json.dumps(value, ensure_ascii=False)
+        return [rendered] if rendered.strip() else []
+
+    tags: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        if not isinstance(item, str):
+            continue
+        tag = item.strip()
+        if tag and tag not in seen:
+            tags.append(tag)
+            seen.add(tag)
+    return tags
+
+
 def final_disallowed_detail_fields(collection_key: str) -> Set[str]:
     fields = set(LEGACY_FINAL_TRACE_DETAIL_FIELDS)
     if collection_key != "事件集":
