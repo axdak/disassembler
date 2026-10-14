@@ -23,8 +23,10 @@ from code_fingerprint import code_digest
 
 class TreeFailure(Exception):
     """Propagate cancellation/capacity/provider outcomes without disguising them."""
-    def __init__(self, code):
+    def __init__(self, code, reason="", node=None):
+        super().__init__(reason or f"分层任务失败（返回码 {code}）")
         self.code = code
+        self.node = str(node) if node is not None else ""
 
 
 def merge_markdown(documents: list[str]) -> str:
@@ -132,7 +134,7 @@ class CapacityTree:
         self.protected_materials = options.get("protected_materials", [])
         self.adaptive_overviews = options.get("adaptive_overviews", False)
         self.generation_input_tokens = options.get("generation_input_tokens")
-        self.overview_budget = min(2000, self.policy.output_tokens // 5, self.policy.usable_input // 16)
+        self.overview_budget = self.policy.overview_budget
         self.sources = [(str(path.resolve()), digest(path), role) for path, role in sources]
         # Reference archives are addressable evidence, not a mandatory reread
         # queue. Their identity still invalidates stale checkpoints and receipts.
@@ -214,11 +216,12 @@ class CapacityTree:
         pack, result, ledger = [directory / name for name in ("task.md", "result.json", "state.json")]
         state = json.loads(ledger.read_text(encoding="utf-8")) if ledger.is_file() else {"attempts": 0}
         if state.get("split_required"):
-            raise TreeFailure(CONTEXT_EXCEEDED)
+            raise TreeFailure(CONTEXT_EXCEEDED, state.get("feedback", "材料需要继续分包"), ledger)
         if state.get("sha256") == digest(result) and result.is_file():
             return json.loads(result.read_text(encoding="utf-8")), result
         feedback = state.get("feedback", "")
         while state["attempts"] < 3:
+            failure_kind = "contract"
             strategy = (
                 "按当前输出契约逐项完成，不能省略正文或证据。",
                 "重新核对原件与格式错误，改变失败的组织方式，不要照抄上一份结果。",
@@ -226,7 +229,10 @@ class CapacityTree:
             )[state["attempts"]]
             pack.write_text(prompt + f"\n本轮策略：{strategy}\n输出位置：{result}\n上次反馈：{feedback}", encoding="utf-8")
             if not admit_pack(pack):
-                raise TreeFailure(CONTEXT_EXCEEDED)
+                report = json.loads(pack.with_suffix(pack.suffix + ".capacity.json").read_text(encoding="utf-8"))
+                raise TreeFailure(CONTEXT_EXCEEDED,
+                                  f"分层输入超预算：估算 {report['estimated_input_tokens']} token，"
+                                  f"可用 {report['usable_input_tokens']} token", ledger)
             state["attempts"] += 1
             save_json(ledger, state)
             selected = (os.environ.get("ND_RECOVERY_COMMAND") or self.command) if state["attempts"] == 3 else self.command
@@ -240,26 +246,33 @@ class CapacityTree:
                                          + [(Path(source), copy) for source, copy in self.reference_paths.items()])
             if rc in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
                 state["attempts"] -= 1
+                state["feedback"] = {130: "分层调用已取消", CONTEXT_EXCEEDED: "分层调用超过输入容量，需继续分包",
+                                     OUTPUT_TRUNCATED: "分层调用输出被截断，需提高单次输出上限"}[rc]
                 if rc == CONTEXT_EXCEEDED:
                     state["split_required"] = True
                 # OUTPUT_TRUNCATED 表示单轮输出被输出上限截断：再拆分材料不会
                 # 增加输出额度，因此不计为语义失败、也不触发继续分包。
                 save_json(ledger, state)
-                raise TreeFailure(rc)
+                raise TreeFailure(rc, state["feedback"], ledger)
             if rc in {124, 408, 429, 502, 503, 504}:
-                raise TreeFailure(rc)  # Transport failure is not evidence to split prose.
+                state.update(feedback=f"分层模型调用失败（返回码 {rc}）", failure_kind="provider")
+                save_json(ledger, state)
+                raise TreeFailure(rc, state["feedback"], ledger)  # Transport failure never splits prose.
             try:
                 value = json.loads(result.read_text(encoding="utf-8"))
                 if rc or changed or not isinstance(value, dict) or set(value) != {"overview", "content"}:
                     raise ValueError("必须返回 overview/content；不得修改只读材料")
                 if not isinstance(value["overview"], str) or not value["overview"].strip():
                     raise ValueError("缺少可追溯的关联概览")
-                if estimate_tokens(value["overview"]) > overview_budget:
-                    raise ValueError("概览超预算；正文不缩写，改用紧凑的来源定位索引")
+                overview_size = estimate_tokens(value["overview"])
+                if overview_size > overview_budget:
+                    failure_kind = "overview_overflow"
+                    raise ValueError(f"概览超预算：估算 {overview_size} token，上限 {overview_budget} token；"
+                                     "正文不缩写，改用紧凑的来源定位索引")
                 if estimate_tokens(result.read_text(encoding="utf-8")) > self.policy.output_tokens:
                     state.update(split_required=True, feedback="本次输出超预算，继续拆分材料")
                     save_json(ledger, state)
-                    raise TreeFailure(CONTEXT_EXCEEDED)
+                    raise TreeFailure(CONTEXT_EXCEEDED, state["feedback"], ledger)
                 if overview_only and value["content"] is not None:
                     raise ValueError("历史阅读阶段不能生成本章新增内容")
                 if review:
@@ -295,15 +308,19 @@ class CapacityTree:
                     # than asking for the same oversized response three times.
                     state.update(split_required=True, feedback="长响应 JSON 不完整，按输出容量继续拆分")
                     save_json(ledger, state)
-                    raise TreeFailure(CONTEXT_EXCEEDED) from exc
+                    raise TreeFailure(CONTEXT_EXCEEDED, state["feedback"], ledger) from exc
                 feedback = str(exc)
                 state["feedback"] = feedback
+                state["failure_kind"] = failure_kind
                 save_json(ledger, state)
-        # Only an actual oversized result justifies subdividing the evidence.
-        # Repeated semantic/schema failures must not spawn an exponential tree.
-        if "输出超预算" in feedback:
-            raise TreeFailure(CONTEXT_EXCEEDED)
-        raise TreeFailure(REPAIR_EXHAUSTED)
+        # A measured routing overflow also justifies splitting. Remember the
+        # decision so later strategies/restarts reuse children instead of burning
+        # the same three attempts. Semantic/schema errors still never split.
+        if state.get("failure_kind") == "overview_overflow" or "输出超预算" in feedback:
+            state["split_required"] = True
+            save_json(ledger, state)
+            raise TreeFailure(CONTEXT_EXCEEDED, feedback, ledger)
+        raise TreeFailure(REPAIR_EXHAUSTED, feedback or "分层节点尝试已耗尽", ledger)
 
     def leaf(self, path, role, text, start, background, overview_only=False, review=False):
         material = (f"原件：{path}；角色：{role}；字符区间：{start}-{start + len(text)}\n"
@@ -364,7 +381,7 @@ class CapacityTree:
                         raise
                     limit //= 2
             else:
-                raise TreeFailure(CONTEXT_EXCEEDED)
+                raise TreeFailure(CONTEXT_EXCEEDED, "归并索引缩减后仍超过容量预算", self.root)
         self.boundaries[str(artifact)] = (left_edge[0], right_edge[1])
         content = value["content"]["addition"] if review else value["content"]
         addition = [content] if content is not None else []
@@ -390,7 +407,7 @@ class CapacityTree:
                 nodes.append(self.leaf(path, role, part, offset, background, overview_only, review))
                 offset += len(part)
         if not nodes:
-            raise TreeFailure(REPAIR_EXHAUSTED)
+            raise TreeFailure(REPAIR_EXHAUSTED, "没有可读取的证据分片", self.root)
         while len(nodes) > 1:
             nodes = [self.combine(nodes[i], nodes[i + 1], overview_only, review) if i + 1 < len(nodes) else nodes[i]
                      for i in range(0, len(nodes), 2)]
@@ -409,7 +426,7 @@ class CapacityTree:
             size = len(path.read_text(encoding="utf-8"))
             if size and (not spans or spans[0]["start"] != 0 or spans[-1]["end"] != size
                          or any(a["end"] != b["start"] for a, b in zip(spans, spans[1:]))):
-                raise TreeFailure(REPAIR_EXHAUSTED)
+                raise TreeFailure(REPAIR_EXHAUSTED, f"证据区间覆盖不完整：{path}", self.root)
         save_json(self.root / ("review_coverage.json" if review else "coverage.json"), self.coverage)
         return nodes[0]
 

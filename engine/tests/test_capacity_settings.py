@@ -43,9 +43,10 @@ def test_orchestrator_carries_saved_limits(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(Orchestrator, '_run', lambda self: seen.append(ContextBudget.from_env()) or 0)
     config = Config(model_input_tokens=90000, model_output_tokens=10000,
-                    model_context_tokens=80000, model_reserve_tokens=5000)
+                    model_context_tokens=80000, model_reserve_tokens=5000, model_overview_tokens=6000)
     assert Orchestrator(tmp_path, config).run() == 0
     assert seen[0].usable_input == 65000
+    assert seen[0].overview_tokens == 6000
 
 
 @pytest.mark.parametrize('multi', [False, True])
@@ -62,7 +63,7 @@ def test_worker_environment_receives_budget_and_call_options(tmp_path, monkeypat
 
     monkeypatch.setattr(pipeline, 'stream_shell_command', shell)
     settings = dict(model_input_tokens=90000, model_output_tokens=12000,
-                    model_context_tokens=100000, model_reserve_tokens=7000)
+                    model_context_tokens=100000, model_reserve_tokens=7000, model_overview_tokens=900)
     with capacity_scope(settings):
         worker = pipeline._run_multi_output_worker if multi else pipeline._run_worker
         assert worker('offline', tmp_path, 'report', pack, [output] if multi else output,
@@ -71,6 +72,7 @@ def test_worker_environment_receives_budget_and_call_options(tmp_path, monkeypat
     assert calls[0][0]['ND_CONTEXT_INPUT_TOKENS'] == '90000'
     assert calls[0][0]['ND_CONTEXT_OUTPUT_TOKENS'] == '12000'
     assert calls[0][0]['ND_CONTEXT_RESERVE_TOKENS'] == '7000'
+    assert calls[0][0]['ND_CONTEXT_OVERVIEW_TOKENS'] == '900'
     receipt = json.loads(pack.with_suffix('.md.capacity.json').read_text(encoding='utf-8'))
     assert receipt['usable_input_tokens'] == 81000
 

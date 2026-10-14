@@ -17,6 +17,17 @@ const status = {
 } satisfies Status
 
 describe('截止章节运行入口', () => {
+  it('展示模型步骤、章节和已测耗时，不将模型结束误报为正式提交', () => {
+    const view = render(<OverviewTab projectId={1} status={status} tasks={[]} artifactStatus={null}
+      events={[{ id: 9, run_id: 1, project_id: 1, type: 'worker_progress', stage: 'chapter_delta',
+        detail: '模型执行结束', ts: new Date().toISOString(),
+        data: { phase: 'finished', chapter_seq: 43, elapsed_seconds: 12.5, returncode: 0 } }]}
+      onRun={vi.fn()} onSaveRange={vi.fn()} onCancel={vi.fn()} onDelete={vi.fn()} onOpenLogs={vi.fn()} />)
+    expect(screen.getByLabelText('当前执行详情').textContent).toContain('第43章')
+    expect(screen.getByLabelText('当前执行详情').textContent).toContain('12.5秒')
+    expect(screen.getByLabelText('当前执行详情').textContent).not.toContain('已提交')
+    view.unmount()
+  })
   it('保存输入并在重新打开项目后回填，运行前确认保存', async () => {
     const onRun = vi.fn()
     const onSaveRange = vi.fn(async () => {})

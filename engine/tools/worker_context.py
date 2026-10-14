@@ -13,6 +13,12 @@ import re
 import sys
 from pathlib import Path
 
+# The standalone stdio process must resolve the same identity rules as commits.
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from element_identity import build_lookup_index, find_index
+
 TEXT_SUFFIXES = {".md", ".json", ".txt", ".csv", ".tsv"}
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 READ_LIMIT = 24000
@@ -65,9 +71,12 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
         if source in seen or not actual.is_file():
             continue
         seen.add(source)
-        content = actual.read_text(encoding="utf-8")
+        # Hashes identify evidence bytes. Text-mode writes would translate LF
+        # into CRLF on Windows and invalidate unchanged provider artifacts.
+        raw = actual.read_bytes()
+        content = raw.decode("utf-8")
         snapshot = directory / f"context_{len(files):04d}.txt"
-        snapshot.write_text(content, encoding="utf-8")
+        snapshot.write_bytes(raw)
         files.append({"source": str(source), "snapshot": str(snapshot)})
         catalog = (source.name in {"materials.json", "references.json", "sources.json", "manifest.json"}
                    or source.name.endswith((".sources.json", ".references.json", ".hierarchy.json")))
@@ -174,7 +183,9 @@ class ContextReader:
             for item in data.get(key, []) or []:
                 if not isinstance(item, dict):
                     continue
-                searchable = json.dumps({field: item.get(field) for field in ("名称", "别名", "介绍", "标签集", "分组")}, ensure_ascii=False)
+                # Search historical detail too, but return only a bounded identity
+                # view. A missing summary match must not mean a fact never existed.
+                searchable = json.dumps(item, ensure_ascii=False)
                 if query in searchable:
                     found.append(self._unit_view(key, item, "L1"))
         page = found[cursor:cursor + limit]
@@ -193,13 +204,67 @@ class ContextReader:
             collection, name = ref["collection"], ref["name"]
             if collection not in COLLECTION_KEYS or not isinstance(name, str) or not name.strip():
                 raise ValueError("ref 的 collection/name 无效")
-            match = next((item for item in data.get(collection, []) or [] if isinstance(item, dict)
-                          and (item.get("名称") == name or name in (item.get("别名", []) or []))), None)
-            if match is None:
+            records = data.get(collection, []) or []
+            # Canonical names outrank aliases; ambiguous matches are actionable
+            # tool errors, never an arbitrary record selected by storage order.
+            names, aliases = build_lookup_index(records)
+            index = find_index(names, aliases, name)
+            if index < 0:
                 missing.append(ref)
             else:
-                items.append(self._unit_view(collection, match, level))
-        return {"items": items, "missing": missing}
+                items.append(self._unit_view(collection, records[index], level))
+        result = {"items": items, "missing": missing}
+        if len(json.dumps(result, ensure_ascii=False)) > READ_LIMIT:
+            raise ValueError("档案超过单次回包额度；请使用 story_read_fields 按字段分页读取，数据未截断")
+        return result
+
+    def story_read_fields(self, collection: str, name: str, fields: list | None = None,
+                          offset: int = 0, limit: int = 8000) -> dict:
+        """Page exact JSON field values; an empty selection returns a field index.
+
+        Offsets address the serialized selection, not the live file. JSON Pointer
+        escaping permits literal slash/tilde keys without interpreting file paths.
+        Every response carries its frozen story revision for explicit provenance.
+        """
+        if (collection not in COLLECTION_KEYS or not isinstance(name, str) or not name.strip()
+                or type(offset) is not int or offset < 0 or type(limit) is not int
+                or not 1 <= limit <= READ_LIMIT or fields is not None and (
+                    not isinstance(fields, list) or len(fields) > 50
+                    or any(not isinstance(field, str) or not field.startswith("/") for field in fields))):
+            raise ValueError("需要有效集合/名称、最多50个字段路径；offset非负，limit为1..24000")
+        _, snapshot, data = self._story_snapshot()
+        records = data.get(collection, []) or []
+        names, aliases = build_lookup_index(records)
+        index = find_index(names, aliases, name)
+        if index < 0:
+            raise ValueError("正式档案不存在；检索其他集合或核对原文，不能据此猜测新增")
+        record = records[index]
+        if not fields:
+            def pointers(value, prefix=""):
+                for key, child in value.items():
+                    path = prefix + "/" + key.replace("~", "~0").replace("/", "~1")
+                    yield path
+                    if isinstance(child, dict):
+                        yield from pointers(child, path)
+            selected = {"fields": list(pointers(record))}
+        else:
+            selected = {}
+            for field in fields:
+                value = record
+                for part in field[1:].split("/"):
+                    part = part.replace("~1", "/").replace("~0", "~")
+                    if not isinstance(value, dict) or part not in value:
+                        raise ValueError(f"字段不存在：{field}")
+                    value = value[part]
+                selected[field] = value
+        text = json.dumps(selected, ensure_ascii=False, separators=(",", ":"))
+        if offset > len(text):
+            raise ValueError("offset 超过所选内容长度")
+        end = min(len(text), offset + limit)
+        return {"collection": collection, "name": record["名称"],
+                "revision": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                "text": text[offset:end], "total_chars": len(text),
+                "next_offset": end if end < len(text) else None}
 
     def _chapter_files(self) -> list[tuple[Path, Path]]:
         result = []
@@ -245,9 +310,19 @@ class ContextReader:
         raise ValueError("mode 必须为 index/search/read")
 
 
-def serve(manifest: Path, story_tools: bool = False) -> None:
-    """Serve task snapshots and optional bounded, read-only story-domain queries."""
+def serve(manifest: Path, story_tools: bool = False, candidate_tools: bool = False) -> None:
+    """Serve frozen reads and host-authorized candidate edits; never live writes."""
     reader = ContextReader(manifest)
+    candidate, budget = None, None
+    if candidate_tools:
+        from candidate_session import CandidateSession
+        from controlled_runtime import RuntimeBudget
+        config = json.loads(manifest.read_text(encoding="utf-8"))["candidate"]
+        frozen = reader.allowed[reader.key(Path(config["story"]))]
+        if hashlib.sha256(frozen.read_bytes()).hexdigest() != config["base_revision"]:
+            raise ValueError("故事版本变化，拒绝启动候选工具")
+        candidate = CandidateSession(Path(config["directory"]), frozen, config["task"], config["chapter"])
+        budget = RuntimeBudget(Path(config["directory"]))
     for line in sys.stdin:
         try:
             request = json.loads(line)
@@ -271,12 +346,18 @@ def serve(manifest: Path, story_tools: bool = False) -> None:
                     definitions.extend([
                         {"name": "story_snapshot", "description": "读取冻结故事版本、简介与各集合计数，不返回完整故事。",
                          "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-                        {"name": "story_search", "description": "在当前正式故事档案中分页搜索名称、别名、介绍、标签和分组。",
+                        {"name": "story_search", "description": "在冻结档案全部字段及历史详情中搜索，分页返回身份摘要；未命中不代表原文不存在该事实。",
                          "inputSchema": {"type": "object", "required": ["query"], "properties": {
                              "query": {"type": "string"}, "collection": {"type": "string"},
                              "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                              "cursor": {"type": "integer", "minimum": 0}}, "additionalProperties": False}},
-                        {"name": "story_get_units", "description": "按集合和正式名称读取当前档案；仅需要完整详情时使用 L2。",
+                        {"name": "story_read_fields", "description": "按集合/正式名读取字段目录或选定字段；fields为空返回目录，字段为JSON Pointer，如/详情/0001-状态。text按next_offset续读，完整JSON重组后解释；历史查询不改写原件。",
+                         "inputSchema": {"type": "object", "required": ["collection", "name"], "properties": {
+                             "collection": {"type": "string"}, "name": {"type": "string"},
+                             "fields": {"type": "array", "maxItems": 50, "items": {"type": "string"}},
+                             "offset": {"type": "integer", "minimum": 0},
+                             "limit": {"type": "integer", "minimum": 1, "maximum": READ_LIMIT}}, "additionalProperties": False}},
+                        {"name": "story_get_units", "description": "按集合和正式名称批量读取档案；大对象使用story_read_fields分页，不能跳过历史核对。",
                          "inputSchema": {"type": "object", "required": ["refs"], "properties": {
                              "refs": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object",
                                  "required": ["collection", "name"], "properties": {"collection": {"type": "string"}, "name": {"type": "string"}},
@@ -289,9 +370,15 @@ def serve(manifest: Path, story_tools: bool = False) -> None:
                              "offset": {"type": "integer", "minimum": 0},
                              "limit": {"type": "integer", "minimum": 1, "maximum": READ_LIMIT}}, "additionalProperties": False}},
                     ])
+                if candidate is not None:
+                    from controlled_runtime import candidate_definitions
+                    definitions.extend(candidate_definitions())
                 result = {"tools": definitions}
             elif method == "tools/call":
                 try:
+                    if budget is not None:
+                        from context_budget import estimate_tokens
+                        budget.tool(estimate_tokens(json.dumps(params, ensure_ascii=False)))
                     if params.get("name") == "list_context":
                         value = {"paths": [item["source"] for item in reader.files]}
                     elif params.get("name") == "read_context":
@@ -302,11 +389,23 @@ def serve(manifest: Path, story_tools: bool = False) -> None:
                         value = reader.story_search(**params.get("arguments", {}))
                     elif story_tools and params.get("name") == "story_get_units":
                         value = reader.story_get_units(**params.get("arguments", {}))
+                    elif story_tools and params.get("name") == "story_read_fields":
+                        value = reader.story_read_fields(**params.get("arguments", {}))
                     elif story_tools and params.get("name") == "story_query_chapters":
                         value = reader.story_query_chapters(**params.get("arguments", {}))
+                    elif candidate is not None and params.get("name") in {
+                            "candidate_status", "candidate_read", "candidate_submit", "candidate_stage", "candidate_patch",
+                            "candidate_validate", "candidate_finish"}:
+                        function = getattr(candidate, params["name"].removeprefix("candidate_"))
+                        value = function(**params.get("arguments", {}))
                     else:
                         raise ValueError("该工具不在本任务只读能力范围内")
-                    result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
+                    text = json.dumps(value, ensure_ascii=False)
+                    if budget is not None:
+                        if len(text) > 32000:
+                            raise ValueError("回包超过额度；请缩小批量、字段或分页范围。未截断原始数据。")
+                        budget.charge(estimate_tokens(text))
+                    result = {"content": [{"type": "text", "text": text}]}
                 except (ValueError, TypeError, OSError) as exc:
                     result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
             else:
@@ -321,7 +420,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Only read frozen task context via MCP")
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--story-tools", action="store_true", help="启用只读、分页的故事领域查询")
+    parser.add_argument("--candidate-tools", action="store_true", help="启用宿主登记的候选操作，禁止写正式结构")
     arguments = parser.parse_args()
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
-    serve(arguments.manifest, story_tools=arguments.story_tools)
+    serve(arguments.manifest, story_tools=arguments.story_tools, candidate_tools=arguments.candidate_tools)

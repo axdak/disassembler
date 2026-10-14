@@ -9,6 +9,12 @@ import re
 from local_json_patch import PATCH_SCHEMA, patch_shape_errors
 
 CONTRACT_INVALID = 66
+# These recovery protocols can query full frozen stories without a global index.
+# Keep the scheduler and provider capability allowlist on the same task names.
+MCP_RECOVERY_TASKS = frozenset({
+    "auto_repair_chapter", "auto_audit_repair", "recovery_patch",
+    "recovery_diagnosis", "recovery_review",
+})
 REVIEW_CHECKS = ("content_preserved", "contract_unchanged", "evidence_supported")
 TEXT = {"type": "string", "minLength": 1, "pattern": r"\S"}
 RECOVERY_SCHEMAS = {

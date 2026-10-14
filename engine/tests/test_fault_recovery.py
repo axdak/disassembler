@@ -64,6 +64,53 @@ def state(tmp_path):
     return json.loads(next((tmp_path / "质量治理/自动恢复").glob("*/state.json")).read_text(encoding="utf-8"))
 
 
+def test_inner_evidence_workers_share_durable_recovery_resource_budget(tmp_path, monkeypatch):
+    """Preparation may not consume strategies, but it must consume resources."""
+    import bounded_generation
+    output, pack, _, calls, published, options = scenario(tmp_path)
+    monkeypatch.setenv("ND_RECOVERY_MAX_WORKER_CALLS", "2")
+
+    def indexing(worker, command, workspace, kind, task, expected, seq, **kwargs):
+        for _ in range(4):
+            rc = worker(command, workspace, "bounded_fragment", task, expected, seq, retries=0)
+            if rc:
+                return rc
+        return 1
+
+    options["worker"] = lambda *args, **kw: calls.append(args[2]) or 0
+    monkeypatch.setattr(bounded_generation, "run_paged_recovery", indexing)
+    assert invoke(tmp_path, output, pack, options) == REPAIR_EXHAUSTED
+    assert calls == ["bounded_fragment", "bounded_fragment"]
+    assert len(state(tmp_path)["resource_calls"]) == 2
+    begin_retry_session(tmp_path)
+    assert invoke(tmp_path, output, pack, options) == REPAIR_EXHAUSTED
+    assert len(calls) == 2 and not published
+
+
+def test_recovery_checks_and_publishes_under_one_writer_lock(tmp_path):
+    """A cooperating commit cannot fit between dependency fencing and publish."""
+    from project_lock import project_write_lock
+    output, pack, _, _, _, options = scenario(tmp_path)
+    options["validate"] = lambda root: (0, "")
+    acquired = []
+
+    def competing_writer():
+        try:
+            with project_write_lock(tmp_path, timeout=0.1):
+                acquired.append(True)
+        except TimeoutError:
+            acquired.append(False)
+
+    def publish(candidate):
+        writer = threading.Thread(target=competing_writer)
+        writer.start(); writer.join(2)
+        assert acquired == [False]
+        return 0
+
+    options["publish"] = publish
+    assert invoke(tmp_path, output, pack, options) == 0
+
+
 def test_switch_strategy_validate_then_publish_once(tmp_path):
     output, pack, _, calls, published, options = scenario(tmp_path)
     original = options["worker"]

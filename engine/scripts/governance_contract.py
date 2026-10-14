@@ -46,7 +46,7 @@ def periodic_introduction_errors(story, patch):
     return errors
 
 
-def normalize_governance_patch(patch, chapter_range: str = ""):
+def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
     """Return a corrected copy plus an auditable list of mechanical changes."""
     result = copy.deepcopy(patch)
     changes = []
@@ -99,4 +99,66 @@ def normalize_governance_patch(patch, chapter_range: str = ""):
     if isinstance(operations, dict):
         for key in ("合并元素", "重命名元素", "替换引用", "设置字段", "追加详情", "治理标签", "降级元素", "删除元素"):
             decode(operations, key, list, f"治理操作.{key}")
+    if isinstance(story, dict):
+        changes.extend(_relocate_additive_tags(result, story))
     return result, changes
+
+
+def _relocate_additive_tags(patch, story):
+    """Translate pure tag additions placed in the old-tag partition operation.
+
+    Only unambiguous exact names, complete old-tag coverage and valid proposed
+    tags are eligible. Demotions/missing tags/conflicting writes stay untouched
+    for the existing validator; no tag or evidence is deleted to obtain a pass.
+    """
+    from story_schema_rules import TYPE_TO_COLLECTION, validate_controlled_tags
+    operations = patch.get("治理操作", {})
+    tag_ops = operations.get("治理标签") if isinstance(operations, dict) else None
+    modifications = patch.get("修改元素", {})
+    if not isinstance(tag_ops, list) or not isinstance(modifications, dict):
+        return []
+    changes, remaining = [], []
+    for op in tag_ops:
+        remaining.append(op)
+        if not isinstance(op, dict) or set(op) != {"类型", "名称", "保留标签", "降级标签", "理由"}:
+            continue
+        collection = TYPE_TO_COLLECTION.get(op.get("类型")) if isinstance(op.get("类型"), str) else None
+        name, retained, reason = op.get("名称"), op.get("保留标签"), op.get("理由")
+        if (not collection or not isinstance(name, str) or not isinstance(retained, list)
+                or op.get("降级标签") != [] or not isinstance(reason, str) or not reason.strip()):
+            continue
+        records = story.get(collection, [])
+        matches = [x for x in records if isinstance(x, dict) and x.get("名称") == name] if isinstance(records, list) else []
+        if len(matches) != 1 or sum(isinstance(x, dict) and x.get("类型") == op["类型"] and x.get("名称") == name for x in tag_ops) != 1:
+            continue
+        old = matches[0].get("标签集")
+        if (not isinstance(old, list) or any(not isinstance(x, str) or not x.strip() or x != x.strip() for x in old + retained)
+                or len(set(old)) != len(old) or len(set(retained)) != len(retained)
+                or not set(old) < set(retained) or validate_controlled_tags(collection, retained)):
+            continue
+        # Other governance operations can rename/remove the target or change its
+        # tags. Leave combinations for explicit repair instead of guessing order.
+        if any(value for key, value in operations.items() if key != "治理标签"):
+            continue
+        items = modifications.get(collection, [])
+        if not isinstance(items, list):
+            continue
+        edited = [x for x in items if isinstance(x, dict) and x.get("名称") == name]
+        if len(edited) > 1:
+            continue
+        item = edited[0] if edited else {"名称": name, "详情": {}}
+        detail = item.get("详情", {})
+        if ("标签集" in item or not isinstance(detail, dict) or "标签集" in detail
+                or not isinstance(detail.get("提取理由", ""), str)):
+            continue
+        old_reason = detail.get("提取理由", "")
+        detail["提取理由"] = old_reason + ("\n标签新增依据：" if old_reason else "") + reason
+        item["详情"] = detail
+        item["标签集"] = list(retained)
+        if not edited:
+            modifications.setdefault(collection, []).append(item)
+        patch["修改元素"] = modifications
+        remaining.pop()
+        changes.append(f"治理标签[{op['类型']}:{name}]：纯新增标签迁入修改元素，保留全部旧标签与理由")
+    operations["治理标签"] = remaining
+    return changes

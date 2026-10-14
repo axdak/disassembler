@@ -6,7 +6,7 @@
 // preview / conflict / apply). The append flow is local to this tab; the
 // backend `chaptersAppendPreview` / `chaptersApply` calls surface concise
 // Chinese errors with a link into the logs tab.
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { StageEvent, Status, WorkbenchTask, ArtifactStatusResponse, AppendPlan } from '../types'
 import { TaskStatus } from './TaskStatus'
 
@@ -36,6 +36,31 @@ function Timeline({ current, completed }: { current: string | null; completed: s
   )
 }
 
+/** Local clock only: lifecycle events supply status without polling book files. */
+function RunActivity({ events, running }: { events: StageEvent[]; running: boolean }) {
+  const latest = [...events].reverse().find((event) =>
+    ['worker_progress', 'recovery_progress', 'chapter_progress'].includes(event.type))
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!running) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [running])
+  if (!latest) return null
+  const data = latest.data || {}
+  const started = Date.parse(latest.ts)
+  const elapsed = Number.isFinite(started) ? Math.max(0, (now - started) / 1000) : 0
+  const measured = typeof data.elapsed_seconds === 'number' ? data.elapsed_seconds : null
+  const delay = typeof data.delay_seconds === 'number' ? data.delay_seconds : null
+  return <div aria-label="当前执行详情" style={{ marginTop: 8, padding: 8, background: '#eef5f8', fontSize: 12 }}>
+    {running ? '当前执行：' : '最近执行：'}{latest.detail}
+    {typeof data.chapter_seq === 'number' && data.chapter_seq > 0 && <> · 第{data.chapter_seq}章</>}
+    {measured !== null ? <> · 执行耗时{measured.toFixed(1)}秒</>
+      : running && <> · 此步骤已等待{Math.floor(elapsed)}秒</>}
+    {running && delay !== null && <> · 预计{Math.max(0, Math.ceil(delay - elapsed))}秒后重试</>}
+  </div>
+}
+
 // 事件流：按 stage 过滤、type 着色，替代原来一整块 <pre> 纯文本，便于看清阶段与状态。
 function EventStream({ events }: { events: StageEvent[] }) {
   const [filter, setFilter] = useState('全部')
@@ -59,8 +84,8 @@ function EventStream({ events }: { events: StageEvent[] }) {
         {visible.length === 0 ? (
           <span style={{ color: '#888' }}>无事件</span>
         ) : (
-          visible.map((e) => (
-            <div key={e.id} style={{ padding: '1px 0' }}>
+          visible.map((e, index) => (
+            <div key={e.id ?? `${e.ts}-${e.type}-${index}`} style={{ padding: '1px 0' }}>
               <span style={{ color: colorFor(e.type), fontWeight: 600 }}>[{e.type}]</span>{' '}
               <span style={{ color: '#555' }}>{e.stage || ''}</span>{' '}
               <span>{e.detail || ''}</span>
@@ -204,6 +229,7 @@ export function OverviewTab({
       </div>
       {runErr && <div style={{ color: 'crimson', fontSize: 12 }}>{runErr}</div>}
       <Timeline current={status.current_stage} completed={status.completed} />
+      <RunActivity events={events.filter((event) => event.project_id === projectId)} running={status.active_run?.status === 'running'} />
       <div style={{ margin: '8px 0' }}>
         活动运行: {status.active_run ? status.active_run.status : '无'}
         {status.last_error && <span style={{ color: 'crimson', marginLeft: 8 }}>{status.last_error}</span>}

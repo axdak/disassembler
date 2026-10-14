@@ -12,6 +12,18 @@ function Editor({ save }: { save: () => void }) {
 }
 
 describe('模型容量设置', () => {
+  it('可配置索引概览并显示受总容量约束的实际额度', () => {
+    render(<Editor save={vi.fn()} />)
+    const input = screen.getByLabelText('索引概览上限（Token）：')
+    expect(input).toHaveValue(4000)
+    fireEvent.change(input, { target: { value: '6000' } })
+    expect(screen.getByText(/实际索引概览预算：6,000 Token/)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('单次输出上限（Token）：'), { target: { value: '1000' } })
+    expect(screen.getByText(/实际索引概览预算：200 Token/)).toBeInTheDocument()
+    fireEvent.change(input, { target: { value: '0' } })
+    expect(screen.getByRole('button', { name: '保存' })).toBeDisabled()
+  })
+
   it('显示有效 Token 预算，并阻止保存无效组合', () => {
     const save = vi.fn()
     render(<Editor save={save} />)

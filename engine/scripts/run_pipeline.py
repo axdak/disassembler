@@ -47,6 +47,7 @@ from prompt_loader import render_prompt, prompt_fingerprint
 from worker_admission import worker_admission
 from fault_recovery import recover_artifact
 from worker_checkpoint import atomic_write_bytes
+from project_lock import project_write_lock, serialized_story_write
 from repair_budget import REPAIR_EXHAUSTED, REPAIR_TASKS, reserve_repair, finish_repair
 from worker_artifacts import (
     capture_output_signatures,
@@ -175,6 +176,15 @@ def set_cancel_event(event: "threading.Event") -> None:
 def set_recovery_observer(observer: Optional[Callable]) -> None:
     """Bind recovery events to this run, avoiding project polling or shared state."""
     _cancel_local.recovery_observer = observer
+
+
+def notify_worker(phase: str, **data) -> None:
+    """Publish explicit lifecycle timing through the existing run-local observer."""
+    observer = getattr(_cancel_local, "recovery_observer", None)
+    if observer:
+        labels = {"queued": "等待模型执行名额", "running": "模型任务执行中",
+                  "finished": "模型执行结束", "retry_wait": "等待重试"}
+        observer(labels.get(phase, phase), {"worker": True, "phase": phase, **data})
 
 
 def _get_cancel_event() -> "Optional[threading.Event]":
@@ -619,6 +629,7 @@ def wait_before_worker_retry(attempt: int) -> bool:
     if delay <= 0:
         return False
     print(f"worker retry backoff: {delay:g}s")
+    notify_worker("retry_wait", delay_seconds=delay)
     cancel_event = _get_cancel_event()
     if cancel_event is not None:
         return cancel_event.wait(delay)
@@ -667,6 +678,7 @@ def _admit_worker(function):
     """Share model capacity across both worker APIs, including cancellable waits."""
     @wraps(function)
     def admitted(*args, **kwargs):
+        notify_worker("queued")
         with worker_admission.slot(_get_cancel_event()) as acquired:
             if not acquired:
                 return 130
@@ -739,6 +751,9 @@ def _run_worker(
         })
         log_path = worker_log_path(project_dir, task_type, chapter_seq)
         print(f"worker start: task={task_type} attempt={attempt}/{attempts} log={log_path}")
+        started = time.monotonic()
+        notify_worker("running", task=task_type, chapter_seq=chapter_seq, attempt=attempt,
+                      attempts=attempts, log=str(log_path))
         if worker_window in ("powershell", "powershell-keep"):
             if worker_window == "powershell-keep":
                 print("worker window: opening visible PowerShell; press Enter in that window after it exits.")
@@ -759,6 +774,8 @@ def _run_worker(
             returncode, output = stream_shell_command(command, project_dir, env, timeout)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(output, encoding="utf-8")
+        notify_worker("finished", task=task_type, chapter_seq=chapter_seq, attempt=attempt,
+                      returncode=returncode, elapsed_seconds=round(time.monotonic() - started, 3))
         if returncode != 0:
             finish_repair(ticket, returncode)
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
@@ -838,11 +855,25 @@ def run_repair_worker(
         return rc, report.read_text(encoding="utf-8") if report.is_file() else f"原校验器返回 {rc}"
 
     def publish(candidate: Path) -> int:
-        # Publish the generated artifact first; existing chapter/governance commit
-        # receipts protect the subsequent formal structure commit against replay.
-        atomic_write_bytes(expected_output, candidate.read_bytes())
+        # recover_artifact holds the project lock from dependency comparison
+        # through this callback. The baseline cannot advance between revalidation
+        # and signing; chapter/governance receipts recover interrupted commits.
+        if expected_output.with_suffix(".generation.json").is_file():
+            from controlled_runtime import publish_generated_artifact
+            current_story = project_dir / "故事结构_增量.json"
+            publish_generated_artifact(project_dir, expected_output, candidate.read_bytes(),
+                hashlib.sha256(current_story.read_bytes()).hexdigest())
+        else:
+            atomic_write_bytes(expected_output, candidate.read_bytes())
         rc, _ = validate(project_dir)
         return rc
+
+    if task_type in {"repair_chapter", "audit_repair"}:
+        from controlled_runtime import generation_is_current, regenerate_conflicted_artifact
+        if not generation_is_current(expected_output, project_dir / "故事结构_增量.json"):
+            return regenerate_conflicted_artifact(project_dir, task_type, task_pack,
+                expected_output, chapter_seq, command, run_worker, validate,
+                timeout=timeout, retries=retries, worker_window=worker_window)
 
     return recover_artifact(
         project_dir, task_type, task_pack, expected_output, command=command,
@@ -864,16 +895,45 @@ def run_generation_worker(
     A missing artifact or cancelled worker is not semantic repair input. Existing
     partial artifacts remain inspectable, and original validators retain authority.
     """
+    # Baseline prompts and full artifact delivery are the normal fast path.
+    # Candidate-tool orchestration remains opt-in; failed tasks still use recovery.
+    from controlled_runtime import build_controlled_pack, uses_controlled_runtime, supports_controlled_runtime
+    original_task_pack = task_pack
+    baseline_revision = None
+    if task_type in {"delta", "audit_correction"} and uses_controlled_runtime(command):
+        task_pack = build_controlled_pack(project_dir, task_type, task_pack, expected_output, chapter_seq)
+    elif task_type in {"delta", "audit_correction"} and supports_controlled_runtime(command):
+        from controlled_runtime import prepare_baseline_dispatch
+        task_pack, baseline_revision = prepare_baseline_dispatch(
+            project_dir, task_type, task_pack, expected_output, chapter_seq)
+        original_task_pack = task_pack
+
+    def bounded_delivery(generate) -> int:
+        # Capacity handoffs share the normal generation fence. A successful
+        # checkpointed bounded result must not inherit an unfinished direct receipt.
+        if baseline_revision is None:
+            return generate()
+        from controlled_runtime import mark_generation_pending, publish_generated_artifact
+        mark_generation_pending(project_dir, expected_output, baseline_revision)
+        result = generate()
+        if result == 0 and expected_output.is_file():
+            with project_write_lock(project_dir):
+                publish_generated_artifact(project_dir, expected_output,
+                                           expected_output.read_bytes(), baseline_revision)
+        return result
+
     if command and task_type == "audit_correction" and task_pack.with_suffix(".governance.json").is_file():
         from bounded_generation import run_bounded_governance
-        return run_bounded_governance(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
+        return bounded_delivery(lambda: run_bounded_governance(
+            command, project_dir, task_pack, expected_output, run_worker, **worker_options))
     if command and task_type in {"analysis", "delta"} and task_pack.is_file():
         report = inspect_pack(task_pack)
         chapter = chapter_by_seq(project_dir, chapter_seq)
         output_risk = chapter is not None and estimate_tokens(chapter.read_text(encoding="utf-8")) > ContextBudget.from_env().output_tokens * 3
         if not report["passed"] or output_risk:
             from bounded_generation import run_bounded_chapter
-            return run_bounded_chapter(command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options)
+            return bounded_delivery(lambda: run_bounded_chapter(
+                command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options))
     if task_type == "final_draft" and expected_output.is_file() and task_pack.is_file():
         policy = ContextBudget.from_env()
         if (estimate_tokens(expected_output.read_text(encoding="utf-8")) > policy.output_tokens
@@ -884,8 +944,18 @@ def run_generation_worker(
                    "audit_correction": "audit_repair", "final_draft": "repair_final"}.get(task_type)
     final_before = expected_output.read_bytes() if task_type == "final_draft" and expected_output.is_file() else None
     before_outputs = capture_output_signatures([expected_output])
+    # Persist the fence before the worker can write its first artifact. A host
+    # crash after delivery must not reopen the legacy no-receipt compatibility path.
+    if baseline_revision is not None:
+        from controlled_runtime import mark_generation_pending
+        mark_generation_pending(project_dir, expected_output, baseline_revision)
     rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
                     chapter_seq, defer_artifact_repair=bool(repair_task), **worker_options)
+    if (baseline_revision is not None and rc in {0, 1} and expected_output.is_file()
+            and not unchanged_existing_outputs(before_outputs, [expected_output])):
+        from controlled_runtime import publish_generated_artifact
+        with project_write_lock(project_dir):
+            publish_generated_artifact(project_dir, expected_output, expected_output.read_bytes(), baseline_revision)
     if rc == CONTEXT_EXCEEDED and task_type == "final_draft" and final_before is not None:
         # Provider/tool usage may exceed the preflight estimate. Continue through
         # the same checkpointed final-governance path instead of redispatching
@@ -895,7 +965,8 @@ def run_generation_worker(
         return run_bounded_final(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
     if rc == CONTEXT_EXCEEDED and task_type in {"analysis", "delta"}:
         from bounded_generation import run_bounded_chapter
-        return run_bounded_chapter(command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options)
+        return bounded_delivery(lambda: run_bounded_chapter(
+            command, project_dir, task_type, expected_output, chapter_seq, run_worker, **worker_options))
     if rc == CONTEXT_EXCEEDED and task_type == "audit_correction":
         match = re.fullmatch(r"correction_(\d+)-(\d+)\.json", expected_output.name)
         if match:
@@ -918,9 +989,13 @@ def run_generation_worker(
                     worker_options.get("timeout", DEFAULT_WORKER_TIMEOUT_SECONDS),
                     worker_options.get("retries", 0), worker_options.get("worker_window", DEFAULT_WORKER_WINDOW),
                     "continuous")
+            # Bounded workers retain the original artifact protocol. Do not feed
+            # them instructions requiring candidate tools they do not expose.
+            task_pack = original_task_pack
             write_governance_route(project_dir, first, last, task_pack)
             from bounded_generation import run_bounded_governance
-            return run_bounded_governance(command, project_dir, task_pack, expected_output, run_worker, **worker_options)
+            return bounded_delivery(lambda: run_bounded_governance(
+                command, project_dir, task_pack, expected_output, run_worker, **worker_options))
     if rc != 1 or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
         return rc
     if unchanged_existing_outputs(before_outputs, [expected_output]) and not invalid_output_artifacts([expected_output]):
@@ -1088,6 +1163,9 @@ def _run_multi_output_worker(
         })
         log_path = worker_log_path(project_dir, task_type, chapter_seq)
         print(f"worker start: task={task_type} attempt={attempt}/{attempts} log={log_path}")
+        started = time.monotonic()
+        notify_worker("running", task=task_type, chapter_seq=chapter_seq, attempt=attempt,
+                      output_count=len(expected_outputs), log=str(log_path))
         if worker_window in ("powershell", "powershell-keep"):
             if worker_window == "powershell-keep":
                 print("worker window: opening visible PowerShell; press Enter in that window after it exits.")
@@ -1108,6 +1186,9 @@ def _run_multi_output_worker(
             returncode, output = stream_shell_command(command, project_dir, env, timeout)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text(output, encoding="utf-8")
+        notify_worker("finished", task=task_type, chapter_seq=chapter_seq, attempt=attempt,
+                      output_count=len(expected_outputs), returncode=returncode,
+                      elapsed_seconds=round(time.monotonic() - started, 3))
         if returncode != 0:
             print(f"worker failed: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
             if returncode in {130, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED}:
@@ -1254,6 +1335,7 @@ def _story_signature(story: Path) -> Optional[Tuple[int, int]]:
     return (stat.st_mtime_ns, stat.st_size)
 
 
+@serialized_story_write
 def ensure_story(project_dir: Path) -> Path:
     init_dirs(project_dir)
     story = project_dir / "故事结构_增量.json"
@@ -1449,6 +1531,7 @@ def max_available_delta_seq(project_dir: Path) -> int:
     return max(seqs) if seqs else 0
 
 
+@serialized_story_write
 def replay_one_delta(project_dir: Path, seq: int) -> int:
     story = project_dir / "故事结构_增量.json"
     chapter = chapter_by_seq(project_dir, seq)
@@ -1512,6 +1595,7 @@ def replay_one_delta(project_dir: Path, seq: int) -> int:
     return 0
 
 
+@serialized_story_write
 def recover_story_from_snapshot(project_dir: Path, snapshot_seq: Optional[int] = None, to_seq: Optional[int] = None) -> int:
     """从 story_after_chNNN 快照恢复过程库，并重放后续章节 Delta。"""
     init_dirs(project_dir)
@@ -2600,6 +2684,7 @@ def write_analysis_regenerate_task(project_dir: Path, chapter: Path, errors: Lis
     print(f"已生成章节分析重新生成任务: {p['analysis_regenerate_task']}")
 
 
+@serialized_story_write
 def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -2610,6 +2695,7 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         print(f"找不到第{seq:03d}章")
         return 1
     p = artifact_paths(project_dir, chapter)
+    base_story_digest = hashlib.sha256(story.read_bytes()).hexdigest()
     receipt_path = p["after"].with_suffix(".commit.json")
     receipt = load_json(receipt_path, {})
     contract = contract_version()
@@ -2625,6 +2711,11 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         # 避免把已推进的显示状态回退到步骤 2。
         print(f"第{seq:03d}章已完成，跳过。使用 --force 可重新提交。")
         return 0
+    from controlled_runtime import generation_is_current, transform_generated_artifact
+    if not force and not generation_is_current(p["delta"], story):
+        print("Delta生成所用故事版本已过期；保留候选，重新生成或修复后再提交。")
+        write_repair_pack(project_dir, chapter, "生成基线版本冲突", [])
+        return 1
     if not p["analysis"].is_file():
         print(f"缺章节分析MD: {p['analysis']}")
         rc = prepare_chapter(project_dir, seq)
@@ -2651,7 +2742,8 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     # 入库前先修复 LLM JSON 语法：Markdown 代码块、单引号、尾逗号等先转成严格 JSON，
     # 避免后续 coerce/validate 因 json.load 直接失败。
     repair_json_report = project_dir / "质量治理" / "delta校验" / f"repair_json_ch{seq:03d}.json"
-    rc = repair_llm_json(p["delta"], repair_json_report)
+    rc = transform_generated_artifact(project_dir, p["delta"],
+                                     lambda candidate: repair_llm_json(candidate, repair_json_report), allow_stale=force)
     if rc != 0:
         print(f"Delta LLM JSON 语法修复失败，见: {repair_json_report}")
         write_repair_pack(project_dir, chapter, "repair_llm_json.py失败", [repair_json_report])
@@ -2681,7 +2773,8 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     # 顶层追溯字段位置等）确定性地修好。这一步不需要 LLM 介入，能把大半 repair 循环
     # 提前消解；正式索引唯一确定的类别与关联引用也在此完整迁移，避免模型反复修复。
     coerce_delta_report = project_dir / "质量治理" / "delta校验" / f"coerce_ch{seq:03d}.json"
-    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--current", str(story), "--report", str(coerce_delta_report)])
+    rc = transform_generated_artifact(project_dir, p["delta"], lambda candidate: run_cmd(
+        [sys.executable, str(script_path("coerce_delta.py")), str(candidate), "--current", str(story), "--report", str(coerce_delta_report)]), allow_stale=force)
     if rc != 0:
         print(f"Delta 机械纠错失败，见: {coerce_delta_report}")
         write_repair_pack(project_dir, chapter, "coerce_delta.py失败", [coerce_delta_report])
@@ -2690,7 +2783,8 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     # 入库前再做确定性标签压缩，把受控前缀标签和超限自由标签搬到 详情.补充标签，
     # 让原本因 taxonomy 失配进 repair 循环的报错根本不发生。
     compress_delta_report = project_dir / "质量治理" / "delta校验" / f"compress_ch{seq:03d}.json"
-    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(p["delta"]), "--report", str(compress_delta_report)])
+    rc = transform_generated_artifact(project_dir, p["delta"], lambda candidate: run_cmd(
+        [sys.executable, str(script_path("compress_tags.py")), "--delta", str(candidate), "--report", str(compress_delta_report)]), allow_stale=force)
     if rc != 0:
         print(f"Delta 标签压缩失败，见: {compress_delta_report}")
         write_repair_pack(project_dir, chapter, "compress_tags.py(Delta)失败", [compress_delta_report])
@@ -2737,6 +2831,9 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
             "artifacts": {key: hashlib.sha256(p[key].read_bytes()).hexdigest()
                           for key in ("analysis", "delta", "before", "diff", "delta_report", "chapter_report")},
         }
+        if hashlib.sha256(story.read_bytes()).hexdigest() != base_story_digest:
+            print("故事版本在校验期间变化，拒绝覆盖新数据；请基于当前版本重新校验。")
+            return 1
         save_json(receipt_path, receipt)
         shutil.copy2(candidate, p["after"])
         os.replace(candidate, story)
@@ -3200,6 +3297,7 @@ def cmd_run_delta(
     cancel_event: Optional["threading.Event"] = None,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
     end_chapter_seq: int = 0,
+    emit: Optional[Callable] = None,
 ) -> int:
     """Require all chapter analyses before entering the existing serial Delta flow."""
     init_dirs(project_dir)
@@ -3274,6 +3372,7 @@ def cmd_run_delta(
         worker_window=worker_window,
         worker_loop=worker_loop,
         delta_full_story_kb=delta_full_story_kb,
+        emit=emit,
     )
 
 
@@ -3300,6 +3399,7 @@ def cmd_run(
     context_budget_chars: int = 160000,
     delta_full_story_kb: int = DELTA_FULL_STORY_KB,
     end_chapter_seq: int = 0,
+    emit: Optional[Callable] = None,
 ) -> int:
     if cancel_event is not None:
         set_cancel_event(cancel_event)
@@ -3354,6 +3454,7 @@ def cmd_run(
             rerun_command=rerun_command,
             cancel_event=cancel_event,
             delta_full_story_kb=delta_full_story_kb,
+            emit=emit,
         )
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -3484,6 +3585,9 @@ def cmd_run(
             else:
                 return rc
         processed += 1
+        if emit is not None:
+            emit("chapter_progress", stage="chapter_delta", detail=f"第{seq:03d}章已校验并提交",
+                 data={"chapter_seq": seq, "phase": "committed"})
         if audit_interval and seq % audit_interval == 0:
             start = seq - audit_interval + 1
             rc = run_periodic_governance(
@@ -3508,11 +3612,13 @@ def cmd_run(
 
 
 
+@serialized_story_write
 def commit_governance(project_dir: Path, patch_path: str) -> int:
     """提交按需/周期治理补丁：合并新增修改 + 执行治理操作 + 规范化 + governance校验 + diff。"""
     init_dirs(project_dir)
     story = ensure_story(project_dir)
     patch = Path(patch_path)
+    base_story_digest = hashlib.sha256(story.read_bytes()).hexdigest()
     if not patch.is_file():
         print(f"治理补丁不存在: {patch}")
         return 1
@@ -3550,15 +3656,29 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         return 1
 
     # 在语法、形状和字段位置纠错之前逐字保存输入；失败和重复提交均有独立证据。
+    # Capture the byte fence before host-owned formatting. Check the captured
+    # result after the commit-receipt shortcut so a completed publication can
+    # still recover after its story baseline and normalized patch have changed.
+    from controlled_runtime import generation_is_current, transform_generated_artifact
+    generation_current = generation_is_current(patch, story)
     shutil.copy2(patch, governance_dir / f"original_input_{ts}.json")
-    rc = repair_llm_json(patch, report_repair_json, backup=True)
+    # Do not normalize a stale artifact: preserve its exact bytes for conflict
+    # handling. An authenticated artifact is transformed in a private file.
+    rc = (transform_generated_artifact(project_dir, patch,
+          lambda candidate: repair_llm_json(candidate, report_repair_json)) if generation_current else 0)
     if rc != 0:
         print(f"治理补丁 LLM JSON 语法修复失败: {report_repair_json}")
         return failed("治理补丁 JSON 语法修复失败", report_repair_json)
-    patch_doc = load_json(patch)
+    try:
+        patch_doc = load_json(patch)
+    except (ValueError, OSError):
+        # An obsolete or partial candidate is still evidence. Do not parse it
+        # blindly or rewrite it before the conflict recovery route can inspect it.
+        reason = "治理补丁生成版本冲突且候选尚不可解析" if not generation_current else "治理补丁JSON不可解析"
+        return failed(reason, report_repair_json)
     range_match = re.fullmatch(r"correction_(\d+)-(\d+)\.json", patch.name) if is_periodic_patch else None
     known_range = f"第{range_match[1]}章-第{range_match[2]}章" if range_match else ""
-    normalized, changes = normalize_governance_patch(patch_doc, known_range)
+    normalized, changes = normalize_governance_patch(patch_doc, known_range, story=load_json(story))
     # 治理只复用无损的位置搬迁，不套用章节类型转换或补齐规则，避免改变稀疏补丁语义。
     # 未知目标、冲突字段及时间/涉及章节仍交原治理校验器判断，绝不删除来换取通过。
     from coerce_delta import relocate_element_fields
@@ -3568,7 +3688,10 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     if changes:
         # Keep the complete original before any reversible shape correction.
         shutil.copy2(patch, governance_dir / f"original_contract_{ts}.json")
-        save_atomic_json(patch, normalized)
+        if generation_current:
+            rc = transform_generated_artifact(project_dir, patch, lambda candidate: save_atomic_json(candidate, normalized))
+            if rc:
+                return failed("治理规范化期间版本变化，保留原候选", report_delta)
     save_json(governance_dir / f"normalize_contract_{ts}.json", {"changes": changes})
     receipt_path = patch.with_suffix(".commit.json")
     receipt = load_json(receipt_path, {})
@@ -3583,7 +3706,10 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
             print("治理内容已完整落盘，已恢复提交状态，无需重复合并。")
             return 0
     report_compress = governance_dir / f"compress_governance_{ts}.json"
-    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(patch), "--report", str(report_compress)])
+    if not generation_current:
+        return failed("治理补丁生成所用故事版本已过期", report_delta)
+    rc = transform_generated_artifact(project_dir, patch, lambda candidate: run_cmd(
+        [sys.executable, str(script_path("compress_tags.py")), "--delta", str(candidate), "--report", str(report_compress)]))
     if rc != 0:
         print(f"治理补丁标签压缩失败: {report_compress}")
         return failed("治理补丁标签处理失败", report_compress)
@@ -3625,6 +3751,8 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         rc = run_cmd([sys.executable, str(script_path("diff_structure.py")), str(before), str(after), str(diff)])
         if rc != 0:
             return failed("治理变更记录生成失败，原结构未修改", diff)
+        if hashlib.sha256(story.read_bytes()).hexdigest() != base_story_digest:
+            return failed("故事版本在校验期间变化，拒绝覆盖新数据", report_schema)
         save_json(receipt_path, {
             "patch_sha256": hashlib.sha256(json.dumps(load_json(patch), ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
             "story_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
@@ -3639,6 +3767,7 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         candidate.unlink(missing_ok=True)
 
 
+@serialized_story_write
 def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     """生成最终结构整理任务包：复制增量为草稿，运行 final 校验，打包所有参考材料。"""
     init_dirs(project_dir)
@@ -3737,6 +3866,7 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     return 0
 
 
+@serialized_story_write
 def cmd_commit_final_draft(project_dir: Path) -> int:
     """提交模型修好的最终草稿：规范化 → strict 校验 → 失败生成修复包。"""
     init_dirs(project_dir)
@@ -3798,6 +3928,7 @@ def cmd_validate_final(project_dir: Path, file: str = "") -> int:
     return rc
 
 
+@serialized_story_write
 def cmd_finalize(project_dir: Path) -> int:
     """最终交付：前置 strict 校验 → 复制草稿为最终 JSON → 完成步骤4 → 审计日志。"""
     init_dirs(project_dir)
@@ -3818,7 +3949,8 @@ def cmd_finalize(project_dir: Path) -> int:
         print("请先修正草稿并运行 commit-final-draft。")
         return 1
 
-    shutil.copy2(draft, final)
+    # Readers must see either complete version even if publication is interrupted.
+    atomic_write_bytes(final, draft.read_bytes())
     print(f"已生成最终交付: {final}")
 
     run_cmd([sys.executable, str(script_path("progress_manager.py")),
@@ -4382,6 +4514,7 @@ def cmd_analysis_status(args: argparse.Namespace) -> int:
     return 0
 
 
+@serialized_story_write
 def cmd_normalize(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir)
     story = project_dir / (args.file or "故事结构_增量.json")
@@ -4391,6 +4524,7 @@ def cmd_normalize(args: argparse.Namespace) -> int:
     return run_cmd(cmd)
 
 
+@serialized_story_write
 def cmd_migrate_chronology(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir)
     cmd = [sys.executable, str(script_path("migrate_chronology.py")), str(project_dir)]

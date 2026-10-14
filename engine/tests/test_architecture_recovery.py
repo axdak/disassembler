@@ -108,6 +108,94 @@ def test_chapter_recovers_crash_at_publication_boundary(tmp_path, monkeypatch, a
     assert pipeline.latest_snapshot_seq(tmp_path) == 1
 
 
+def test_chapter_rejects_external_story_change_before_publication(tmp_path, monkeypatch):
+    """Non-cooperating writers cannot be overwritten by a stale chapter candidate."""
+    _, paths, story = chapter_project(tmp_path)
+    real_command = pipeline.run_cmd
+    external = empty_story()
+    external["介绍"]["描述"] = "另外一个入口已经写入的事实"
+
+    def external_edit(command, *args, **kwargs):
+        rc = real_command(command, *args, **kwargs)
+        if Path(command[1]).name == "diff_structure.py":
+            write_json(story, external)
+        return rc
+
+    monkeypatch.setattr(pipeline, "run_cmd", external_edit)
+    assert pipeline.commit_chapter(tmp_path, 1) != 0
+    assert json.loads(story.read_text(encoding="utf-8")) == external
+    receipt = json.loads(paths["after"].with_suffix(".commit.json").read_text(encoding="utf-8"))
+    assert not receipt["published"]
+
+
+def test_two_phase_delta_emits_progress_after_successful_commit(tmp_path):
+    chapter_project(tmp_path)
+    events = []
+    assert pipeline.cmd_run(tmp_path, phase="delta", audit_interval=0,
+                            emit=lambda kind, **data: events.append((kind, data))) == 0
+    progress = [data for kind, data in events if kind == "chapter_progress"]
+    assert len(progress) == 1
+    assert progress[0]["stage"] == "chapter_delta"
+    assert progress[0]["data"]["chapter_seq"] == 1
+
+
+def test_worker_observer_exposes_execution_duration_without_scanning_story(tmp_path, monkeypatch):
+    events = []
+    pack, output = tmp_path / "task.md", tmp_path / "output.md"
+    pack.write_text("完整测试任务", encoding="utf-8")
+
+    def fake_worker(*args):
+        output.write_text("完整分析结果", encoding="utf-8")
+        return 0, "worker result"
+
+    monkeypatch.setattr(pipeline, "stream_shell_command", fake_worker)
+    pipeline.set_recovery_observer(lambda detail, data: events.append(data))
+    try:
+        assert pipeline.run_worker("offline", tmp_path, "analysis", pack, output, 1) == 0
+    finally:
+        pipeline.set_recovery_observer(None)
+    assert [event["phase"] for event in events] == ["queued", "running", "finished"]
+    assert events[-1]["elapsed_seconds"] >= 0
+    assert events[-1]["returncode"] == 0
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_multi_output_worker_emits_execution_and_duration(tmp_path, monkeypatch, returncode):
+    """Multiple artifacts use the same observer protocol, including failures."""
+    events = []
+    pack = tmp_path / "task.md"; pack.write_text("test", encoding="utf-8")
+    outputs = [tmp_path / "one.md", tmp_path / "two.md"]
+
+    def fake_worker(*args):
+        for path in outputs:
+            path.write_text("complete artifact", encoding="utf-8")
+        return returncode, "offline worker"
+
+    monkeypatch.setattr(pipeline, "stream_shell_command", fake_worker)
+    pipeline.set_recovery_observer(lambda detail, data: events.append(data))
+    try:
+        assert pipeline.run_multi_output_worker("offline", tmp_path, "chapter_structure", pack, outputs, 1) == returncode
+    finally:
+        pipeline.set_recovery_observer(None)
+    assert [event["phase"] for event in events] == ["queued", "running", "finished"]
+    assert events[-1]["returncode"] == returncode
+    assert events[-1]["elapsed_seconds"] >= 0
+    assert events[-1]["output_count"] == 2
+
+
+def test_controlled_generation_cannot_commit_against_a_new_story_version(tmp_path):
+    """The generation baseline must survive the gap before host commit starts."""
+    import hashlib
+    _, paths, story = chapter_project(tmp_path)
+    write_json(paths["delta"].with_suffix(".generation.json"), {
+        "base_revision": hashlib.sha256(story.read_bytes()).hexdigest(),
+        "artifact_sha256": hashlib.sha256(paths["delta"].read_bytes()).hexdigest()})
+    newer = empty_story(); newer["介绍"]["描述"] = "模型生成期间新增的事实"
+    write_json(story, newer)
+    assert pipeline.commit_chapter(tmp_path, 1) != 0
+    assert json.loads(story.read_text(encoding="utf-8")) == newer
+
+
 def test_completed_snapshot_cache_invalidates_changed_files(tmp_path, monkeypatch):
     from test_chapter_completion import build_project
     chapter = build_project(tmp_path)
@@ -119,6 +207,51 @@ def test_completed_snapshot_cache_invalidates_changed_files(tmp_path, monkeypatc
     pipeline.artifact_paths(tmp_path, chapter)["after"].write_text('{"changed": 1}', encoding="utf-8")
     assert pipeline.is_chapter_complete(tmp_path, chapter)
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("can_regenerate,change_inputs", [(False, False), (True, False), (True, True)])
+def test_version_conflict_requires_new_evidence_generation(tmp_path, monkeypatch, can_regenerate, change_inputs):
+    """Schema-valid old candidates may overwrite facts; they need regeneration."""
+    import hashlib
+    from controlled_runtime import publish_generated_artifact
+    # Disabling the normal candidate loop must not disable exceptional recovery
+    # of an existing version-fenced proposal.
+    monkeypatch.setenv("ND_CONTROLLED_RUNTIME", "0")
+    chapter, paths, story = chapter_project(tmp_path)
+    stale = empty_delta(1); stale["介绍"] = {"标题": "旧候选标题"}
+    write_json(paths["delta"], stale)
+    old = {"base_revision": hashlib.sha256(story.read_bytes()).hexdigest(),
+           "artifact_sha256": hashlib.sha256(paths["delta"].read_bytes()).hexdigest()}
+    write_json(paths["delta"].with_suffix(".generation.json"), old)
+    newer = empty_story(); newer["介绍"]["标题"] = "并发提交的新标题"
+    write_json(story, newer)
+    assert pipeline.commit_chapter(tmp_path, 1) == 1
+    calls = []
+
+    def regenerate(command, root, task, pack, output, *args, **kwargs):
+        assert can_regenerate and task == "delta"
+        calls.append(task)
+        # Model output deliberately rebuilt from current inputs, not merely
+        # restamped after the old candidate passes a structural validator.
+        config = json.loads(pack.with_suffix(".runtime.json").read_text(encoding="utf-8"))
+        publish_generated_artifact(root, output, json.dumps(empty_delta(1)).encode(),
+                                   hashlib.sha256(story.read_bytes()).hexdigest(),
+                                   candidate_directory=config["directory"])
+        if change_inputs and len(calls) == 1:
+            paths["analysis"].write_text(valid_analysis(1) + "\n新增原文核验细节。", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(pipeline, "run_worker", regenerate)
+    command = "python agent_worker.py --provider codebuddy" if can_regenerate else ""
+    rc = pipeline.run_repair_worker(command, tmp_path, "repair_chapter", paths["repair"], paths["delta"], 1)
+    if change_inputs:
+        assert rc == 65
+        assert json.loads(story.read_text(encoding="utf-8")) == newer
+        rc = pipeline.run_repair_worker(command, tmp_path, "repair_chapter", paths["repair"], paths["delta"], 1)
+    assert (rc == 0) is can_regenerate
+    assert len(calls) == (2 if change_inputs else int(can_regenerate))
+    assert pipeline.is_chapter_complete(tmp_path, chapter) is can_regenerate
+    assert json.loads(story.read_text(encoding="utf-8"))["介绍"]["标题"] == newer["介绍"]["标题"]
 
 
 def test_final_repair_transport_and_outer_retries_share_one_budget(tmp_path, monkeypatch):

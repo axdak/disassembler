@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from functools import wraps
 from typing import Any, Optional
 
 # 把 engine/scripts 加入 sys.path 以便导入 scoped entry points（与 runner.py 一致）。
@@ -31,7 +32,8 @@ if str(_ENGINE_SCRIPTS) not in sys.path:
 
 from revisions import project_revisions  # noqa: E402
 from workbench import TaskContext  # noqa: E402
-from worker_checkpoint import run_checkpointed_partial  # noqa: E402
+from worker_checkpoint import run_checkpointed_partial, atomic_write_bytes  # noqa: E402
+from project_lock import project_write_lock  # noqa: E402
 
 from run_pipeline import (  # noqa: E402
     DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
@@ -77,6 +79,19 @@ from migrate_chronology import run_migrate  # noqa: E402
 from normalize_story_schema import normalize_structure, save_json  # noqa: E402
 from worker_artifacts import confined_project_path  # noqa: E402
 from split_chapters_append import apply_append  # noqa: E402
+
+
+def _serialized_maintenance(function):
+    """Cover maintenance reads, writes and rollback with the engine's OS lock.
+
+    These adapters perform local work only. Generation/reader adapters continue
+    to use short engine publication locks rather than locking across model calls.
+    """
+    @wraps(function)
+    def guarded(self, context, *args, **kwargs):
+        with project_write_lock(Path(context.project_path)):
+            return function(self, context, *args, **kwargs)
+    return guarded
 
 
 def _result_json(*, artifacts, manifest, manifest_path, logs, revision, **extra) -> dict:
@@ -691,6 +706,7 @@ class ChapterAnalysisRerunAdapter:
     prepare_chapter_analysis -> ensure_story may normalize 故事结构_增量.json.
     """
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         seqs = params.get("seqs") or []
@@ -727,6 +743,7 @@ class ChapterAnalysisRerunAdapter:
 class ChapterDeltaRerunAdapter:
     """Writer adapter: regenerate chapter delta task packs for requested seqs."""
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         seqs = params.get("seqs") or []
@@ -769,6 +786,7 @@ class RepairAdapter:
     JSON. Deltas that already parse are skipped, leaving them untouched.
     """
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         project_dir = Path(context.project_path)
@@ -1088,6 +1106,7 @@ class GovernanceTaskAdapter:
 class NormalizeAdapter:
     """Writer adapter: preserving-style normalization of the process story JSON."""
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         project_dir = Path(context.project_path)
@@ -1114,6 +1133,7 @@ class MigrateChronologyAdapter:
     """Writer adapter: chronology migration (time backfill, retrospective
     compaction, event reorder) on the process story JSON."""
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         project_dir = Path(context.project_path)
@@ -1165,6 +1185,7 @@ class RecoverStoryAdapter:
     """Writer adapter: roll the process library back to a story_after_chNNN
     snapshot and replay later deltas via recover_story_from_snapshot."""
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         project_dir = Path(context.project_path)
@@ -1175,13 +1196,23 @@ class RecoverStoryAdapter:
         if snapshot_seq not in available:
             raise RuntimeError(f"snapshot seq {snapshot_seq} 未找到")
         before = project_dir / "故事结构_增量.json"
-        before_bytes = before.read_bytes() if before.is_file() else b""
+        before_existed = before.is_file()
+        before_bytes = before.read_bytes() if before_existed else b""
         context.progress(20, f"recovering to snapshot seq={snapshot_seq}")
-        rc = recover_story_from_snapshot(project_dir, snapshot_seq=snapshot_seq)
-        if rc != 0:
-            if before_bytes:
-                before.write_bytes(before_bytes)
-            raise RuntimeError(f"recover_story 失败 rc={rc}")
+        succeeded = False
+        try:
+            rc = recover_story_from_snapshot(project_dir, snapshot_seq=snapshot_seq)
+            if rc != 0:
+                raise RuntimeError(f"recover_story 失败 rc={rc}")
+            succeeded = True
+        finally:
+            # Exceptions need the same rollback as a nonzero exit. Keep the
+            # project lock until the original presence and bytes are restored.
+            if not succeeded:
+                if before_existed:
+                    atomic_write_bytes(before, before_bytes)
+                else:
+                    before.unlink(missing_ok=True)
         context.progress(90, "recovery complete")
         return _result_json(
             artifacts=[str(before)],
@@ -1212,6 +1243,7 @@ class AppendChaptersTaskAdapter:
     def __init__(self, manager: object = None):
         self.manager = manager
 
+    @_serialized_maintenance
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         plan = params.get("plan")

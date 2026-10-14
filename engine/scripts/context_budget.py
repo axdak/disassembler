@@ -38,6 +38,7 @@ class ContextBudget:
     output_tokens: int = 64000
     context_tokens: int = 300000  # Safe shared-window default; explicit zero means documented separate limits.
     reserve_tokens: int = 30000  # Provider instructions, tools and estimation error.
+    overview_tokens: int = 4000  # Requested routing-index budget, bounded by available capacity.
 
     @classmethod
     def from_env(cls):
@@ -49,7 +50,7 @@ class ContextBudget:
         for key, default in asdict(cls()).items():
             raw = os.environ.get("ND_CONTEXT_" + key.upper(), str(default))
             value = int(raw)
-            if value < 0 or (key in {"input_tokens", "output_tokens"} and value == 0):
+            if value < 0 or (key in {"input_tokens", "output_tokens", "overview_tokens"} and value == 0):
                 raise ValueError(f"Invalid capacity: {key}={raw}")
             values[key] = value
         result = cls(**values)
@@ -67,7 +68,7 @@ class ContextBudget:
             if isinstance(raw, bool) or not isinstance(raw, (int, str)):
                 raise ValueError(f"模型容量必须为整数：model_{key}")
             values[key] = int(raw)
-        if any(value < 0 or (key in {"input_tokens", "output_tokens"} and value == 0)
+        if any(value < 0 or (key in {"input_tokens", "output_tokens", "overview_tokens"} and value == 0)
                for key, value in values.items()):
             raise ValueError("模型容量必须为非负整数，输入和输出必须大于零")
         budget = cls(**values)
@@ -83,6 +84,11 @@ class ContextBudget:
     def usable_input(self) -> int:
         shared = self.context_tokens - self.output_tokens if self.context_tokens else self.input_tokens
         return min(self.input_tokens, shared) - self.reserve_tokens
+
+    @property
+    def overview_budget(self) -> int:
+        """Leave room for sibling indices, contracts and complete output envelopes."""
+        return max(1, min(self.overview_tokens, self.output_tokens // 5, self.usable_input // 16))
 
     def fits(self, text: str) -> bool:
         return estimate_tokens(text) <= self.usable_input

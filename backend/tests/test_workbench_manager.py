@@ -568,6 +568,10 @@ def test_exact_event_order_payload_progress_and_failure_evidence(tmp_path):
         gates[failed["id"]].set()
         wait_for(lambda: db.get_task(failed["id"])["status"] == "failed")
 
+        # Durable terminal state is written before its broadcast. Wait for the
+        # observable event boundary as well; DB visibility alone races _emit.
+        wait_for(lambda: any(e["task_id"] == done["id"] and e["type"] == "task_done" for e in events))
+        wait_for(lambda: any(e["task_id"] == failed["id"] and e["type"] == "task_failed" for e in events))
         done_types = [e["type"] for e in events if e["task_id"] == done["id"]]
         assert done_types == ["task_queued", "task_started", "task_progress", "task_done"]
         failed_types = [e["type"] for e in events if e["task_id"] == failed["id"]]

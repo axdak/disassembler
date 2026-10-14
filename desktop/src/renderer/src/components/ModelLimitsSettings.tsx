@@ -4,6 +4,7 @@ const fields = [
   ['model_output_tokens', '单次输出上限（Token）', 64000, 1],
   ['model_context_tokens', '总上下文窗口（Token）', 300000, 0],
   ['model_reserve_tokens', '安全预留（Token）', 30000, 0],
+  ['model_overview_tokens', '索引概览上限（Token）', 4000, 1],
   ['worker_timeout_seconds', '单次调用超时（秒）', 1200, 1],
   ['worker_retries', '单次调用失败重试次数', 2, 0],
 ] as const
@@ -15,8 +16,11 @@ export function modelLimitsState(settings: Record<string, unknown>) {
   const shared = values.model_context_tokens === 0 ? values.model_input_tokens :
     values.model_context_tokens - values.model_output_tokens
   const usable = Math.min(values.model_input_tokens, shared) - values.model_reserve_tokens
+  // Match the engine's safety allowance for sibling indices and task instructions.
+  const overview = Math.max(1, Math.min(values.model_overview_tokens,
+    Math.floor(values.model_output_tokens / 5), Math.floor(usable / 16)))
   return {
-    values, usable,
+    values, usable, overview,
     error: invalid ? `${invalid[1]}必须是大于或等于 ${invalid[3]} 的整数。` :
       usable <= 0 ? '容量不足：扣除输出和安全预留后，可用输入必须大于零。' : '',
   }
@@ -26,7 +30,7 @@ export function ModelLimitsSettings({ settings, onChange }: {
   settings: Record<string, unknown>
   onChange: (settings: Record<string, unknown>) => void
 }) {
-  const { usable, error } = modelLimitsState(settings)
+  const { usable, overview, error } = modelLimitsState(settings)
   return <section style={{ border: '1px solid #e0e0e0', borderRadius: 4, padding: '10px 12px', marginTop: 12 }}>
     <h4 style={{ margin: '0 0 8px' }}>模型容量与调用</h4>
     <p style={{ fontSize: 12 }}>适用于章节分析、Delta、修复、周期治理和全书分析与治理。已启动任务和已入队的全流程任务沿用原配置；新设置用于后续新任务。</p>
@@ -37,6 +41,8 @@ export function ModelLimitsSettings({ settings, onChange }: {
         onChange={(event) => onChange({ ...settings, [key]: event.target.value === '' ? '' : Number(event.target.value) })} />
     </div>)}
     <p role="status"><strong>实际可用输入预算：{error ? '配置无效' : `${usable.toLocaleString('en-US')} Token`}</strong></p>
+    <p>实际索引概览预算：{error ? '配置无效' : `${overview.toLocaleString('en-US')} Token`}</p>
+    <p style={{ fontSize: 12 }}>索引概览用于定位分片证据，不是章节正文，也不替代完整原文。实际额度取设置值、单次输出上限的 1/5、可用输入的 1/16 中的较小值，给相邻索引和任务要求留出空间。概览超限时会有限重试并调整分片；原件完整保留。</p>
     {error && <p role="alert" style={{ color: 'crimson' }}>{error}</p>}
     <p style={{ fontSize: 12 }}>计算：min（输入上限，总上下文窗口 − 单次输出上限）− 安全预留。只有服务商明确区分独立输入、输出额度时，才将总上下文窗口设为 0。</p>
     <p style={{ fontSize: 12 }}>Token 与字符不是同一单位；材料用量采用保守估算。该上限约束的是<b>单次模型输出的规模</b>（推理型模型的思维链也计入），必须能容纳最大的单个产物，例如单章 Delta；若某项任务因此被截断，程序会保留断点并提示提高此项，而不是重新分包材料。材料是否超出输入预算由“输入上限”单独判定。外接 CLI 内部追加的历史和工具读取无法精确计量；输出上限能否由服务商强制执行取决于接入能力。</p>

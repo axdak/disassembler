@@ -60,6 +60,8 @@ class RunConfig(BaseModel):
     model_output_tokens: int = Field(default=64000, gt=0, strict=True)
     model_context_tokens: int = Field(default=300000, ge=0, strict=True)
     model_reserve_tokens: int = Field(default=30000, ge=0, strict=True)
+    # 分片定位索引的请求上限；引擎仍按输入/输出容量计算实际安全额度。
+    model_overview_tokens: int = Field(default=4000, gt=0, strict=True)
     max_attempts: int = Field(default=10, gt=0)
     stagnant_limit: int = Field(default=3, gt=0)
     max_repair_rounds: int = Field(default=3, ge=0)

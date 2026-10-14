@@ -13,6 +13,43 @@ from coerce_delta import relocate_element_fields
 from repair_budget import REPAIR_EXHAUSTED
 from story_schema_rules import COLLECTION_KEYS
 from worker_checkpoint import atomic_write_bytes
+from recovery_contract import MCP_RECOVERY_TASKS
+
+
+def _mcp_recovery_pack(pack, report, output):
+    """Separate initial instructions from the complete, frozen evidence corpus.
+
+    A large archive is tool-addressable data, not mandatory initial model input.
+    Keep every declared source/alias for guarded snapshotting; only the routing
+    pack lives outside materials.json so normal admission counts its real input.
+    """
+    protected = [Path(item["path"]) for item in report["sources"]]
+    aliases = []
+    declared = pack.with_suffix(".context-inputs.json")
+    if declared.is_file():
+        for entry in json.loads(declared.read_text(encoding="utf-8")):
+            if isinstance(entry, str):
+                protected.append(Path(entry))
+            else:
+                source, snapshot = Path(entry["source"]), Path(entry["snapshot"])
+                protected.append(snapshot)
+                aliases.append((source, snapshot))
+    catalog = pack.parent / "materials.json"
+    if catalog.is_file():
+        protected.append(catalog)
+    routed = pack.parent / "mcp_dispatch" / pack.name
+    routed.parent.mkdir(exist_ok=True)
+    routed.write_text(pack.read_text(encoding="utf-8") +
+        "\n## 按需核对完整证据\n"
+        "先读取本次完整校验反馈和任务约束、待修候选、相关章节原文与分析。"
+        "故事历史库通过story_search定位全部同名身份，再用story_get_units或story_read_fields核对相关档案。"
+        "档案库和材料目录保留完整内容；无需遍历与本次错误无关的所有历史或先生成索引。"
+        "材料中的全文要求表示相关材料须完整核对，不能以目录或搜索摘要代替证据。"
+        "同名跨集合时必须核对原文含义，不能按搜索排名猜类别；证据不足时扩大查询。"
+        "独立复核须核对候选变化和原文，不得仅根据修复者的结论验收。\n",
+        encoding="utf-8")
+    protected.append(routed)
+    return routed, list(dict.fromkeys(path for path in protected if path != output and path.is_file())), aliases
 
 
 def assemble(contents, json_output=False, resolve=None):
@@ -316,18 +353,19 @@ def _immutable_recovery_index(worker, command, root, sources, **options):
         if digest(snapshot) != signature or not snapshot.is_file():
             content = source.read_bytes()
             if hashlib.sha256(content).hexdigest() != signature:
-                raise TreeFailure(REPAIR_EXHAUSTED)
+                raise TreeFailure(REPAIR_EXHAUSTED, f"建立快照期间原始证据发生变化：{source}", snapshot)
             atomic_write_bytes(snapshot, content)
         snapshots.append((snapshot, "不可变修复证据；逻辑来源与角色：" + origin))
     tree = CapacityTree(root, command, worker,
                         "逐片阅读不可变修复证据，只建立事实位置、身份、时序与关联索引。"
                         "禁止判断任何候选是否正确；不得生成修复内容或复核结论。索引不能替代完整原件。",
                         "原始证据索引.md", snapshots,
+                        adaptive_overviews=True,
                         **{key: value for key, value in options.items() if key in {"timeout", "worker_window"}})
     overview, _, refs = tree.run(overview_only=True)
     if not tree.unchanged() or any(digest(path) != signature
                                   for (path, _), (_, signature) in zip(sources, identities)):
-        raise TreeFailure(REPAIR_EXHAUSTED)
+        raise TreeFailure(REPAIR_EXHAUSTED, "不可变证据索引与原件指纹不一致", tree.root)
     index = tree.root / "evidence_index.md"
     atomic_write_bytes(index, (overview + f"\n完整证据根节点：{refs[-1]}\n"
                                f"完整证据目录：{tree.root / 'materials'}\n"
@@ -336,15 +374,46 @@ def _immutable_recovery_index(worker, command, root, sources, **options):
 
 
 def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq=0, *,
-                       evidence_index_root=None, immutable_sources=(), **options):
+                       evidence_index_root=None, immutable_sources=(), diagnostics=None, **options):
     """Page oversized repair evidence while retaining the original repair scope.
 
     The recovery scheduler still owns program repair, scope validation, independent
     review, strategy switching and publication. This adapter only organizes input.
     """
     from context_budget import inspect_pack
+    # This execution receipt distinguishes input preparation from a real repair
+    # dispatch. Keep it out of provider options and update it even on exceptions.
+    receipt = diagnostics if diagnostics is not None else {}
+    receipt.update(phase="admission", dispatched=False, worker_calls=0)
+    original_worker = worker
+
+    def tracked_worker(*args, **kwargs):
+        receipt["worker_calls"] += 1
+        if args[2] == kind:
+            # Preparing the guarded worker's snapshots can fail before dispatch.
+            # Only entry into the actual requested worker spends this strategy.
+            receipt["dispatched"] = True
+        return original_worker(*args, **kwargs)
+
+    worker = tracked_worker
     report = inspect_pack(pack)
+    # Only the explicit built-in CodeBuddy adapter guarantees these read-only
+    # domain tools. External commands retain the existing full-source fallback.
+    if (kind in MCP_RECOVERY_TASKS and "agent_worker.py" in command
+            and re.search(r"--provider\s+[\"']?codebuddy(?:[\"']|\s|$)", command)):
+        routed, protected, aliases = _mcp_recovery_pack(pack, report, output)
+        if inspect_pack(routed)["passed"]:
+            from bounded_final import guarded_worker
+            receipt.update(phase="dispatch", context_mode="on_demand")
+            print("自动恢复：按需读取冻结证据，直接执行修复/复核，跳过全量模型索引", flush=True)
+            rc, changed = guarded_worker(worker, command, project, kind, routed, output, protected,
+                                         {**options, "chapter_seq": chapter_seq}, context_aliases=aliases)
+            if changed:
+                receipt.update(phase="integrity", error="只读修复材料被修改", node=str(routed.parent))
+                return REPAIR_EXHAUSTED
+            return rc
     if report["passed"]:
+        receipt["phase"] = "dispatch"
         return worker(command, project, kind, pack, output, chapter_seq, **options)
     sources = [(Path(item["path"]), "完整修复材料") for item in report["sources"]]
     try:
@@ -357,6 +426,7 @@ def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq
         protected = list(options.get("protected_materials", []))
         references = list(options.get("reference_sources", []))
         if evidence_index_root is not None and immutable:
+            receipt["phase"] = "evidence_index"
             shared_tree, index = _immutable_recovery_index(
                 worker, command, evidence_index_root, immutable, **options)
             # Keep the shared index's byte identity through dispatch. Re-reading
@@ -367,10 +437,12 @@ def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq
             sources.append((index, "已完整逐片读取的不可变证据索引；完整原件仍须按需核对"))
             references.extend((path, "完整修复证据；逻辑来源与角色：" + origin) for path, origin in immutable)
             protected.extend(path for path in shared_tree.root.rglob("*") if path.is_file())
+        receipt["phase"] = "repair_index"
         tree = CapacityTree(project, command, worker,
                             "逐片阅读修复材料，索引错误路径、原文证据、候选变化和约束。禁止把待修产物当作原文事实。",
                             "修复材料索引.md", sources,
-                            **{**options, "protected_materials": protected, "reference_sources": references})
+                            **{**options, "adaptive_overviews": True,
+                               "protected_materials": protected, "reference_sources": references})
         overview, _, refs = tree.run(overview_only=True)
         routed = tree.root / "dispatch" / "task.md"
         routed.parent.mkdir(exist_ok=True)
@@ -387,10 +459,22 @@ def run_paged_recovery(worker, command, project, kind, pack, output, chapter_seq
         aliases = [(Path(source[0]), material[0]) for current in (tree, shared_tree) if current is not None
                    for source, material in zip(current.sources, current.materials)]
         aliases += [(Path(source), copy) for source, copy in tree.reference_paths.items()]
+        receipt["phase"] = "dispatch"
         rc, changed = guarded_worker(worker, command, project, kind, routed, output, protected,
                                      {**options, "chapter_seq": chapter_seq}, context_aliases=aliases)
-        return rc if (not changed and tree.unchanged()
-                      and all(digest(path) == signature for path, signature in indexed_signatures)
-                      and (shared_tree is None or shared_tree.unchanged())) else REPAIR_EXHAUSTED
+        violations = []
+        if changed:
+            violations.append("只读修复材料被修改")
+        if not tree.unchanged():
+            violations.append("修复索引来源发生变化")
+        if any(digest(path) != signature for path, signature in indexed_signatures):
+            violations.append("原始证据与共享索引指纹不一致")
+        if shared_tree is not None and not shared_tree.unchanged():
+            violations.append("共享证据快照发生变化")
+        if violations:
+            receipt.update(phase="integrity", error="；".join(violations), node=str(tree.root))
+            return REPAIR_EXHAUSTED
+        return rc
     except TreeFailure as exc:
+        receipt.update(error=str(exc), node=exc.node)
         return exc.code

@@ -73,6 +73,7 @@ class Config:
     model_output_tokens: int = 64000  # 单次输出上限；必须容纳单章 Delta/分析（含思维链）
     model_context_tokens: int = 300000
     model_reserve_tokens: int = 30000
+    model_overview_tokens: int = 4000  # 证据定位概览，不限制章节正文长度
     worker_window: str = "hidden"
     max_attempts: int = 10  # 安全上限；真正硬阻塞由 stagnant_limit 触发
     stagnant_limit: int = 3
@@ -149,7 +150,8 @@ class Orchestrator:
             begin_retry_session(self.project_dir)
             set_cancel_event(self._cancel)
             set_recovery_observer(lambda detail, data: self.emit(
-                "recovery_progress", stage=self.state.current_stage, detail=detail, data=data))
+                "worker_progress" if data.get("worker") else "recovery_progress",
+                stage=self.state.current_stage, detail=detail, data=data))
             self._reconcile_chapter_scope()
             self._reconcile_recovery_state()
             self.emit("pipeline_start", stage=self.state.current_stage)
@@ -419,7 +421,7 @@ class Orchestrator:
 
     def _stage_chapter_delta(self) -> int:
         return cmd_run(self.project_dir, phase="delta", end_chapter_seq=self.config.end_chapter_seq,
-                       **self._run_worker_kwargs())
+                       emit=self.emit, **self._run_worker_kwargs())
 
     def _stage_chapter_structure(self) -> int:
         return cmd_chapter_structure_auto(self._auto_namespace())

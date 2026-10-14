@@ -40,6 +40,7 @@ def runconfig_to_config(rc: RunConfig) -> Config:
         model_output_tokens=rc.model_output_tokens,
         model_context_tokens=rc.model_context_tokens,
         model_reserve_tokens=rc.model_reserve_tokens,
+        model_overview_tokens=rc.model_overview_tokens,
         max_attempts=rc.max_attempts,
         stagnant_limit=rc.stagnant_limit,
         max_repair_rounds=rc.max_repair_rounds,

@@ -475,7 +475,7 @@ def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], 
             continue
         type_name, name = op.get("类型"), op.get("名称")
         if not isinstance(type_name, str) or type_name not in TYPE_TO_COLLECTION:
-            errors.append(f"{label}.类型 必须是受支持的元素类型")
+            errors.append(f"{label}.类型 必须是受支持的元素类型；可选值={json.dumps(list(TYPE_TO_COLLECTION), ensure_ascii=False)}")
             continue
         if not isinstance(name, str) or not name.strip():
             errors.append(f"{label}.名称 必须是非空字符串")
@@ -504,7 +504,12 @@ def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], 
             errors.append(f"{label} 目标元素的标签集包含重复标签，需先规范化")
             continue
         if set(current_normalized) != set(retained) | set(demoted):
-            errors.append(f"{label} 保留标签与降级标签必须完整覆盖治理前标签集，且不得凭空新增")
+            # Return the exact set difference so correction needs no extra
+            # history lookup; the conservation rule itself remains unchanged.
+            proposed = set(retained) | set(demoted)
+            missing = json.dumps(sorted(set(current_normalized) - proposed), ensure_ascii=False)
+            extra = json.dumps(sorted(proposed - set(current_normalized)), ensure_ascii=False)
+            errors.append(f"{label} 保留标签与降级标签必须完整覆盖治理前标签集，且不得凭空新增；遗漏={missing}；额外={extra}")
         for error in validate_controlled_tags(collection_key, retained):
             errors.append(f"{label}.{error.split('.', 1)[1]}")
     return errors
@@ -596,6 +601,24 @@ def write_json_report(path: str, passed: bool, mode: str, errors: List[str], war
         )
 
 
+def delta_errors(current: dict, delta: Any, mode: str = "process", strict: bool = False):
+    """Shared pure validation for CLI commits and in-session candidate feedback."""
+    errors, warnings = validate_top(delta, mode)
+    if isinstance(delta, dict):
+        current = current if isinstance(current, dict) else {}
+        e2, w2 = validate_elements(current, delta, mode)
+        errors.extend(e2)
+        warnings.extend(w2)
+        errors.extend(validate_tag_governance_ops(current, delta, mode))
+        errors.extend(validate_set_field_governance_ops(current, delta, mode))
+        if mode == "governance":
+            errors.extend(validate_no_change_metadata(delta))
+    if strict and warnings:
+        errors.extend(warnings)
+        warnings = []
+    return errors, warnings
+
+
 def validate_delta(current_path: str, delta_path: str, mode: str = "process", strict: bool = False,
                    report_json: str | None = None) -> bool:
     print(f"验证Delta: {delta_path}")
@@ -617,18 +640,7 @@ def validate_delta(current_path: str, delta_path: str, mode: str = "process", st
             write_json_report(report_json, False, mode, [f"Delta JSON格式错误: {exc}"], [])
         return False
 
-    errors, warnings = validate_top(delta, mode)
-    if isinstance(delta, dict):
-        e2, w2 = validate_elements(current if isinstance(current, dict) else {}, delta, mode)
-        errors.extend(e2)
-        warnings.extend(w2)
-        errors.extend(validate_tag_governance_ops(current if isinstance(current, dict) else {}, delta, mode))
-        errors.extend(validate_set_field_governance_ops(current if isinstance(current, dict) else {}, delta, mode))
-        if mode == "governance":
-            errors.extend(validate_no_change_metadata(delta))
-    if strict and warnings:
-        errors.extend(warnings)
-        warnings = []
+    errors, warnings = delta_errors(current, delta, mode, strict)
 
     passed = not errors
     if report_json:

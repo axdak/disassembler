@@ -10,6 +10,66 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from worker_context import ContextReader, READ_LIMIT, snapshot_context  # noqa: E402
 
 
+def story_reader(tmp_path, items):
+    """Freeze a small authoritative story for identity and paging regressions."""
+    story = tmp_path / "故事结构_增量.json"
+    story.write_text(json.dumps({"角色集": items}, ensure_ascii=False), encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"project": str(tmp_path), "files": [
+        {"source": str(story), "snapshot": str(story)}]}), encoding="utf-8")
+    return ContextReader(manifest)
+
+
+def test_story_lookup_prefers_canonical_name_over_earlier_alias(tmp_path):
+    reader = story_reader(tmp_path, [{"名称": "甲", "别名": ["乙"]}, {"名称": "乙"}])
+    result = reader.story_get_units([{"collection": "角色集", "name": "乙"}], "L2")
+    assert result["items"][0]["record"]["名称"] == "乙"
+
+
+@pytest.mark.parametrize("items,query", [
+    ([{"名称": "甲", "别名": ["共同"]}, {"名称": "乙", "别名": ["共同"]}], "共同"),
+    ([{"名称": "甲"}, {"名称": "甲"}], "甲"),
+])
+def test_story_lookup_rejects_ambiguous_identity(tmp_path, items, query):
+    reader = story_reader(tmp_path, items)
+    with pytest.raises(ValueError, match="匹配多个"):
+        reader.story_get_units([{"collection": "角色集", "name": query}])
+
+
+def test_large_story_fields_are_lossless_and_explicitly_paged(tmp_path):
+    detail = "很久以前的重要承诺" * 6000
+    reader = story_reader(tmp_path, [{"名称": "甲", "详情": {"0001-承诺": detail, "0002-状态": "离开"}}])
+    pages, offset = [], 0
+    while offset is not None:
+        page = reader.story_read_fields("角色集", "甲", ["/详情/0001-承诺"], offset, 1000)
+        assert len(page["text"]) <= 1000
+        assert page["revision"] == reader.story_snapshot()["revision"]
+        pages.append(page["text"])
+        offset = page["next_offset"]
+    assert json.loads("".join(pages)) == {"/详情/0001-承诺": detail}
+    index = reader.story_read_fields("角色集", "甲")
+    assert "/详情/0001-承诺" in json.loads(index["text"])["fields"]
+    with pytest.raises(ValueError, match="story_read_fields"):
+        reader.story_get_units([{"collection": "角色集", "name": "甲"}], "L2")
+
+
+def test_story_field_query_reports_missing_and_escaped_keys(tmp_path):
+    reader = story_reader(tmp_path, [{"名称": "甲", "详情": {"a/b~c": "证据"}}])
+    page = reader.story_read_fields("角色集", "甲", ["/详情/a~1b~0c"])
+    assert json.loads(page["text"]) == {"/详情/a~1b~0c": "证据"}
+    with pytest.raises(ValueError, match="字段不存在"):
+        reader.story_read_fields("角色集", "甲", ["/详情/不存在"])
+    with pytest.raises(ValueError):
+        reader.story_read_fields("角色集", "甲", [], -1)
+
+
+def test_story_search_finds_detail_without_returning_giant_record(tmp_path):
+    reader = story_reader(tmp_path, [{"名称": "甲", "详情": {"0001-承诺": "关键旧约定" * 10000}}])
+    result = reader.story_search("关键旧约定")
+    assert result["items"][0]["名称"] == "甲"
+    assert len(json.dumps(result, ensure_ascii=False)) < 1000
+
+
 def context(tmp_path):
     """Include a permitted nested material and tempting unapproved/code paths."""
     project = tmp_path / "book"

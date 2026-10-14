@@ -199,6 +199,17 @@ def test_settings(client, auth):
     assert client.get("/settings", headers=auth).json()["worker_provider"] == "codebuddy"
 
 
+def test_overview_setting_is_saved_and_validated(client, auth):
+    """The desktop overview control must persist, rejecting fractional/zero limits."""
+    assert client.put('/settings', json={'settings': {'model_overview_tokens': 6000}}, headers=auth).status_code == 200
+    assert client.get('/settings', headers=auth).json()['model_overview_tokens'] == 6000
+    for value in (0, -1, 1.5, True):
+        assert client.put('/settings', json={'settings': {'model_overview_tokens': value}}, headers=auth).status_code == 422
+    from models import RunConfig
+    from runner import runconfig_to_config
+    assert runconfig_to_config(RunConfig(model_overview_tokens=6000)).model_overview_tokens == 6000
+
+
 def test_model_limits_validate_merged_settings_and_preserve_previous_on_error(client, auth):
     """A partial save must use the stored window and reject the whole bad update."""
     saved = dict(model_input_tokens=800000, model_context_tokens=900000,
