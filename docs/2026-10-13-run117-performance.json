@@ -1,0 +1,243 @@
+{
+  "captured_at": "2026-10-13T16:49:40.843590",
+  "timezone": "Asia/Shanghai",
+  "run_id": 117,
+  "project": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹",
+  "run_status": "running",
+  "analysis_files": 300,
+  "last_committed_chapter": 49,
+  "current_chapter": 50,
+  "delta_seconds": 3164.460265,
+  "audit_seconds": 1038.792553,
+  "pre_recovery_other_seconds": 50.083701956588584,
+  "pre_recovery_seconds": 4253.336519956589,
+  "recovery_elapsed_seconds": 667.5200228691101,
+  "workers": [
+    {
+      "task": "delta_ch038",
+      "start": "2026-10-13T15:27:44.988634",
+      "end": "2026-10-13T15:31:18.853282",
+      "seconds": 213.864648,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch038_20261013_152744_988634.txt"
+    },
+    {
+      "task": "delta_ch039",
+      "start": "2026-10-13T15:31:21.971835",
+      "end": "2026-10-13T15:34:39.644808",
+      "seconds": 197.672973,
+      "rounds": 4,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch039_20261013_153121_971835.txt"
+    },
+    {
+      "task": "delta_ch040",
+      "start": "2026-10-13T15:34:43.107153",
+      "end": "2026-10-13T15:37:47.562797",
+      "seconds": 184.455644,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch040_20261013_153443_107153.txt"
+    },
+    {
+      "task": "audit_correction",
+      "start": "2026-10-13T15:37:50.243646",
+      "end": "2026-10-13T15:47:06.966985",
+      "seconds": 556.723339,
+      "rounds": 4,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\audit_correction_20261013_153750_243646.txt"
+    },
+    {
+      "task": "delta_ch041",
+      "start": "2026-10-13T15:47:09.863936",
+      "end": "2026-10-13T15:50:57.999075",
+      "seconds": 228.135139,
+      "rounds": 4,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch041_20261013_154709_863936.txt"
+    },
+    {
+      "task": "delta_ch042",
+      "start": "2026-10-13T15:51:01.330263",
+      "end": "2026-10-13T15:56:06.809547",
+      "seconds": 305.479284,
+      "rounds": 7,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch042_20261013_155101_330263.txt"
+    },
+    {
+      "task": "delta_ch043",
+      "start": "2026-10-13T15:56:10.379806",
+      "end": "2026-10-13T16:02:00.621689",
+      "seconds": 350.241883,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch043_20261013_155610_379806.txt"
+    },
+    {
+      "task": "delta_ch044",
+      "start": "2026-10-13T16:02:03.775295",
+      "end": "2026-10-13T16:06:49.925828",
+      "seconds": 286.150533,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch044_20261013_160203_775295.txt"
+    },
+    {
+      "task": "delta_ch045",
+      "start": "2026-10-13T16:06:53.006888",
+      "end": "2026-10-13T16:11:01.799826",
+      "seconds": 248.792938,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch045_20261013_160653_006888.txt"
+    },
+    {
+      "task": "audit_correction",
+      "start": "2026-10-13T16:11:04.510910",
+      "end": "2026-10-13T16:19:06.580124",
+      "seconds": 482.069214,
+      "rounds": 5,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\audit_correction_20261013_161104_510910.txt"
+    },
+    {
+      "task": "delta_ch046",
+      "start": "2026-10-13T16:19:08.844993",
+      "end": "2026-10-13T16:25:02.412251",
+      "seconds": 353.567258,
+      "rounds": 4,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch046_20261013_161908_844993.txt"
+    },
+    {
+      "task": "delta_ch047",
+      "start": "2026-10-13T16:25:05.945472",
+      "end": "2026-10-13T16:29:36.910265",
+      "seconds": 270.964793,
+      "rounds": 5,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch047_20261013_162505_945472.txt"
+    },
+    {
+      "task": "delta_ch048",
+      "start": "2026-10-13T16:29:39.749451",
+      "end": "2026-10-13T16:32:03.813572",
+      "seconds": 144.064121,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch048_20261013_162939_749451.txt"
+    },
+    {
+      "task": "delta_ch049",
+      "start": "2026-10-13T16:32:06.941003",
+      "end": "2026-10-13T16:35:25.075235",
+      "seconds": 198.134232,
+      "rounds": 2,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch049_20261013_163206_941003.txt"
+    },
+    {
+      "task": "delta_ch050",
+      "start": "2026-10-13T16:35:28.529961",
+      "end": "2026-10-13T16:38:31.466780",
+      "seconds": 182.936819,
+      "rounds": 4,
+      "source": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\worker日志\\delta_ch050_20261013_163528_529961.txt"
+    }
+  ],
+  "recovery_ledger": {
+    "version": 1,
+    "generation": 1,
+    "task": "repair_chapter",
+    "output": "章节处理\\Delta\\第050章_第五十章_帮？.json",
+    "dependency": "7e05330c58a61b33d08adf32cde92e7723318f9e5d8f7a95399e6d2d68d0dc33",
+    "fingerprint": "e1285b96b89fb6894ade45bd614f94c0717cf268459d20abce769903e11b2d44",
+    "input_sha256": "b659135feb4bbd7baecb9d201d6ee1856344911e4d00fe898d8dfab2e52290c4",
+    "baseline": "baseline_0001.json",
+    "next_strategy": 1,
+    "calls": [
+      {
+        "kind": "auto_repair_chapter",
+        "status": "running",
+        "started_at": 1791880715.3715274,
+        "retry": 0,
+        "protocol_retry": 0
+      }
+    ],
+    "attempts": [
+      {
+        "strategy": "targeted",
+        "status": "running",
+        "feedback_file": "attempt_0001_01\\failure.md"
+      }
+    ],
+    "status": "repairing",
+    "mechanical": {
+      "strategy": "mechanical",
+      "returncode": 1,
+      "candidate": "mechanical_014z4bwa\\章节处理\\Delta\\第050章_第五十章_帮？.json"
+    }
+  },
+  "capacity": {
+    "version": 1,
+    "limits": {
+      "input_tokens": 300000,
+      "output_tokens": 64000,
+      "context_tokens": 300000,
+      "reserve_tokens": 30000,
+      "overview_tokens": 4000
+    },
+    "usable_input_tokens": 206000,
+    "estimated_input_tokens": 772328,
+    "measurement": "conservative_estimate",
+    "passed": false,
+    "sources": [
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\auto_repair_chapter.md",
+        "sha256": "f78d29c866e4a4f97ccbfd2a136579d57b805debd48bc6cbbe98baf50f581b0a",
+        "chars": 1054
+      },
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\原文拆解\\第050章_第五十章_帮？.md",
+        "sha256": "4c0badfd5a86204d6d5add46a263206de27a82696ad42e3943123ddd03c0a0f9",
+        "chars": 2069
+      },
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\故事结构_增量.json",
+        "sha256": "d9309733e167e630ad296e994135a1215271c5c183e65064a542ff55643c7535",
+        "chars": 557708
+      },
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\章节处理\\第050章_第五十章_帮？.md",
+        "sha256": "7ca4168ecb20e80532fca0a397b6ed77a9e6064e68208435f31a0c8990b7f286",
+        "chars": 4058
+      },
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\original.json",
+        "sha256": "fdb431fde115a986d2da7dda08ef0ee445106ca2d5146ee454d23eadf7b40984",
+        "chars": 7177
+      },
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\contract.md",
+        "sha256": "62db925c7f2a9fafc91a2c898e37a2682b61f5d641524ac0138dfb68a262aac4",
+        "chars": 65058
+      },
+      {
+        "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\attempt_0001_01\\failure.md",
+        "sha256": "8cb7b6ea2554d009d8eef67833bc21e126124d72ba3fcb89253309156cd32f36",
+        "chars": 128
+      }
+    ],
+    "runtime_tool_usage": "not_observable_by_cli_adapter"
+  },
+  "nodes": [
+    {
+      "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\evidence_index\\质量治理\\容量分层\\8b998dc85e520c8997353e33\\1a7d9be2d2ba12a2251e4643\\state.json",
+      "attempts": 1,
+      "sha256": "de3865c88d774d60b44abc1ecc0afe086c38dbbcaf34e0df28c77d9d680e314e",
+      "feedback": ""
+    },
+    {
+      "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\evidence_index\\质量治理\\容量分层\\8b998dc85e520c8997353e33\\704aee51465cced2fa81123b\\state.json",
+      "attempts": 2,
+      "feedback": "概览超预算：估算 4566 token，上限 4000 token；正文不缩写，改用紧凑的来源定位索引",
+      "failure_kind": "overview_overflow"
+    },
+    {
+      "path": "C:\\Users\\53519\\Downloads\\拆书暂存\\拆书_斗破苍穹\\质量治理\\自动恢复\\370a424b8b74854a031a1574\\evidence_index\\质量治理\\容量分层\\8b998dc85e520c8997353e33\\9aa7b57756090425d9262c11\\state.json",
+      "attempts": 2,
+      "feedback": "",
+      "failure_kind": "overview_overflow",
+      "sha256": "6740af86f6a487f221e9945160080ce2afc53eb84122eac53b4e206753b4d072"
+    }
+  ]
+}

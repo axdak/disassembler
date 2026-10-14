@@ -1,0 +1,291 @@
+{
+  "title": "小说拆解架构性能与鲁棒性审计",
+  "generated_at": "2026-10-13T19:20:20.075162+08:00",
+  "scope": "当前工作区源码、run117历史快照、离线测试；本次未修改业务代码、未重启或改写运行中书籍。",
+  "baseline_captured_at": "2026-10-13T16:49:40.843590",
+  "checks": [
+    {
+      "id": "C01",
+      "area": "耗时与重复工作",
+      "status": "已核实：主要瓶颈",
+      "finding": "run117 第38–50章 Delta 共52分44秒；两次周期治理共17分19秒；此前本地校验、间隔等约50秒。慢主要发生在模型工作阶段，尚不能把模型服务等待、推理和输出耗时完全拆开。",
+      "action": "优先缩小模型实际输入、减少重复生成与修复回合；不要首先重写本地 JSON 合并。",
+      "evidence": [
+        "docs/2026-10-13-run117-performance.json"
+      ]
+    },
+    {
+      "id": "C02",
+      "area": "按需读取与上下文预算",
+      "status": "已核实：能力不完整",
+      "finding": "已接 CodeBuddy 只读 MCP，但章节 Delta 未开放领域故事查询；关联检索会带回完整累积记录。L2 仅限制对象数量，不限制字段或返回 token；静态容量检查统计声明材料，运行中工具回包未纳入统一统计。",
+      "action": "增加字段/章节范围读取、批量查询、返回预算和明确分页；保留全量原件，区分可访问语料与实际装入上下文的内容。",
+      "evidence": [
+        "engine/tools/agent_worker.py:128",
+        "engine/tools/worker_context.py:145",
+        "engine/scripts/run_pipeline.py:1773",
+        "engine/scripts/context_budget.py:107"
+      ]
+    },
+    {
+      "id": "C03",
+      "area": "身份、类别与引用一致性",
+      "status": "已复现：正确性缺陷",
+      "finding": "MCP story_get_units 用首个“正式名或别名”匹配；早出现的别名会遮住后面的正式名，多个对象共享别名时也直接取首个。与已有 element_identity 的正式名优先、歧义报错规则不一致。",
+      "action": "MCP 复用权威身份解析；类别、规范名、版本一起定位。跨类别迁移复用已有唯一性与保全检查，语义歧义返回候选及证据要求。",
+      "evidence": [
+        "engine/tools/worker_context.py:184",
+        "engine/scripts/element_identity.py:34",
+        ".workbuddy/architecture-audit-20261013/identity-reproduction.json"
+      ]
+    },
+    {
+      "id": "C04",
+      "area": "候选、正式提交与并发",
+      "status": "已核实：基础良好，扩展有前置条件",
+      "finding": "章节提交已在私有候选上合并、规范化、校验、生成差异后原子替换，并保存可续接回执。桌面单实例和后端进程内写锁保护正常路径；commit_chapter 发布前没有统一跨进程锁内的 base_revision 比较。当前不是已证实的数据覆盖事故，但外接写 MCP/CLI 前需要补齐。",
+      "action": "复用现有合并语义，新增候选操作账本、操作ID、参数摘要与版本检查；只允许宿主执行最终提交。跨进程锁须覆盖读取基线到发布的临界区，不能只检查一次版本。",
+      "evidence": [
+        "engine/scripts/run_pipeline.py:2706",
+        "backend/workbench.py:43",
+        "desktop/src/main/index.ts:211",
+        "engine/tests/test_architecture_recovery.py:56"
+      ]
+    },
+    {
+      "id": "C05",
+      "area": "重试分层与总预算",
+      "status": "已核实：局部限额已有，总账有缺口",
+      "finding": "已有持久化修复策略和多处重试上限；fault_recovery 按 dispatched 调用计额度，run_paged_recovery 另记 worker_calls，索引树和 CLI 内部回合并不都受同一个端到端调用/时间预算约束。现象是外层一次修复可能包含多次长耗时模型请求。",
+      "action": "统一记录根任务、子操作、实际请求、token估算/实测、总截止时间；准备工作不消耗修复策略，但仍消耗资源预算。不可在重启后隐式重置。",
+      "evidence": [
+        "engine/scripts/fault_recovery.py:462",
+        "engine/scripts/bounded_generation.py:349",
+        "engine/tools/agent_worker.py:174"
+      ]
+    },
+    {
+      "id": "C06",
+      "area": "超时、取消与进程清理",
+      "status": "已有实现并通过相关测试",
+      "finding": "已有墙钟与 idle 保护、CodeBuddy 失败终局检测、Windows 进程树清理和 Job Object。idle 默认900秒；没有终局信号的无输出请求仍可能等待较久。收到流事件只代表活动，不保证业务取得进展。",
+      "action": "保留这些保护；按排队、首事件、工具执行、生成、业务进展分别计时，使用真实分位数校准阈值，防止过短超时反复中断正常长请求。",
+      "evidence": [
+        "engine/scripts/run_pipeline.py:118",
+        "engine/scripts/run_pipeline.py:187",
+        "engine/scripts/run_pipeline.py:300",
+        "engine/tools/agent_worker.py:425",
+        "engine/tests/test_worker_idle_timeout.py"
+      ]
+    },
+    {
+      "id": "C07",
+      "area": "崩溃恢复、断点与容灾",
+      "status": "已核实：自动队列可续跑；容灾需扩展",
+      "finding": "自动队列在应用重启时自动启动；普通运行/工作台残留标记 interrupted。检查点按输入、配置、代码和输出哈希复用；发布边界崩溃有回执对账测试。项目内快照有助于逻辑恢复，不能据此声称能够抵抗整盘丢失或任意断电。",
+      "action": "明确持久化“应继续/已取消”意图；未知提交状态先核对回执再重试。新增写 MCP 后补进程中断、文件占用、磁盘满与恢复演练；如需要硬盘故障容灾，再配置独立备份位置及恢复校验。",
+      "evidence": [
+        "backend/app.py:132",
+        "backend/app.py:164",
+        "backend/runner.py:294",
+        "engine/scripts/worker_checkpoint.py",
+        "engine/tests/test_architecture_recovery.py:74"
+      ]
+    },
+    {
+      "id": "C08",
+      "area": "界面进度与可观测性",
+      "status": "已核实：存在盲区",
+      "finding": "interleaved 路径有 chapter_progress；two_phase Delta 调用链未同样发出逐章进度。run117 在较长正常工作阶段只有粗粒度事件。已有 recovery_progress，但不能展示全部内层索引、工具等待与预算状态。前端39项测试通过，出现一条 EventStream 列表 key 警告。",
+      "action": "所有执行模式采用统一阶段事件；显示当前章、当前步骤、耗时、最近有效进展、下次重试时间、已保留成果。界面按事件节流更新，不通过高频扫描整本书制造卡顿。",
+      "evidence": [
+        "engine/scripts/orchestrator.py:421",
+        "engine/scripts/run_pipeline.py:3142",
+        "engine/scripts/orchestrator.py:153",
+        "desktop/src/renderer/src/App.tsx:69"
+      ]
+    },
+    {
+      "id": "C09",
+      "area": "周期治理与语义正确率",
+      "status": "已核实：输入膨胀；语义收益待评测",
+      "finding": "两次治理约8–9分钟；关联旧档案估算约14万 token，而五章原文仅约1万字符。稀疏补丁和确定性规则有保护，但结构合法不等于事实完整、分类正确或没有遗漏伏笔。当前修复已有独立复核，不能据此推断所有普通输出均经过语义复核。",
+      "action": "根据上次成功审计以来的变化，组织受影响对象、引用与相关历史；完整覆盖窗口内原文和Delta，遇到跨章节矛盾再扩展。保持低频全局核对与覆盖记录，不能简单降低审计频次或只读最新字段。",
+      "evidence": [
+        "engine/scripts/run_pipeline.py:1732",
+        "engine/scripts/run_pipeline.py:2200",
+        "engine/scripts/fault_recovery.py:696",
+        "engine/tests/test_governance_robustness.py"
+      ]
+    },
+    {
+      "id": "C10",
+      "area": "回归、故障注入与性能验收",
+      "status": "已执行：980通过、1跳过；新增缺陷复现",
+      "finding": "引擎753通过/1跳过，后端188通过，界面39通过。跳过的是平台不允许创建符号链接的路径逃逸测试。身份查询缺陷在独立最小实验中复现，说明测试覆盖仍需扩充。没有为本次审计调用真实模型，也没有对正在使用的书籍做故障注入。",
+      "action": "添加语义金标准、故障矩阵和固定快照对照基准；真实提速、事实召回率及无人值守效果均须实测后验收。",
+      "evidence": [
+        ".workbuddy/architecture-audit-20261013/engine-tests.xml",
+        ".workbuddy/architecture-audit-20261013/backend-tests.xml",
+        ".workbuddy/architecture-audit-20261013/desktop-tests.json"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T01",
+      "priority": "P0",
+      "title": "统一身份解析",
+      "work": "将 MCP 查询接到 element_identity；补正式名遮蔽、同名歧义、共享别名、类别错误用例。",
+      "acceptance": "本次两例复现转为通过；查询、校验、合并对同一引用给出一致结果。"
+    },
+    {
+      "id": "T02",
+      "priority": "P0",
+      "title": "补足端到端计时和进度",
+      "work": "贯通 run→chapter→attempt→request→tool；区分排队、准备、首响应、生成、校验、提交、重试；覆盖 two_phase 和内层索引。",
+      "acceptance": "无需翻多个日志即可定位每段等待；UI显示最近进展与续跑位置；监控开销有基准。"
+    },
+    {
+      "id": "T03",
+      "priority": "P0",
+      "title": "建立受限的领域读取",
+      "work": "提供批量对象定位、字段及历史章节读取、证据片段、分页与版本；显式返回缺失、歧义和未读完状态。",
+      "acceptance": "大对象不能绕过回包预算；不截断伪装完整；已知关键历史事实能追溯至原件。"
+    },
+    {
+      "id": "T04",
+      "priority": "P0",
+      "title": "建立候选操作事务",
+      "work": "复用现有 Delta/治理合并规则；限定允许集合、字段、章节、操作类型；操作ID+payload摘要+故事版本+候选版本；宿主统一校验发布。",
+      "acceptance": "同ID同参数重试无重复应用；同ID不同参数拒绝；版本过期拒绝；失败不改正式结构；半途重启可对账。"
+    },
+    {
+      "id": "T05",
+      "priority": "P1",
+      "title": "接入 CodeBuddy 的同会话修正循环",
+      "work": "工具流程为读证据→批量候选变更→即时校验→按错误修正→提交完成凭证；宿主决定完成和发布。会话按章节/审计窗口隔离，恢复依赖持久化账本。",
+      "acceptance": "常见字段/分类/引用错误能在原任务内修正；不必每次完整重发JSON；工具轮次和输入总量可观测、可限额。"
+    },
+    {
+      "id": "T06",
+      "priority": "P1",
+      "title": "统一容量与资源预算",
+      "work": "区分磁盘可访问语料、实际提示词、工具回包和会话累计输入；设延迟软预算与容量硬预算；各子层共享资源计数和总截止时间。",
+      "acceptance": "准备失败不耗语义策略，但有资源上限；模型/CLI重试和索引分片计入可见账本；重启不清零。"
+    },
+    {
+      "id": "T07",
+      "priority": "P1",
+      "title": "优化章节 Delta 上下文",
+      "work": "保留本章原文和分析；预取规范身份、需要的当前状态、相关关系与历史指针。按问题扩大历史查询，使用批量预取减少模型往返。",
+      "acceptance": "同快照对照中事实召回不下降；重复历史输入减少；统计完整章节耗时而非只统计首次回答。"
+    },
+    {
+      "id": "T08",
+      "priority": "P1",
+      "title": "优化周期治理的证据范围",
+      "work": "以变更集合及引用依赖组织五章窗口审计；对跨章矛盾、类别迁移等定向扩展，保留覆盖清单及全局复核机制。",
+      "acceptance": "每章原文/Delta都有明确覆盖；历史关系错误和未改字段受连带影响的案例不漏检；提交仍有顺序屏障。"
+    },
+    {
+      "id": "T09",
+      "priority": "P1",
+      "title": "将常见修复收敛到局部",
+      "work": "复用已有机械纠错和保全校验；唯一可判定的修复不进入模型；语义修复先用错误路径、候选、相关实体和原文，必要时再扩大。",
+      "acceptance": "萧家跨类别、缺目标、别名歧义等回归通过；单点错误不无条件启动全书模型索引；旧信息不被误删。"
+    },
+    {
+      "id": "T10",
+      "priority": "P1",
+      "title": "统一错误分类与自动接续",
+      "work": "区分网络/限流、容量、输出协议、数据冲突、证据不足和本地存储错误；限流按可用 Retry-After 或退避抖动重试，保留等待状态。",
+      "acceptance": "网络恢复后自动从失败单元接续；确定性错误不空转；结果未知先对账；取消不会自动复活；超限保留可诊断断点。"
+    },
+    {
+      "id": "T11",
+      "priority": "P1",
+      "title": "补跨入口恢复与持久化保障",
+      "work": "外接写入口采用项目级跨进程互斥；完善直接运行续跑策略与候选账本；验证文件占用、磁盘满、进程终止和旧回执。",
+      "acceptance": "并发入口不能覆盖新版本；发布前后中断无双重应用；坏检查点隔离并保留证据；独立备份按需求验收恢复。"
+    },
+    {
+      "id": "T12",
+      "priority": "P0贯穿 / P2扩展",
+      "title": "建立语义和性能验收集",
+      "work": "固定代码、模型、推理配置、输入快照；覆盖普通/长章/大角色档案/审计/故障章；多个样本重复测量中位数与P95及失败率。",
+      "acceptance": "先满足数据保全、语义召回和一致性，再验收完整作业耗时、自动恢复率、人工介入次数；新运行时仅在当前适配器有实测瓶颈时评估。"
+    }
+  ],
+  "tests": [
+    {
+      "suite": "引擎",
+      "tests": 754,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 753,
+      "seconds": 507.891
+    },
+    {
+      "suite": "后端",
+      "tests": 188,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 188,
+      "seconds": 77.591
+    },
+    {
+      "suite": "界面",
+      "passed": 39,
+      "failures": 0,
+      "tests": 39,
+      "skipped": 0
+    }
+  ],
+  "identity_reproduction": {
+    "fixture": [
+      {
+        "名称": "甲",
+        "别名": [
+          "乙",
+          "共同别名"
+        ]
+      },
+      {
+        "名称": "乙",
+        "别名": [
+          "共同别名"
+        ]
+      }
+    ],
+    "results": [
+      {
+        "query": "乙",
+        "mcp_actual": "甲",
+        "authoritative_expected": "乙",
+        "consistent": false
+      },
+      {
+        "query": "共同别名",
+        "mcp_actual": "甲",
+        "authoritative_expected": "名称或别名[共同别名]匹配多个元素；请指定唯一正式名称",
+        "consistent": false
+      }
+    ]
+  },
+  "performance": {
+    "delta_seconds": 3164.460265,
+    "audit_seconds": 1038.792553,
+    "pre_recovery_other_seconds": 50.083701956588584,
+    "pre_recovery_seconds": 4253.336519956589,
+    "recovery_elapsed_seconds": 667.5200228691101
+  },
+  "limits": [
+    "耗时来自日志命名时间与末次修改时间的近似墙钟；模型内部细分不完整。",
+    "token为保守估算，不是供应商实测。",
+    "历史运行与当前工作区已有修复不是同一版本；历史卡点不等于当前版本仍全部复现。",
+    "980项通过不证明模型语义正确率和硬盘故障容灾；真实模型对照未执行。"
+  ]
+}
