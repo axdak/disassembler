@@ -3751,6 +3751,25 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         if intro_errors:
             report_delta.write_text("\n".join(intro_errors), encoding="utf-8")
             return failed("周期治理故事简介缺失或更新不合法", report_delta)
+    # 只在明确纠错时核对所引原句；复用本次提交失败路径，不额外调用模型或新增回执层。
+    from information_preservation import correction_evidence_errors
+    proposal = load_json(patch)
+    operations = proposal.get("治理操作", {}) if isinstance(proposal, dict) else {}
+    setters = operations.get("设置字段", []) if isinstance(operations, dict) else []
+    chapter_texts = {}
+    for op in setters if isinstance(setters, list) else []:
+        evidence = op.get("证据", []) if isinstance(op, dict) and "原值" in op else []
+        for entry in evidence if isinstance(evidence, list) else []:
+            chapter = entry.get("章节") if isinstance(entry, dict) else None
+            if isinstance(chapter, str) and chapter.isdecimal() and int(chapter) not in chapter_texts:
+                source = chapter_by_seq(project_dir, int(chapter))
+                if source is not None:
+                    chapter_texts[int(chapter)] = source.read_text(encoding="utf-8-sig", errors="replace")
+    evidence_errors = correction_evidence_errors(
+        proposal, chapter_texts, int(range_match[2]) if range_match else latest_snapshot_seq(project_dir) or 0)
+    if evidence_errors:
+        report_delta.write_text("\n".join(evidence_errors), encoding="utf-8")
+        return failed("治理纠错引文不匹配，原结构未修改", report_delta)
     # validate_delta is read-only — only persist the before snapshot once it
     # has passed, so a validation-only failure leaves no snapshot artifacts.
     shutil.copy2(story, before)

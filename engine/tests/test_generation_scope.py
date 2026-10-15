@@ -1,5 +1,6 @@
 """范围由宿主决定；大书仍可按需查证完整冻结档案，旧父周期不能跳审。"""
 import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from story_schema_rules import DEFAULTS, make_empty_structure
 from test_audit_pack import write_completed_chapter, write_json
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from worker_context import snapshot_context, ContextReader
+from local_json_patch import apply_scoped_patch, delta_repair_scope
 
 
 def test_large_baseline_delta_can_query_complete_frozen_story(tmp_path):
@@ -78,3 +80,25 @@ def test_unresolved_scan_retains_legacy_parent_without_cross_range_receipt(tmp_p
     write_json(paths["status"], {"status": "covered_by_children", "range": "001-005",
                                "child_ranges": [{"start": 1, "end": 2}, {"start": 3, "end": 5}]})
     assert [(item["_start"], item["_end"]) for item in pipeline.unresolved_audits(tmp_path)] == [(1, 5)]
+
+
+@pytest.mark.parametrize("field,bad,good,host", [
+    ("章节", "0099", "0001", {"chapter_seq": 1}),
+    ("章节范围", "第099章-第100章", "第001章-第002章", {"start": 1, "end": 2}),
+    ("证据范围", ["第099章"], ["第001章", "第002章"], {"start": 1, "end": 2}),
+])
+def test_scope_metadata_error_repairs_only_that_field(tmp_path, field, bad, good, host):
+    """来源元数据笔误复用字段补丁，不能触发整份事实重新生成。"""
+    data = {"章节": "0001", "章节范围": "第001章-第002章", "证据范围": ["第001章", "第002章"],
+            "新增元素": {}, "修改元素": {}, "质量说明": "原有事实和说明不得改写"}
+    data[field] = bad
+    source, output = tmp_path / "input.json", tmp_path / "output.json"
+    source.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    errors = scope_errors(data, **host)
+    scope = delta_repair_scope(source, "\n".join(errors), make_empty_structure())
+    assert set(scope) == {"/" + field}
+    apply_scoped_patch(source, output, {"base_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                       "changes": [{"path": "/" + field, "value": good}]}, scope)
+    data[field] = good
+    assert json.loads(output.read_text(encoding="utf-8")) == data
+    assert scope_errors(data, **host) == []

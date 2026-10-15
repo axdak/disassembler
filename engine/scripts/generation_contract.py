@@ -109,7 +109,8 @@ def generation_contract_text() -> str:
         lines.append(f"新增{collection}必填：{'、'.join(required_element_fields(collection))}。")
     lines.extend([
         "事件分组和介绍必须有原文依据且非空；参与成员使用真实字符串数组，只有确无人物参与才可为空。",
-        "每个新增事件的标签集必须包含主题+叙事功能+情绪+冲突四维复合主标签；治理必须保留，禁止降级到详情.补充标签。",
+        "每个新增事件的标签集必须包含主题+叙事功能+情绪+冲突四维复合主标签；禁止因精简或标签标准化迁入详情.补充标签。",
+        "旧主标签或事件事实确有错误时，周期治理可通过治理操作.设置字段纠正：声明字段、原值、值、理由及证据数组[{章节,原文}]；原句必须可在已处理原文中找到。事件详情只用详情/字段逐项纠错，不整体覆盖详情。普通更新应保全已有事实，不将纠错与补充混用。",
         "标准字段写在元素顶层，不放进详情。关联角色等明确关联字段使用真正的类型:名称数组，单个引用也使用数组；禁止将数组编码成字符串。",
         "补充标签、轨迹等既有JSON字符串数组约定保持不变。未知事实按既有未知值表达，不虚构人物、地点或关系。",
     ])
@@ -229,18 +230,25 @@ def reference_quality_errors(item: dict, path: str) -> list[str]:
 def chapter_quality_errors(before: dict, after: dict, patch: dict) -> list[str]:
     """在合并及规范化之后复验真正的新档案，保护正式发布边界。"""
     from element_identity import build_lookup_index, find_index
+    from governance_contract import governance_identity_baseline
+    # 合法重命名会改写任意详情里的显式引用；先对齐，不能误报为事实丢失。
+    try:
+        before = governance_identity_baseline(before, patch)
+    except (ValueError, TypeError, KeyError) as exc:
+        return [f"治理质量 scope：无法确定身份和引用变换：{exc}"]
     errors = []
     # 已有事件也必须受保护：机器追溯与引用另有规则，普通叙述不得被局部更新抹去。
     previous_events = {item.get("名称"): item for item in before.get("事件集", []) if isinstance(item, dict)}
     current_events = {item.get("名称"): item for item in after.get("事件集", []) if isinstance(item, dict)}
     from story_schema_rules import STRICT_DETAIL_KEY_FIELDS
-    from information_preservation import field_correction
+    from information_preservation import ARCHIVE_FIELD, CORRECTION_FIELD, field_correction
     for name, old in previous_events.items():
         new = current_events.get(name)
         if not isinstance(new, dict):
             continue  # 身份操作由治理门禁单独对齐。
         for field, value in old.get("详情", {}).items():
-            if (field in STRICT_DETAIL_KEY_FIELDS or field == "提取理由" or field.startswith("关联")
+            if (field in STRICT_DETAIL_KEY_FIELDS or field in {"提取理由", ARCHIVE_FIELD, CORRECTION_FIELD}
+                    or field.startswith("关联")
                     or not isinstance(value, str) or not value.strip()):
                 continue
             proposed = new.get("详情", {}).get(field)

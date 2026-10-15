@@ -26,7 +26,7 @@ def append_record(detail: dict, field: str, record: dict) -> None:
 
 
 def evidenced_correction(op: dict, old, new) -> bool:
-    """只认可显式原值及可定位引文的纠错声明；引文真实性由语义验收核对。"""
+    """检查纠错声明的形状；提交入口另核对实际原文，模型负责判断语义。"""
     if (not isinstance(op, dict) or "原值" not in op or op["原值"] != old or op.get("值") != new
             or not isinstance(op.get("理由"), str) or not op["理由"].strip()):
         return False
@@ -43,6 +43,34 @@ def field_correction(patch: dict, kind: str, name: str, field: str, old, new) ->
     matches = [op for op in operations if isinstance(op, dict)
                and (op.get("类型"), op.get("名称"), op.get("字段")) == (kind, name, field)]
     return len(matches) == 1 and evidenced_correction(matches[0], old, new)
+
+
+def correction_evidence_errors(patch: dict, chapter_texts: dict[int, str], max_chapter: int = 0) -> list[str]:
+    """仅核对本次纠错引用的原文章节和原句，不增加模型调用或另建审查状态。"""
+    from generation_contract import quality_marker
+    errors = []
+    operations = patch.get("治理操作", {}) if isinstance(patch, dict) else {}
+    setters = operations.get("设置字段", []) if isinstance(operations, dict) else []
+    if not isinstance(setters, list):
+        return errors  # 操作形状由既有校验器负责。
+    for index, op in enumerate(setters):
+        if not isinstance(op, dict) or "原值" not in op:
+            continue
+        evidence = op.get("证据", [])
+        if not isinstance(evidence, list):
+            continue  # 缺失纠错协议会由保护字段和详情纠错门禁拒绝。
+        for number, entry in enumerate(evidence):
+            if not isinstance(entry, dict):
+                continue
+            prefix = f"/治理操作/设置字段/{index}/证据/{number}"
+            chapter, quote = entry.get("章节"), entry.get("原文")
+            seq = int(chapter) if isinstance(chapter, str) and chapter.isdecimal() else 0
+            if seq <= 0 or max_chapter and seq > max_chapter or seq not in chapter_texts:
+                errors.append(f"{quality_marker(prefix + '/章节')} 纠错证据必须来自已处理且存在的原文章节")
+            elif (not isinstance(quote, str) or not quote.strip()
+                  or ''.join(quote.split()) not in ''.join(chapter_texts[seq].split())):
+                errors.append(f"{quality_marker(prefix + '/原文')} 纠错引文在所述原文中不存在；保留原字段并核对来源")
+    return errors
 
 
 def reference_context(data: dict, kind: str, names: set[str]) -> list[dict]:

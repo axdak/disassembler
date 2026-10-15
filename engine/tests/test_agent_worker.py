@@ -177,8 +177,8 @@ def test_codebuddy_only_exposes_scoped_context_without_inherited_capabilities():
 
 @pytest.mark.parametrize("broad_task", ["audit_correction", "fullbook_analysis", "fullbook_analysis_reduce"])
 def test_story_domain_tools_are_exposed_only_for_broad_read_tasks(broad_task):
-    chapter_result, _, chapter_payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN", task_type="delta", output_name="out.json")
-    assert chapter_result.returncode != 0  # Empty fake output is not a valid Delta; arguments were still captured.
+    chapter_result, _, chapter_payload = run_worker("codebuddy", "ND_CODEBUDDY_BIN", task_type="chapter_analysis", output_name="out.md")
+    # 纯章节分析无需档案查询；Delta 现已允许按需核对完整档案，另有真实冻结上下文回归。
     chapter_allowed = chapter_payload["argv"][chapter_payload["argv"].index("--allowedTools") + 1]
     assert "story_search" not in chapter_allowed
     assert "--story-tools" not in chapter_payload["mcp"]["mcpServers"]["nd_context"]["args"]

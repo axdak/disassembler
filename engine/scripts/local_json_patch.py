@@ -116,6 +116,24 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
     if not isinstance(data, dict):
         return {}
     scope = {}
+    # 来源声明也复用既有字段补丁；其正确性仍由宿主范围校验决定。
+    # 更正错误章节列表不属于删除故事事实，不套用内容数组的只增保护。
+    for field, value_type in (("章节", "string"), ("章节范围", "string"), ("证据范围", "array")):
+        if quality_marker("/" + field) in feedback:
+            scope["/" + field] = {"kind": "quality", "value_type": value_type,
+                                  "collection": "", "field": field, "metadata": True}
+    operations = data.get("治理操作", {})
+    setters = operations.get("设置字段", []) if isinstance(operations, dict) else []
+    for index, op in enumerate(setters if isinstance(setters, list) else []):
+        evidence = op.get("证据", []) if isinstance(op, dict) else []
+        for number, entry in enumerate(evidence if isinstance(evidence, list) else []):
+            if not isinstance(entry, dict):
+                continue
+            for field in ("章节", "原文"):
+                pointer = f"/治理操作/设置字段/{index}/证据/{number}/{field}"
+                if quality_marker(pointer) in feedback:
+                    scope[pointer] = {"kind": "quality", "value_type": "string",
+                                      "collection": "", "field": field, "metadata": True}
     for section in ("新增元素", "修改元素"):
         bucket = data.get(section)
         if not isinstance(bucket, dict):
@@ -252,7 +270,8 @@ def apply_scoped_patch(reference: Path, candidate: Path, patch: dict, scope: dic
             if entry not in entries:
                 entries.append(entry)
             node[REFERENCE_REPAIR_ARCHIVE] = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
-        elif rule["kind"] == "quality" and isinstance(previous, list) and isinstance(value, list):
+        elif (rule["kind"] == "quality" and not rule.get("metadata")
+              and isinstance(previous, list) and isinstance(value, list)):
             if any(entry not in value for entry in previous):
                 raise ValueError("局部质量补齐不得删除已有列表内容")
         node[parts[-1]] = value

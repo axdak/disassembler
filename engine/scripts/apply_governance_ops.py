@@ -159,10 +159,19 @@ def remove_refs(obj, typ, old: Set[str]):
     """Remove references to an explicitly deleted element only."""
     return rewrite_refs(obj, typ, old, None)
 
+
+def archive_item(detail, source, **context):
+    """已有档案历史平铺一次；纠错记录随所属原档案保存，保留身份归属。"""
+    snapshot = copy.deepcopy(source)
+    original_detail = snapshot.get('详情', {})
+    if isinstance(original_detail, dict) and ARCHIVE_FIELD in original_detail:
+        detail[ARCHIVE_FIELD] = append_detail_value(detail.get(ARCHIVE_FIELD), original_detail.pop(ARCHIVE_FIELD), ARCHIVE_FIELD)
+    append_record(detail, ARCHIVE_FIELD, {**context, "原档案": snapshot})
+
+
 def merge_items(target, source):
     # 来源档案完整留存；非空标量冲突不能因身份合并而静默抹去。
-    append_record(target.setdefault('详情', {}), ARCHIVE_FIELD,
-                  {"操作": "合并", "原档案": copy.deepcopy(source)})
+    archive_item(target.setdefault('详情', {}), source, 操作="合并")
     for k,v in source.items():
         if k=='名称':
             continue
@@ -173,6 +182,9 @@ def merge_items(target, source):
             target.setdefault('详情',{})
             if not isinstance(target['详情'],dict): target['详情']={}
             for dk,dv in v.items():
+                # 来源归档已平铺迁移，来源纠错则属于上方保存的来源快照，不能变成主档案纠错。
+                if dk in {ARCHIVE_FIELD, CORRECTION_FIELD}:
+                    continue
                 if dk in {'首次章节', '最近章节'}:
                     # Chronology metadata is a range, not an append-only paragraph.
                     numbers = parse_chapter_numbers(target['详情'].get(dk)) + parse_chapter_numbers(dv)
@@ -253,6 +265,9 @@ def apply_ops(data, patch):
             idx=find_idx(data,op['类型'],op['名称']); key=TYPE_TO_COLLECTION[op['类型']]
             if idx<0: raise ValueError('找不到元素')
             item=data[key][idx]; field=op['字段']; owner=item; leaf=field
+            # 整个详情覆盖会抹掉档案与宿主纠错记录；已有追加和逐字段纠错足够表达修改。
+            if field == '详情':
+                raise ValueError('不得整体替换详情；请使用追加详情或详情/字段纠错')
             if field.startswith('详情/'):
                 leaf=field.removeprefix('详情/'); owner=item.setdefault('详情', {})
                 if not leaf or leaf in {'首次章节','最近章节','涉及章节',ARCHIVE_FIELD,CORRECTION_FIELD}:
@@ -323,9 +338,8 @@ def apply_ops(data, patch):
                     if any(candidate.get('类型') == m['类型'] and candidate.get('名称') in names(host)
                            for action in ('降级元素','删除元素') for candidate in ops.get(action,[]) or []):
                         raise ValueError('降级挂载目标不能在同批被移除')
-                    append_record(host.setdefault('详情', {}), ARCHIVE_FIELD,
-                                  {"操作": "降级", "原因": op.get('原因',''), "原档案": copy.deepcopy(item),
-                                   "原引用": reference_context(data, typ, old)})
+                    archive_item(host.setdefault('详情', {}), item, 操作="降级", 原因=op.get('原因',''),
+                                 原引用=reference_context(data, typ, old))
                 data[key].pop(idx); c=remove_refs(data,typ,old)
                 if degrade and op.get('挂载到'):
                     m=op['挂载到']; midx=find_idx(data,m['类型'],m['名称'])

@@ -910,7 +910,34 @@
               "字段": {
                 "type": "string"
               },
-              "值": {}
+              "值": {},
+              "原值": {
+                "description": "纠错前的精确字段值，防止覆盖已变化的档案"
+              },
+              "理由": {
+                "type": "string",
+                "description": "根据原文纠正旧提取的理由"
+              },
+              "证据": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "章节",
+                    "原文"
+                  ],
+                  "properties": {
+                    "章节": {
+                      "type": "string",
+                      "pattern": "^[0-9]+$"
+                    },
+                    "原文": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
             },
             "required": [
               "类型",

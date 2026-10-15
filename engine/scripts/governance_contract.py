@@ -149,6 +149,21 @@ def _retain_event_compound_tags(patch, story):
     return changes
 
 
+def governance_identity_baseline(before, patch):
+    """只对齐显式身份和引用操作，供字段与事实保全检查共用同一基线。"""
+    from apply_governance_ops import apply_ops
+    ops = patch.get("治理操作", {}) if isinstance(patch, dict) else {}
+    if not isinstance(ops, dict):
+        raise ValueError("治理操作必须为对象")
+    identity_ops = {key: ops[key] for key in ("合并元素", "重命名元素", "替换引用", "降级元素", "删除元素") if key in ops}
+    if not identity_ops:
+        return before
+    baseline, _, warnings = apply_ops(before, {"治理操作": identity_ops})
+    if warnings:
+        raise ValueError("；".join(warnings))
+    return baseline
+
+
 def governance_quality_errors(before, after, patch):
     """Reject loss of previously useful formal fields after candidate governance.
 
@@ -158,24 +173,18 @@ def governance_quality_errors(before, after, patch):
     destructive result. Historical gaps are ignored; ambiguous changed records
     produce a scoped error instead of guessing which identity lost information.
     """
-    from apply_governance_ops import apply_ops
     from chronology import is_semantic_event_group_name, split_event_group
     from element_identity import build_lookup_index, find_index
-    from story_schema_rules import DETAIL_REF_RE, STRUCTURAL_REF_FIELDS, TYPE_TO_COLLECTION, is_event_compound_tag
+    from story_schema_rules import (COLLECTION_TO_TYPE, DETAIL_REF_RE, STRUCTURAL_REF_FIELDS,
+                                    TYPE_TO_COLLECTION, is_event_compound_tag)
     from information_preservation import field_correction
 
     if not isinstance(before, dict) or not isinstance(after, dict):
         return ["治理质量 scope：治理前后故事结构必须为对象"]
-    ops = patch.get("治理操作", {}) if isinstance(patch, dict) else {}
-    if not isinstance(ops, dict):
-        return ["治理质量 scope：治理操作必须为对象"]
-    identity_ops = {key: ops[key] for key in ("合并元素", "重命名元素", "替换引用", "降级元素", "删除元素") if key in ops}
     try:
-        baseline, _, warnings = apply_ops(before, {"治理操作": identity_ops})
+        baseline = governance_identity_baseline(before, patch)
     except (ValueError, TypeError, KeyError) as exc:
         return [f"治理质量 scope：无法确定身份和引用变换：{exc}"]
-    if warnings:
-        return [f"治理质量 scope：无法确定身份和引用变换：{warning}" for warning in warnings]
 
     def nonblank(value):
         return isinstance(value, str) and bool(value.strip())
@@ -257,7 +266,9 @@ def governance_quality_errors(before, after, patch):
                     valid = {identity for value in old_refs if (identity := resolve(value, target)) is not None}
                     current = {identity for value in new_refs if (identity := resolve(value, target)) is not None}
                     missing = bool(valid - current)
-                if missing:
+                # 目标存在只证明引用格式有效，不证明原提取的关系/地点正确。
+                # 有明确原值、理由和原句的纠错复用同一入口；提交时核对原句。
+                if missing and not field_correction(patch, COLLECTION_TO_TYPE[collection], name, field, old_value, new_value):
                     errors.append(f"治理质量：{label}.{field}不得丢失已有有效正式引用；引用变更须使用明确治理操作")
             old_detail, new_detail = old.get("详情", {}), new.get("详情", {})
             if isinstance(old_detail, dict):
@@ -267,7 +278,8 @@ def governance_quality_errors(before, after, patch):
                     current = new_detail.get(field) if isinstance(new_detail, dict) else None
                     current_refs = current if isinstance(current, list) else [current]
                     current_identities = {identity for ref in current_refs if (identity := typed_reference(ref)) is not None}
-                    if valid - current_identities:
+                    if (valid - current_identities and not field_correction(
+                            patch, COLLECTION_TO_TYPE[collection], name, "详情/" + field, value, current)):
                         errors.append(f"治理质量：{label}.详情.{field}不得丢失已有明确关联引用")
     return errors
 
