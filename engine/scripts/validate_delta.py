@@ -558,7 +558,7 @@ def validate_set_field_governance_ops(current: Dict[str, Any], delta: Dict[str, 
             continue
         type_name = op.get("类型")
         field = op.get("字段")
-        if type_name == "事件" and field in immutable_fields:
+        if type_name == "事件" and (field in immutable_fields or field in {"详情/涉及章节", "详情/首次章节", "详情/最近章节"}):
             errors.append(
                 f"治理操作.设置字段[{index}] 不得设置事件[{op.get('名称')}]的 {field}；"
                 "对既有事件只允许重分类，时间/涉及章节/数组位置不可变（详情更新请用追加详情）"

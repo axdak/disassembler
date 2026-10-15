@@ -162,6 +162,7 @@ def governance_quality_errors(before, after, patch):
     from chronology import is_semantic_event_group_name, split_event_group
     from element_identity import build_lookup_index, find_index
     from story_schema_rules import DETAIL_REF_RE, STRUCTURAL_REF_FIELDS, TYPE_TO_COLLECTION, is_event_compound_tag
+    from information_preservation import field_correction
 
     if not isinstance(before, dict) or not isinstance(after, dict):
         return ["治理质量 scope：治理前后故事结构必须为对象"]
@@ -241,7 +242,8 @@ def governance_quality_errors(before, after, patch):
                 new_tags = new.get("标签集", [])
                 protected = [tag for tag in old_tags if is_event_compound_tag(tag)] if isinstance(old_tags, list) else []
                 current_tags = {tag.strip() for tag in new_tags if isinstance(tag, str)} if isinstance(new_tags, list) else set()
-                if any(tag.strip() not in current_tags for tag in protected):
+                if (any(tag.strip() not in current_tags for tag in protected)
+                        and not field_correction(patch, "事件", name, "标签集", old_tags, new_tags)):
                     errors.append(f"治理质量：{label}.标签集不得移除已有有效四维复合标签或迁入详情")
             for field, target, kind in STRUCTURAL_REF_FIELDS[collection]:
                 old_value, new_value = old.get(field), new.get(field)

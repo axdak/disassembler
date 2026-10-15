@@ -215,6 +215,12 @@ def merge_detail_field(existing_detail, new_detail, collection_key="", chapter_p
             merged[actual_key] = merge_json_string_array_field(
                 old_v, new_v, strip_chapter_marker=strip_event_chapter
             )
+        elif (collection_key == "事件集" and k not in STRICT_DETAIL_KEY_FIELDS and k not in DELTA_ONLY_DETAIL_FIELDS
+              and isinstance(old_v, str) and isinstance(new_v, str)):
+            # 事件详情不带章节前缀，开放字段也可能承载不可替代的原文事实。
+            # 普通 Delta 追加信息，不得以局部快照覆盖历史；明确纠错另走治理协议。
+            if new_v.strip() and new_v not in old_v:
+                merged[actual_key] = old_v + ("\n" if old_v else "") + new_v
         else:
             # string/其它: 新值非空则覆盖，空则保留旧值
             if new_v in (None, "", [], {}):

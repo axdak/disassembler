@@ -5,6 +5,7 @@ import argparse, copy, json, os, shutil, sys, datetime as dt, tempfile
 from typing import Any, Dict, List, Set
 from element_identity import build_lookup_index, find_index
 from chronology import parse_chapter_numbers, format_chapter
+from information_preservation import ARCHIVE_FIELD, CORRECTION_FIELD, append_record, reference_context, evidenced_correction
 from story_schema_rules import (
     COLLECTION_KEYS, TYPE_TO_COLLECTION, STRUCTURAL_REF_FIELDS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
     dump_supplementary_tags, is_cumulative_detail_field, merge_supplementary_tag_values, is_event_compound_tag,
@@ -159,6 +160,9 @@ def remove_refs(obj, typ, old: Set[str]):
     return rewrite_refs(obj, typ, old, None)
 
 def merge_items(target, source):
+    # 来源档案完整留存；非空标量冲突不能因身份合并而静默抹去。
+    append_record(target.setdefault('详情', {}), ARCHIVE_FIELD,
+                  {"操作": "合并", "原档案": copy.deepcopy(source)})
     for k,v in source.items():
         if k=='名称':
             continue
@@ -183,7 +187,11 @@ def merge_items(target, source):
             if not target.get(k): target[k]=v
             elif v not in target[k]: target[k]+='\n'+v
         else:
-            if target.get(k) in (None,'',[],{}) and v not in (None,'',[],{}): target[k]=v
+            if target.get(k) in (None,'',[],{}) and v not in (None,'',[],{}):
+                target[k]=v
+            elif target.get(k) != v and v not in (None,'',[],{}):
+                append_record(target['详情'], '待确认信息', {"事项": "合并字段冲突", "字段": k,
+                              "保留值": target.get(k), "来源值": v, "来源名称": source.get('名称')})
 
 def apply_ops(data, patch):
     # Reject protected-tag demotions before any other operation can run. This
@@ -244,7 +252,21 @@ def apply_ops(data, patch):
         try:
             idx=find_idx(data,op['类型'],op['名称']); key=TYPE_TO_COLLECTION[op['类型']]
             if idx<0: raise ValueError('找不到元素')
-            data[key][idx][op['字段']]=op.get('值'); logs.append(f"设置字段 {op['类型']}:{op['名称']}.{op['字段']}")
+            item=data[key][idx]; field=op['字段']; owner=item; leaf=field
+            if field.startswith('详情/'):
+                leaf=field.removeprefix('详情/'); owner=item.setdefault('详情', {})
+                if not leaf or leaf in {'首次章节','最近章节','涉及章节',ARCHIVE_FIELD,CORRECTION_FIELD}:
+                    raise ValueError('不能通过详情纠错改变机器追溯或归档字段')
+            old=copy.deepcopy(owner.get(leaf))
+            if '原值' in op and op['原值'] != old:
+                raise ValueError('纠错原值已经变化，拒绝覆盖')
+            if owner is not item and not evidenced_correction(op, old, op.get('值')):
+                raise ValueError('详情纠错必须声明原值、理由和原文章节引文')
+            if old != op.get('值'):
+                append_record(item.setdefault('详情', {}), CORRECTION_FIELD,
+                              {"字段": field, "原值": old, "新值": op.get('值'),
+                               "理由": op.get('理由', ''), "证据": op.get('证据', [])})
+            owner[leaf]=op.get('值'); logs.append(f"设置字段 {op['类型']}:{op['名称']}.{field}")
         except Exception as e: warns.append(f'设置字段失败: {e}')
     for op in ops.get('追加详情',[]) or []:
         try:
@@ -288,6 +310,22 @@ def apply_ops(data, patch):
                 typ=op['类型']; name=op['名称']; key=TYPE_TO_COLLECTION[typ]; idx=find_idx(data,typ,name)
                 if idx<0: warns.append(f'找不到{bucket}{typ}:{name}'); continue
                 item=data[key][idx]; old=source_names(data,typ,item)|{name}
+                host = None
+                if degrade:
+                    # 在任何移除发生前确认挂载，失败由整批回滚保护。
+                    m=op.get('挂载到')
+                    if not isinstance(m, dict): raise ValueError('降级必须指定有效挂载目标')
+                    mk=TYPE_TO_COLLECTION[m['类型']]; midx=find_idx(data,m['类型'],m['名称'])
+                    if midx<0: raise ValueError('降级挂载目标不存在')
+                    host=data[mk][midx]
+                    if host is item: raise ValueError('不能降级挂载到自身')
+                    # 同批删除或降级挂载对象会使档案再次丢失，不能依赖执行顺序。
+                    if any(candidate.get('类型') == m['类型'] and candidate.get('名称') in names(host)
+                           for action in ('降级元素','删除元素') for candidate in ops.get(action,[]) or []):
+                        raise ValueError('降级挂载目标不能在同批被移除')
+                    append_record(host.setdefault('详情', {}), ARCHIVE_FIELD,
+                                  {"操作": "降级", "原因": op.get('原因',''), "原档案": copy.deepcopy(item),
+                                   "原引用": reference_context(data, typ, old)})
                 data[key].pop(idx); c=remove_refs(data,typ,old)
                 if degrade and op.get('挂载到'):
                     m=op['挂载到']; midx=find_idx(data,m['类型'],m['名称'])

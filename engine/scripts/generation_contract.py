@@ -184,6 +184,29 @@ def chapter_quality_errors(before: dict, after: dict, patch: dict) -> list[str]:
     """在合并及规范化之后复验真正的新档案，保护正式发布边界。"""
     from element_identity import build_lookup_index, find_index
     errors = []
+    # 已有事件也必须受保护：机器追溯与引用另有规则，普通叙述不得被局部更新抹去。
+    previous_events = {item.get("名称"): item for item in before.get("事件集", []) if isinstance(item, dict)}
+    current_events = {item.get("名称"): item for item in after.get("事件集", []) if isinstance(item, dict)}
+    from story_schema_rules import STRICT_DETAIL_KEY_FIELDS
+    from information_preservation import field_correction
+    for name, old in previous_events.items():
+        new = current_events.get(name)
+        if not isinstance(new, dict):
+            continue  # 身份操作由治理门禁单独对齐。
+        for field, value in old.get("详情", {}).items():
+            if (field in STRICT_DETAIL_KEY_FIELDS or field == "提取理由" or field.startswith("关联")
+                    or not isinstance(value, str) or not value.strip()):
+                continue
+            proposed = new.get("详情", {}).get(field)
+            def entries(text):
+                try:
+                    array = json.loads(text)
+                    return array if isinstance(array, list) and all(isinstance(x, str) for x in array) else [text]
+                except (ValueError, TypeError):
+                    return [text]
+            if not all(entry in entries(proposed) or isinstance(proposed, str) and entry in proposed for entry in entries(value)):
+                if not field_correction(patch, "事件", name, "详情/" + field, value, proposed):
+                    errors.append(f"事件集[{name}].详情.{field} 原有事实被覆盖；应追加或通过有来源的治理纠错")
     additions = patch.get("新增元素", {})
     for collection in COLLECTION_KEYS:
         previous = build_lookup_index(before.get(collection) or [])

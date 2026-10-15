@@ -80,6 +80,7 @@ LEGACY_FINAL_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最�
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 SUPPLEMENTARY_TAGS_DETAIL_KEY = "补充标签"
 DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS = {
+    "治理档案记录", "治理纠错记录",
     "待确认信息", "疑似信息", "冲突声明", "关系线索", "待确认关系", "待确认引用",
     "入库依据", "档案线索", "证据摘录", "变化轨迹", "状态变化", "关键表现", "关键行为",
     "动作链条", "冲突变化", "信息揭示", "情绪转折", "喜剧机制", "关键台词", "成员状态变化",

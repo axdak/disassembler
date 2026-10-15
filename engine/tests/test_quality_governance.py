@@ -131,6 +131,10 @@ def test_quality_gate_accepts_rename_merge_and_reference_redirection():
 def test_quality_gate_accepts_explicit_removal_and_its_reference_cleanup(action):
     before = quality_story()
     patch = {"治理操作": {action: [{"类型": "角色", "名称": "主角", "原因": "实体不成立"}]}}
+    if action == "降级元素":
+        # 降级必须完整挂载档案；无挂载属于删除，不能再以降级静默执行。
+        before["其他事项集"].append({"名称": "归档", "详情": {}})
+        patch["治理操作"][action][0]["挂载到"] = {"类型": "其他事项", "名称": "归档"}
     after, _, warnings = apply_ops(before, patch)
     assert warnings == []
     assert quality_errors(before, after, patch) == []
