@@ -53,6 +53,7 @@ from run_pipeline import (
     write_fullbook_reduce_worker_pack,
 )
 from worker_artifacts import confined_project_path, invalid_output_artifacts
+from worker_admission import worker_concurrency_scope, worker_admission
 
 # 全书分析任务依赖顺序（阶段5）
 FULLBOOK_TASKS = (
@@ -118,7 +119,11 @@ class Orchestrator:
     def run(self) -> int:
         """Freeze capacity and convert unexpected failures into the blocked contract."""
         try:
-            with capacity_scope(asdict(self.config)):
+            concurrency = max(self.config.analysis_concurrency, self.config.per_chapter_concurrency)
+            if self.config.chapter_mode == "interleaved":
+                concurrency = max(concurrency, self.config.analysis_concurrency + 1)
+            with capacity_scope(asdict(self.config)), worker_concurrency_scope(concurrency):
+                self.emit("log", detail=f"模型并发：任务配置 {concurrency}，实际共享上限 {worker_admission.effective_limit()}")
                 return self._run()
         except Exception as exc:
             # Only ordinary failures are converted: cancellation/system-exit

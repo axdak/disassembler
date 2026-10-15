@@ -44,7 +44,7 @@ from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
 from prompt_loader import render_prompt, prompt_fingerprint
-from worker_admission import worker_admission
+from worker_admission import worker_admission, worker_concurrency_scope
 from fault_recovery import recover_artifact
 from worker_checkpoint import atomic_write_bytes
 from project_lock import project_write_lock, serialized_story_write
@@ -3034,7 +3034,7 @@ def _cmd_run_analysis_parallel(project_dir, files, chapter_command, worker_timeo
             print("已交接：等待章节分析MD。")
             return 2
         print(f"analysis 并行: {len(pending)} 章, concurrency={concurrency}")
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        with worker_concurrency_scope(concurrency), ThreadPoolExecutor(max_workers=concurrency) as ex:
             # Each child gets a separate context copy of the same immutable budget.
             futures = [ex.submit(copy_context().run, _do_one, item) for item in pending]
             rcs = [future.result() for future in futures]
@@ -3253,9 +3253,12 @@ def cmd_run_interleaved(
                 fail(1); return
 
     n_workers = min(max(1, concurrency), total)
-    producers = [threading.Thread(target=copy_context().run, args=(producer,),
-                                  name=f"analysis-{i}") for i in range(n_workers)]
-    cons = threading.Thread(target=copy_context().run, args=(consumer,), name="delta")
+    # Include the serial consumer in the shared request budget; copy each
+    # immutable scope before starting threads, including direct CLI invocation.
+    with worker_concurrency_scope(n_workers + 1):
+        producers = [threading.Thread(target=copy_context().run, args=(producer,),
+                                      name=f"analysis-{i}") for i in range(n_workers)]
+        cons = threading.Thread(target=copy_context().run, args=(consumer,), name="delta")
     for t in producers:
         t.start()
     cons.start()
@@ -4352,7 +4355,7 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
                     worker_command, project_dir, task, task_pack_j, expected_j, seq_j,
                     timeout=wk_timeout, retries=wk_retries, worker_window=wk_window,
                 )
-            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            with worker_concurrency_scope(concurrency), ThreadPoolExecutor(max_workers=concurrency) as ex:
                 futures = [ex.submit(copy_context().run, _do_one, job) for job in jobs]
                 rcs = [future.result() for future in futures]
             failed = [r for r in rcs if r != 0]

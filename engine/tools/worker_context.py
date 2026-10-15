@@ -39,7 +39,8 @@ def referenced_paths(text: str) -> set[str]:
     return values
 
 
-def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: Path) -> Path:
+def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: Path,
+                     *, inline_prompt: str = "") -> Path:
     """Freeze explicit inputs plus referenced in-project text; reject code and links out.
 
     Host-declared inputs can be frozen siblings of a capacity request directory.
@@ -65,6 +66,9 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
     pending = [pack, *(path.resolve() for path in outputs if path.is_file()), *aliases]
     seen: set[Path] = set()
     files = []
+    # Match complete supplied text across Windows newline conventions only.
+    # Partial quotations must never suppress the remaining evidence pages.
+    inline = inline_prompt.replace("\r\n", "\n")
     while pending:
         source = pending.pop()
         actual = aliases.get(source, source)
@@ -77,7 +81,12 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
         content = raw.decode("utf-8")
         snapshot = directory / f"context_{len(files):04d}.txt"
         snapshot.write_bytes(raw)
-        files.append({"source": str(source), "snapshot": str(snapshot)})
+        entry = {"source": str(source), "snapshot": str(snapshot)}
+        normalized = content.replace("\r\n", "\n").strip()
+        if normalized and normalized in inline:
+            entry.update(provided_in_prompt=True, total_chars=len(content),
+                         sha256=hashlib.sha256(raw).hexdigest())
+        files.append(entry)
         catalog = (source.name in {"materials.json", "references.json", "sources.json", "manifest.json"}
                    or source.name.endswith((".sources.json", ".references.json", ".hierarchy.json")))
         if (not catalog and (source.suffix.lower() != ".md" or "原文拆解" in source.parts
@@ -110,14 +119,19 @@ class ContextReader:
         self.project = Path(data["project"])
         self.files = data["files"]
         self.allowed = {self.key(Path(item["source"])): Path(item["snapshot"]) for item in self.files}
+        self.inline = {self.key(Path(item["source"])): item for item in self.files
+                       if item.get("provided_in_prompt") is True}
 
     @staticmethod
     def key(path: Path) -> str:
         """Match Windows aliases without making POSIX filenames case-insensitive."""
         return os.path.normcase(str(path.resolve()))
 
-    def read(self, path: str, offset: int = 0, limit: int = READ_LIMIT) -> dict:
-        """Page through a supplied snapshot; reject traversal and unknown paths."""
+    def read(self, path: str, offset: int = 0, limit: int = READ_LIMIT, reread: bool = False) -> dict:
+        """Reuse inline evidence; page frozen text explicitly after context loss.
+
+        Unknown paths and traversal remain forbidden even for a forced reread.
+        """
         if not isinstance(path, str) or ".." in path.replace("\\", "/").split("/"):
             raise ValueError("只允许读取任务材料清单中的确切路径")
         candidate = Path(path.replace("\\", os.sep))
@@ -126,8 +140,15 @@ class ContextReader:
         snapshot = self.allowed.get(self.key(candidate))
         if snapshot is None:
             raise ValueError("该路径不在任务材料清单中；禁止读取项目代码或额外文件")
-        if type(offset) is not int or offset < 0 or type(limit) is not int or not 0 < limit <= READ_LIMIT:
+        if (type(offset) is not int or offset < 0 or type(limit) is not int or not 0 < limit <= READ_LIMIT
+                or type(reread) is not bool):
             raise ValueError(f"offset 必须非负；limit 必须为 1..{READ_LIMIT}")
+        provided = self.inline.get(self.key(candidate))
+        if provided is not None and not reread:
+            print(f"worker context reused inline: {candidate.name}", file=sys.stderr, flush=True)
+            return {"path": path, "provided_in_prompt": True, "total_chars": provided["total_chars"],
+                    "sha256": provided["sha256"], "next_offset": None,
+                    "instruction": "完整材料已在初始任务提示中提供，请直接使用；无需重复读取或分页。仅在上下文丢失后需要恢复全文时使用reread=true。"}
         text = snapshot.read_text(encoding="utf-8")
         end = min(len(text), offset + limit)
         print(f"worker context read: {candidate.name} offset={offset} end={end} total={len(text)}", file=sys.stderr, flush=True)
@@ -336,11 +357,12 @@ def serve(manifest: Path, story_tools: bool = False, candidate_tools: bool = Fal
                 result = {}
             elif method == "tools/list":
                 definitions = [
-                    {"name": "list_context", "description": "列出本任务可读取的材料路径。", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-                    {"name": "read_context", "description": "只读任务材料。大文件按 next_offset 续读直至 null，禁止遗漏材料。",
+                    {"name": "list_context", "description": "只在任务提示未给出材料路径时列目录；已内嵌的完整材料无需查询。", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+                    {"name": "read_context", "description": "按需读取提示中未提供的冻结材料。已内嵌全文只返回复用提示；其他大文件按next_offset续读至null。",
                      "inputSchema": {"type": "object", "required": ["path"], "properties": {
                          "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
-                         "limit": {"type": "integer", "minimum": 1, "maximum": READ_LIMIT}}, "additionalProperties": False}},
+                          "limit": {"type": "integer", "minimum": 1, "maximum": READ_LIMIT},
+                          "reread": {"type": "boolean", "description": "仅在上下文丢失后恢复已内嵌全文；正常处理不要使用。"}}, "additionalProperties": False}},
                 ]
                 if story_tools:
                     definitions.extend([
@@ -380,7 +402,9 @@ def serve(manifest: Path, story_tools: bool = False, candidate_tools: bool = Fal
                         from context_budget import estimate_tokens
                         budget.tool(estimate_tokens(json.dumps(params, ensure_ascii=False)))
                     if params.get("name") == "list_context":
-                        value = {"paths": [item["source"] for item in reader.files]}
+                        value = {"paths": [item["source"] for item in reader.files],
+                                 "provided_in_prompt": [item["source"] for item in reader.files
+                                                        if item.get("provided_in_prompt") is True]}
                     elif params.get("name") == "read_context":
                         value = reader.read(**params.get("arguments", {}))
                     elif story_tools and params.get("name") == "story_snapshot":

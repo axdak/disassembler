@@ -400,7 +400,8 @@ def run_provider(
         outputs, _ = expected_outputs_from_env()
         with tempfile.TemporaryDirectory(prefix="nd_worker_") as temporary:
             directory = Path(temporary)
-            manifest = snapshot_context(project_dir, Path(required_env("ND_TASK_PACK")), outputs, directory)
+            manifest = snapshot_context(project_dir, Path(required_env("ND_TASK_PACK")), outputs, directory,
+                                        inline_prompt=prompt)
             candidate = None
             if candidate_config is not None:
                 from candidate_session import CandidateSession
@@ -431,7 +432,6 @@ def run_provider(
                         host_state["candidate_validation"] = candidate.validate(status["revision"])
                     prompt += "\n## 宿主冻结状态（无需再次查询）\n" + json.dumps(host_state, ensure_ascii=False)
                     prompt += "\n计数为0的集合没有历史档案，不必对其做空查询；原文中的新事实仍须完整提取。\n"
-                    RuntimeBudget(candidate.directory).dispatch(estimate_tokens(prompt))
                     value["candidate"] = candidate_config
                     manifest.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
                 except (ValueError, KeyError, OSError) as exc:
@@ -449,7 +449,23 @@ def run_provider(
                 "command": sys.executable,
                 "args": server_args,
             }}}, ensure_ascii=False), encoding="utf-8")
-            count = len(json.loads(manifest.read_text(encoding="utf-8"))["files"])
+            files = json.loads(manifest.read_text(encoding="utf-8"))["files"]
+            # Supply discovery metadata before the first paid turn. Reads remain
+            # available for additional frozen evidence; inline bodies are not resent.
+            catalog = [{"path": item["source"], "provided_in_prompt": bool(item.get("provided_in_prompt"))}
+                       for item in files]
+            prompt += "\n## 宿主材料目录（已列出，无需list_context）\n" + json.dumps(catalog, ensure_ascii=False)
+            prompt += "\n先直接处理已内嵌材料；只有缺少必要证据时才按确切路径查询。\n"
+            # Account for the actual host catalog/status as well as the wrapper
+            # and native schema. Added instructions must not evade admission.
+            pack = Path(required_env("ND_TASK_PACK"))
+            schema_text = command[command.index("--json-schema") + 1] if "--json-schema" in command else ""
+            overhead = prompt.replace(pack.read_text(encoding="utf-8"), "") + schema_text
+            if not admit_pack(pack, overhead):
+                return subprocess.CompletedProcess(command, CONTEXT_EXCEEDED, "", "")
+            if candidate is not None:
+                RuntimeBudget(candidate.directory).dispatch(estimate_tokens(prompt))
+            count = len(files)
             print(f"worker context: {count} 个只读任务材料；代码、命令和文件修改工具已禁用", file=sys.stderr, flush=True)
             scoped_command = [*command, "--mcp-config", str(config)]
             if "--json-schema" in command:
@@ -508,6 +524,7 @@ def run_structured_stream(command, prompt, project_dir):
     import time
     from run_pipeline import _kill_tree, worker_idle_limit
     from provider_stream import CodeBuddyCapacityLog, CodeBuddyFailureLog
+    from worker_stream_trace import DeliveryTrace, valid_terminal_result
 
     command = list(command)
     command[command.index("--output-format") + 1] = "stream-json"
@@ -516,6 +533,8 @@ def run_structured_stream(command, prompt, project_dir):
     # Preserve the scoped MCP capabilities from provider_command. Evidence reads
     # can require many turns; do not impose a turn cap or reopen built-in Read.
     capacity_log = CodeBuddyCapacityLog(project_dir)
+    schema = json.loads(command[command.index("--json-schema") + 1])
+    trace = DeliveryTrace(schema)
     request_ids = set()
     truncated_tokens = 0  # 仅用于诊断：本轮已生成的输出规模，不参与产物解析。
     last_log_check = 0
@@ -556,12 +575,24 @@ def run_structured_stream(command, prompt, project_dir):
                 _kill_tree(proc)
                 return
 
+    def report_progress():
+        # This observer never cancels a slow live request. It distinguishes a
+        # silent delivery tail from ongoing events without logging their bodies.
+        while not finished.wait(30.0):
+            report = trace.report()
+            print(f"CLI 交付进度：累计 {report['elapsed_seconds']:.0f} 秒；"
+                  f"最近流事件距今 {report['silence_seconds']:.0f} 秒；"
+                  f"完整提交 {len(report['submissions'])} 次；继续等待，未触发重跑。",
+                  file=sys.stderr, flush=True)
+
     watchdog = None
     if idle_limit:
         watchdog = threading.Thread(target=watch_idle, daemon=True)
         watchdog.start()
     conclusion_watch = threading.Thread(target=watch_conclusion, daemon=True)
     conclusion_watch.start()
+    progress_watch = threading.Thread(target=report_progress, daemon=True)
+    progress_watch.start()
 
     def feed():
         try:
@@ -576,10 +607,10 @@ def run_structured_stream(command, prompt, project_dir):
     fallback = []
     try:
         for line in proc.stdout:
-            activity = time.monotonic()
             try:
                 value = json.loads(line)
             except ValueError:
+                activity = time.monotonic()
                 fallback.append(line)  # Compatibility with non-streaming wrappers.
                 continue
             if not isinstance(value, dict):
@@ -587,15 +618,25 @@ def run_structured_stream(command, prompt, project_dir):
                 continue
             # CodeBuddy calls its conversation ID _requestId; the per-model
             # request ID recorded by ModelProvider is exposed as _messageId.
-            request_id = value.get("_messageId") or value.get("_requestId")
+            request_id = value.get("_messageId")
             if isinstance(request_id, str) and request_id not in request_ids:
                 request_ids.add(request_id)
-                print(f"CLI 模型请求第 {len(request_ids)} 轮；等待结构化产物。", file=sys.stderr, flush=True)
+                print(f"CLI 模型请求第 {len(request_ids)} 轮（消息标识）；等待结构化产物。", file=sys.stderr, flush=True)
+            submitted_before = len(trace.submissions)
+            trace.observe(value)
+            if len(trace.submissions) > submitted_before:
+                submission = list(trace.submissions.values())[-1]
+                print("CLI 完整提交边界：" + json.dumps(submission, ensure_ascii=False), file=sys.stderr, flush=True)
+            if trace.last_event is not None:
+                activity = trace.last_event
             event = value.get("event") if isinstance(value.get("event"), dict) else {}
             event_type = event.get("type", "")
             truncated_tokens += estimate_tokens(_delta_text(event))
             exhausted = stream_output_truncated(value)
-            if time.monotonic() - last_log_check > 1 or event_type in {"message_delta", "message_stop"}:
+            if (time.monotonic() - last_log_check > 1 or event_type in {"message_delta", "message_stop"}
+                    or value.get("type") == "result"):
+                # Native envelopes can follow a masked end_turn within the
+                # polling interval. Recheck length metadata before early cleanup.
                 exhausted = capacity_log.check(request_ids) or exhausted
                 last_log_check = time.monotonic()
             if exhausted:
@@ -613,8 +654,17 @@ def run_structured_stream(command, prompt, project_dir):
                 # evidence that materials exceed capacity or a valid patch.
                 print("CLI 达到显式配置的轮数上限，未交付产物；不按容量错误拆分。", file=sys.stderr)
                 return subprocess.CompletedProcess(command, CONTRACT_INVALID, "", "")
+            if value.get("type") == "result" and (value.get("is_error") or
+                    str(value.get("subtype", "")).startswith("error_")):
+                print("CLI 已交付失败终态，立即释放本次请求；不把附带内容接收为成功产物。",
+                      file=sys.stderr, flush=True)
+                return subprocess.CompletedProcess(command, CONTRACT_INVALID, "", "")
             if value.get("type") == "result" or "structured_output" in value:
                 result = line
+                if valid_terminal_result(value, schema):
+                    # A terminal envelope is already delivered. Do not wait for
+                    # CLI cleanup/hooks to exit or lose it to an idle timeout.
+                    return subprocess.CompletedProcess(command, 0, result, "")
             elif "type" not in value:
                 fallback.append(line)
         if concluded.is_set() and not result:
@@ -637,6 +687,8 @@ def run_structured_stream(command, prompt, project_dir):
         return subprocess.CompletedProcess(command, proc.wait(), result or "".join(fallback), "")
     finally:
         finished.set()
+        print("worker stream metrics: " + json.dumps({"worker_session": project_dir.name, **trace.report()},
+                                                    ensure_ascii=False), file=sys.stderr, flush=True)
         if proc.poll() is None:
             _kill_tree(proc)
         proc.wait()

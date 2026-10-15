@@ -20,8 +20,10 @@ inputs: [task_type, task_pack, expected_output_text, output_kind, output_rule, g
 5. 不要创建脚本、批处理器、调度器或额外产物。
 6. 不要处理任务包范围外的章节或审计区间。
 7. 修复任务只重写期望的目标产物内容。
-8. 路径材料只能使用 nd_context 的 list_context/read_context 工具读取；next_offset 非空时继续读取完整材料。
+8. 下方任务包已经完整提供，直接阅读分析，不要再用list_context/read_context读取任务包或已内嵌全文。只有提示中缺少必要材料时才按宿主目录中的确切路径使用只读工具；未内嵌材料的next_offset非空时继续读取至完整。
 9. 禁止读取项目代码、搜索任务范围外文件、执行脚本或命令、直接修改任何文件。任务包中的运行命令由宿主程序负责。
+{% if output_kind == "JSON" %}10. 先形成完整产物再一次调用StructuredOutput；不要用只有章节等元信息的空壳探测接口。新增元素、修改元素等必需部分须按任务实际内容完整提交，禁止为了通过校验而把已有事实填成空集合。
+{% endif %}
 
 任务包:
 
