@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from chronology import normalize_chapter_value, normalize_involved_chapters
+from chronology import normalize_chapter_value, normalize_involved_chapters, parse_chapter_numbers
 
 from story_schema_rules import (
     COLLECTION_KEYS, DEFAULTS, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION,
@@ -119,6 +119,52 @@ def generation_contract_text() -> str:
 def quality_marker(path: str) -> str:
     """机器可定位的路径供字段补丁使用，不依赖解析自然语言错误。"""
     return f"[质量字段:{path}]"
+
+
+def generation_scope_errors(patch: dict, *, chapter_seq: int = 0, start: int = 0, end: int = 0) -> list[str]:
+    """将模型声明绑定宿主范围；格式规范不等于来源正确，禁止未来章节混入。"""
+    if not isinstance(patch, dict):
+        return []  # 根类型由原校验器报告。
+    errors = []
+    if chapter_seq:
+        declared = parse_chapter_numbers(patch.get("章节"))
+        if not declared or declared[0] != chapter_seq:
+            errors.append(f"{quality_marker('/章节')} 必须对应宿主第{chapter_seq:04d}章，不得采用其他章节来源")
+        start = end = chapter_seq
+    elif start and end:
+        declared = parse_chapter_numbers(patch.get("章节范围", patch.get("章节")))
+        if not declared or (declared[0], declared[-1]) != (start, end):
+            errors.append(f"{quality_marker('/章节范围')} 必须对应宿主范围{start:04d}-{end:04d}")
+        evidence = patch.get("证据范围")
+        if patch.get("治理类型") == "no_change" or evidence is not None:
+            chapters = [parse_chapter_numbers(entry) for entry in evidence] if isinstance(evidence, list) else []
+            if (not chapters or any(len(entry) != 1 for entry in chapters)
+                    or sorted(entry[0] for entry in chapters) != list(range(start, end + 1))):
+                errors.append(f"{quality_marker('/证据范围')} 必须逐章完整覆盖宿主范围{start:04d}-{end:04d}，不能以自报其他章节跳过审计")
+    else:
+        return []
+    for section in ("新增元素", "修改元素"):
+        bucket = patch.get(section, {})
+        if not isinstance(bucket, dict):
+            continue
+        for collection, items in bucket.items():
+            if not isinstance(items, list):
+                continue
+            for index, item in enumerate(items):
+                detail = item.get("详情", {}) if isinstance(item, dict) else {}
+                if not isinstance(detail, dict):
+                    continue
+                for field in ("首次章节", "最近章节", "涉及章节"):
+                    if field not in detail:
+                        continue
+                    numbers = parse_chapter_numbers(detail[field])
+                    invalid = not numbers or max(numbers) > end
+                    if chapter_seq and section == "新增元素" and collection == "事件集" and field == "涉及章节":
+                        invalid |= chapter_seq not in numbers
+                    if invalid:
+                        path = f"/{section}/{collection}/{index}/详情/{field}"
+                        errors.append(f"{quality_marker(path)} 来源必须属于已处理章节，不能错用或包含第{end + 1:04d}章以后的材料")
+    return errors
 
 
 def new_element_quality_errors(collection: str, item: dict, path: str) -> list[str]:

@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from chronology import chapter_time
 from engine_contract import contract_version
 from governance_contract import normalize_governance_patch, periodic_introduction_errors, governance_quality_errors
-from generation_contract import chapter_quality_errors
+from generation_contract import chapter_quality_errors, generation_scope_errors
 from merge_delta import save_json as save_atomic_json
 from story_schema_rules import COLLECTION_KEYS
 from validate_chapter_analysis import validate_chapter_analysis_file
@@ -1758,7 +1758,9 @@ def audit_status(project_dir: Path, start: int, end: int) -> Dict[str, Any]:
 
 
 def audit_range_is_resolved(project_dir: Path, start: int, end: int) -> bool:
-    return audit_status(project_dir, start, end).get("status") in AUDIT_RESOLVED_STATUSES
+    status = audit_status(project_dir, start, end)
+    # 旧版 covered_by_children 只说明子段完成，不证明跨段关联已审查。
+    return status.get("status") == "committed" or (status.get("status") == "covered_by_children" and status.get("cross_range_committed") is True)
 
 
 def audit_children_resolved(project_dir: Path, child_ranges: List[Tuple[int, int]]) -> bool:
@@ -2088,7 +2090,8 @@ def unresolved_audits(project_dir: Path) -> List[Dict[str, Any]]:
     audits = []
     for path in sorted(audit_dir.glob("audit_*.status.json")):
         data = load_json(path, None)
-        if isinstance(data, dict) and data.get("status") not in AUDIT_RESOLVED_STATUSES:
+        if isinstance(data, dict) and not (data.get("status") == "committed" or (
+                data.get("status") == "covered_by_children" and data.get("cross_range_committed") is True)):
             data["_status_path"] = str(path)
             m = re.match(r"^(\d{3,})-(\d{3,})$", str(data.get("range", "")))
             if m:
@@ -2615,6 +2618,8 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False,
 
     p["delta_task"].parent.mkdir(parents=True, exist_ok=True)
     p["delta_task"].write_text(contract_marker + "\n" + content, encoding="utf-8")
+    # 索引是初始路由信息，不替代原档案；只读工具必须始终能查证完整冻结来源。
+    save_json(p["delta_task"].with_suffix(".context-inputs.json"), [str(path.resolve()) for path in (story, chapter, p["analysis"])])
     print(f"已生成Delta提取任务包: {p['delta_task']}")
     print(f"请填写本章Delta JSON: {p['delta']}")
     return 0
@@ -2768,6 +2773,12 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         )
         print(f"Delta 顶层类型无效，见: {p['delta_report']}")
         write_repair_pack(project_dir, chapter, "Delta顶层必须是对象", [p["delta_report"]])
+        return 1
+
+    scope_errors = generation_scope_errors(delta_payload, chapter_seq=seq)
+    if scope_errors:
+        save_json(p["delta_report"], {"passed": False, "errors": scope_errors, "warnings": []})
+        write_repair_pack(project_dir, chapter, "Delta来源范围不匹配", [p["delta_report"]])
         return 1
 
     # 入库前先做机械纠错：把 LLM 写错的类型/格式（bool/int、数组↔标量、章节号宽度、
@@ -3692,6 +3703,11 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     range_match = re.fullmatch(r"correction_(\d+)-(\d+)\.json", patch.name) if is_periodic_patch else None
     known_range = f"第{range_match[1]}章-第{range_match[2]}章" if range_match else ""
     normalized, changes = normalize_governance_patch(patch_doc, known_range, story=load_json(story))
+    if range_match:
+        scope_errors = generation_scope_errors(normalized, start=int(range_match[1]), end=int(range_match[2]))
+        if scope_errors:
+            report_delta.write_text("\n".join(scope_errors), encoding="utf-8")
+            return failed("治理来源范围不匹配", report_delta)
     # 治理只复用无损的位置搬迁，不套用章节类型转换或补齐规则，避免改变稀疏补丁语义。
     # 未知目标、冲突字段及时间/涉及章节仍交原治理校验器判断，绝不删除来换取通过。
     from coerce_delta import relocate_element_fields

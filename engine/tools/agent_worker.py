@@ -41,6 +41,7 @@ from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, ContextBudget, ad
 
 PROVIDER_ORDER = ["agy", "codebuddy"]
 BROAD_READ_TASKS = frozenset({
+    "delta", "repair_chapter",
     "audit_correction", "audit_repair", "final_draft", "repair_final",
     "fullbook_analysis", "fullbook_analysis_reduce",
     "summary", "characters", "plot", "style", "report", "custom",
