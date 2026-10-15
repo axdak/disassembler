@@ -18,14 +18,26 @@ if errorlevel 1 goto missing_npm
 pushd "%~dp0desktop" >nul 2>&1
 if errorlevel 1 goto missing_desktop
 
-rem Install dependencies only for a fresh checkout; normal launches remain fast.
-if not exist "node_modules\" goto install_dependencies
+rem A leftover node_modules directory can be incomplete after cleanup or a failed install.
+rem Check the actual launch files; a healthy installation still starts without reinstalling.
+call :check_dependencies
+if errorlevel 1 goto install_dependencies
 goto start_application
 
 :install_dependencies
-echo [启动] 首次运行，正在安装依赖，请稍候...
+echo [启动] 启动依赖缺失或不完整，正在恢复，请稍候...
+rem Prefer the committed lockfile so recovery does not silently upgrade dependencies.
+if exist "package-lock.json" goto install_locked_dependencies
 call npm install
+goto check_install_result
+
+:install_locked_dependencies
+call npm ci
+
+:check_install_result
 if errorlevel 1 goto install_failed
+call :check_dependencies
+if errorlevel 1 goto incomplete_dependencies
 
 :start_application
 echo [启动] 正在启动 Novel Disassembler Desktop...
@@ -40,6 +52,12 @@ exit /b 0
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 echo [错误] 依赖安装失败，请检查网络连接及上方错误信息。
+goto fail_after_pushd
+
+:incomplete_dependencies
+set "EXIT_CODE=1"
+echo.
+echo [错误] 安装后启动文件仍不完整，请检查 Electron 下载是否成功及上方安装日志。
 goto fail_after_pushd
 
 :start_failed
@@ -69,3 +87,10 @@ echo.
 echo 按任意键关闭窗口...
 pause >nul
 exit /b %EXIT_CODE%
+
+:check_dependencies
+rem Verify both the Windows command shim and its real entry point, plus Electron itself.
+if not exist "node_modules\.bin\electron-vite.cmd" exit /b 1
+if not exist "node_modules\electron-vite\bin\electron-vite.js" exit /b 1
+if not exist "node_modules\electron\dist\electron.exe" exit /b 1
+exit /b 0

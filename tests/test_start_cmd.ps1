@@ -94,7 +94,14 @@ try {
     Write-CommandFile -Path (Join-Path $fakeBin 'npm.cmd') -Lines @(
         '@echo off',
         'echo %CD%^|%*>>"%LAUNCHER_TEST_LOG%"',
-        'if "%*"=="install" mkdir node_modules',
+        'if "%*"=="install" goto installed',
+        'if "%*"=="ci" goto installed',
+        'exit /b 0',
+        ':installed',
+        'mkdir node_modules\.bin node_modules\electron-vite\bin node_modules\electron\dist >nul 2>&1',
+        'type nul >node_modules\.bin\electron-vite.cmd',
+        'type nul >node_modules\electron-vite\bin\electron-vite.js',
+        'type nul >node_modules\electron\dist\electron.exe',
         'exit /b 0'
     )
 
@@ -114,6 +121,28 @@ try {
     $actualCalls = @(Get-Content -LiteralPath $callLog)
     Assert-Equal -Actual ($actualCalls -join "`n") -Expected ($expectedCalls -join "`n") -Message 'Launcher should install missing dependencies before starting development mode.'
 
+    # A leftover directory is not proof of a working install. Prefer the exact
+    # lockfile when repairing a missing CLI shim or an incomplete Electron binary.
+    Set-Content -LiteralPath (Join-Path $desktopDir 'package-lock.json') -Value '{}' -Encoding Ascii
+    foreach ($missingFile in @('node_modules\.bin\electron-vite.cmd', 'node_modules\electron-vite\bin\electron-vite.js', 'node_modules\electron\dist\electron.exe')) {
+        Remove-Item -LiteralPath (Join-Path $desktopDir $missingFile) -Force
+        Remove-Item -LiteralPath $callLog -Force
+        $repairResult = Invoke-TestLauncher `
+            -LauncherPath (Join-Path $workspace '启动.cmd') `
+            -FakeBinPath $fakeBin `
+            -LogPath $callLog
+        Assert-Equal -Actual $repairResult.ExitCode -Expected 0 -Message "Launcher should repair missing $missingFile."
+        Assert-Equal -Actual ((Get-Content -LiteralPath $callLog) -join "`n") `
+            -Expected (@("$desktopDir|ci", "$desktopDir|run dev") -join "`n") `
+            -Message 'A partial installation must be restored from the lockfile before launching.'
+    }
+
+    # Healthy dependencies must not cause installation on every startup.
+    Remove-Item -LiteralPath $callLog -Force
+    $healthyResult = Invoke-TestLauncher -LauncherPath (Join-Path $workspace '启动.cmd') -FakeBinPath $fakeBin -LogPath $callLog
+    Assert-Equal -Actual $healthyResult.ExitCode -Expected 0 -Message 'Healthy dependencies should launch normally.'
+    Assert-Equal -Actual ((Get-Content -LiteralPath $callLog) -join "`n") -Expected "$desktopDir|run dev" -Message 'Healthy startup should not reinstall.'
+
     # A failed development process must be surfaced to callers instead of being reported as successful.
     Remove-Item -LiteralPath $callLog -Force
     Write-CommandFile -Path (Join-Path $fakeBin 'npm.cmd') -Lines @(
@@ -127,6 +156,25 @@ try {
         -FakeBinPath $fakeBin `
         -LogPath $callLog
     Assert-Equal -Actual $failureResult.ExitCode -Expected 17 -Message 'Launcher should preserve a failed npm dev exit code.'
+
+    # A failed repair must retain npm's exit code and must never start the app.
+    Remove-Item -LiteralPath (Join-Path $desktopDir 'node_modules\.bin\electron-vite.cmd') -Force
+    Remove-Item -LiteralPath $callLog -Force
+    Write-CommandFile -Path (Join-Path $fakeBin 'npm.cmd') -Lines @(
+        '@echo off', 'echo %CD%^|%*>>"%LAUNCHER_TEST_LOG%"', 'exit /b 23'
+    )
+    $installFailure = Invoke-TestLauncher -LauncherPath (Join-Path $workspace '启动.cmd') -FakeBinPath $fakeBin -LogPath $callLog
+    Assert-Equal -Actual $installFailure.ExitCode -Expected 23 -Message 'Dependency restoration must preserve npm errors.'
+    Assert-Equal -Actual ((Get-Content -LiteralPath $callLog) -join "`n") -Expected "$desktopDir|ci" -Message 'A failed repair must not start dev.'
+
+    # npm reporting success is insufficient when Electron's actual files are missing.
+    Remove-Item -LiteralPath $callLog -Force
+    Write-CommandFile -Path (Join-Path $fakeBin 'npm.cmd') -Lines @(
+        '@echo off', 'echo %CD%^|%*>>"%LAUNCHER_TEST_LOG%"', 'exit /b 0'
+    )
+    $incompleteResult = Invoke-TestLauncher -LauncherPath (Join-Path $workspace '启动.cmd') -FakeBinPath $fakeBin -LogPath $callLog
+    Assert-Equal -Actual $incompleteResult.ExitCode -Expected 1 -Message 'Incomplete dependencies must fail after installation.'
+    Assert-Equal -Actual ((Get-Content -LiteralPath $callLog) -join "`n") -Expected "$desktopDir|ci" -Message 'Do not launch or loop after an incomplete repair.'
 
     # Missing Node.js must stop before npm is invoked.
     Remove-Item -LiteralPath (Join-Path $fakeBin 'node.cmd') -Force
@@ -147,6 +195,11 @@ try {
 finally {
     # Test artifacts are isolated under a unique temporary directory and can be removed safely.
     if (Test-Path -LiteralPath $tempRoot) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        $resolvedTempRoot = [System.IO.Path]::GetFullPath($tempRoot)
+        $expectedPrefix = Join-Path ([System.IO.Path]::GetTempPath()) 'novel launcher test '
+        if (-not $resolvedTempRoot.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean unexpected test directory: $resolvedTempRoot"
+        }
+        Remove-Item -LiteralPath $resolvedTempRoot -Recurse -Force
     }
 }
