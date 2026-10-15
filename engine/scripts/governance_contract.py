@@ -100,8 +100,174 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
         for key in ("合并元素", "重命名元素", "替换引用", "设置字段", "追加详情", "治理标签", "降级元素", "删除元素"):
             decode(operations, key, list, f"治理操作.{key}")
     if isinstance(story, dict):
+        changes.extend(_retain_event_compound_tags(result, story))
         changes.extend(_relocate_additive_tags(result, story))
     return result, changes
+
+
+def _retain_event_compound_tags(patch, story):
+    """Correct only an exact, complete old-tag partition; never repair ambiguity.
+
+    Four-dimensional event tags already carry formal narrative meaning. Moving
+    them back to the retained partition is deterministic and preserves both the
+    original reason and every unrelated operation. The change report records
+    the rejected original intent without adding unsupported patch fields.
+    """
+    from story_schema_rules import is_event_compound_tag
+
+    operations = patch.get("治理操作", {})
+    tag_ops = operations.get("治理标签") if isinstance(operations, dict) else None
+    if not isinstance(tag_ops, list):
+        return []
+    changes = []
+    for op in tag_ops:
+        if not isinstance(op, dict) or set(op) != {"类型", "名称", "保留标签", "降级标签", "理由"}:
+            continue
+        name, retained, demoted = op.get("名称"), op.get("保留标签"), op.get("降级标签")
+        if (op.get("类型") != "事件" or not isinstance(name, str)
+                or not isinstance(retained, list) or not isinstance(demoted, list)
+                or not isinstance(op.get("理由"), str) or not op["理由"].strip()):
+            continue
+        records = story.get("事件集", [])
+        matches = [item for item in records if isinstance(item, dict) and item.get("名称") == name] if isinstance(records, list) else []
+        if len(matches) != 1 or sum(isinstance(item, dict) and item.get("类型") == "事件" and item.get("名称") == name for item in tag_ops) != 1:
+            continue
+        old = matches[0].get("标签集")
+        if (not isinstance(old, list)
+                or any(not isinstance(tag, str) or not tag.strip() for tag in old + retained + demoted)
+                or len({tag.strip() for tag in old}) != len(old)
+                or len({tag.strip() for tag in retained + demoted}) != len(retained + demoted)
+                or set(old) != set(retained + demoted)):
+            continue
+        protected = [tag for tag in demoted if is_event_compound_tag(tag)]
+        if not protected:
+            continue
+        op["保留标签"] = retained + protected
+        op["降级标签"] = [tag for tag in demoted if tag not in protected]
+        intent = json.dumps({"保留标签": retained, "降级标签": demoted, "理由": op["理由"]}, ensure_ascii=False)
+        changes.append(f"治理标签[事件:{name}]：保留有效四维复合标签{json.dumps(protected, ensure_ascii=False)}；原始意图:{intent}")
+    return changes
+
+
+def governance_quality_errors(before, after, patch):
+    """Reject loss of previously useful formal fields after candidate governance.
+
+    Replay only explicit identity/reference operations to align old records with
+    the candidate. This permits intentional merges, renames, removals and their
+    reference cleanup while preventing field writes from authorizing their own
+    destructive result. Historical gaps are ignored; ambiguous changed records
+    produce a scoped error instead of guessing which identity lost information.
+    """
+    from apply_governance_ops import apply_ops
+    from chronology import is_semantic_event_group_name, split_event_group
+    from element_identity import build_lookup_index, find_index
+    from story_schema_rules import DETAIL_REF_RE, STRUCTURAL_REF_FIELDS, TYPE_TO_COLLECTION, is_event_compound_tag
+
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return ["治理质量 scope：治理前后故事结构必须为对象"]
+    ops = patch.get("治理操作", {}) if isinstance(patch, dict) else {}
+    if not isinstance(ops, dict):
+        return ["治理质量 scope：治理操作必须为对象"]
+    identity_ops = {key: ops[key] for key in ("合并元素", "重命名元素", "替换引用", "降级元素", "删除元素") if key in ops}
+    try:
+        baseline, _, warnings = apply_ops(before, {"治理操作": identity_ops})
+    except (ValueError, TypeError, KeyError) as exc:
+        return [f"治理质量 scope：无法确定身份和引用变换：{exc}"]
+    if warnings:
+        return [f"治理质量 scope：无法确定身份和引用变换：{warning}" for warning in warnings]
+
+    def nonblank(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    # Resolve references against the transformed baseline; dangling historical
+    # references are not promoted into new quality requirements.
+    indices = {key: build_lookup_index(baseline.get(key, []) or []) for key in COLLECTION_KEYS}
+
+    def reference_identity(collection, value):
+        """Compare resolved identities so alias/whitespace cleanup stays legal."""
+        if not nonblank(value):
+            return None
+        try:
+            index = find_index(*indices[collection], value.strip())
+            return (collection, index) if index >= 0 else None
+        except ValueError:
+            return None
+
+    def typed_reference(value):
+        match = DETAIL_REF_RE.fullmatch(value.strip()) if isinstance(value, str) else None
+        return reference_identity(TYPE_TO_COLLECTION[match[1]], match[2]) if match else None
+
+    def relationship_reference(value, target):
+        # The prefix is a relation such as 盟友, not an entity type such as 角色.
+        if not isinstance(value, str):
+            return None
+        prefix, separator, name = value.partition(":")
+        identity = reference_identity(target, name) if separator and prefix.strip() else None
+        return (prefix.strip(), identity) if identity is not None else None
+
+    errors = []
+    previous_intro = baseline.get("介绍", {})
+    current_intro = after.get("介绍", {})
+    for field in ("标题", "描述"):
+        if isinstance(previous_intro, dict) and nonblank(previous_intro.get(field)) and (not isinstance(current_intro, dict) or not nonblank(current_intro.get(field))):
+            errors.append(f"治理质量：介绍.{field}已有有效内容，不得清空或迁入详情")
+    for collection in COLLECTION_KEYS:
+        previous_records = baseline.get(collection, [])
+        current_records = after.get(collection, [])
+        if not isinstance(previous_records, list) or not isinstance(current_records, list):
+            errors.append(f"治理质量 scope：{collection}必须为数组")
+            continue
+        previous_by_name, current_by_name = {}, {}
+        for records, index in ((previous_records, previous_by_name), (current_records, current_by_name)):
+            for item in records:
+                if isinstance(item, dict) and isinstance(item.get("名称"), str):
+                    index.setdefault(item["名称"], []).append(item)
+        for name, old_matches in previous_by_name.items():
+            new_matches = current_by_name.get(name, [])
+            label = f"{collection}[{name}]"
+            if len(old_matches) != 1 or len(new_matches) != 1:
+                if old_matches != new_matches:
+                    errors.append(f"治理质量 scope：{label}身份缺失或不唯一，须用明确合并、重命名、降级或删除操作说明")
+                continue
+            old, new = old_matches[0], new_matches[0]
+            if nonblank(old.get("介绍")) and not nonblank(new.get("介绍")):
+                errors.append(f"治理质量：{label}.介绍已有有效内容，不得清空或迁入详情")
+            if collection == "事件集":
+                _, old_group = split_event_group(old.get("分组"))
+                _, new_group = split_event_group(new.get("分组"))
+                if is_semantic_event_group_name(old_group) and not is_semantic_event_group_name(new_group):
+                    errors.append(f"治理质量：{label}.分组不得丢失已有剧情语义")
+                old_tags = old.get("标签集", [])
+                new_tags = new.get("标签集", [])
+                protected = [tag for tag in old_tags if is_event_compound_tag(tag)] if isinstance(old_tags, list) else []
+                current_tags = {tag.strip() for tag in new_tags if isinstance(tag, str)} if isinstance(new_tags, list) else set()
+                if any(tag.strip() not in current_tags for tag in protected):
+                    errors.append(f"治理质量：{label}.标签集不得移除已有有效四维复合标签或迁入详情")
+            for field, target, kind in STRUCTURAL_REF_FIELDS[collection]:
+                old_value, new_value = old.get(field), new.get(field)
+                if kind == "scalar":
+                    old_identity = reference_identity(target, old_value)
+                    missing = old_identity is not None and old_identity != reference_identity(target, new_value)
+                else:
+                    old_refs = old_value if isinstance(old_value, list) else []
+                    new_refs = new_value if isinstance(new_value, list) else []
+                    resolve = relationship_reference if kind == "relation_list" else lambda value, target: reference_identity(target, value)
+                    valid = {identity for value in old_refs if (identity := resolve(value, target)) is not None}
+                    current = {identity for value in new_refs if (identity := resolve(value, target)) is not None}
+                    missing = bool(valid - current)
+                if missing:
+                    errors.append(f"治理质量：{label}.{field}不得丢失已有有效正式引用；引用变更须使用明确治理操作")
+            old_detail, new_detail = old.get("详情", {}), new.get("详情", {})
+            if isinstance(old_detail, dict):
+                for field, value in old_detail.items():
+                    old_refs = value if isinstance(value, list) else [value]
+                    valid = {identity for ref in old_refs if (identity := typed_reference(ref)) is not None}
+                    current = new_detail.get(field) if isinstance(new_detail, dict) else None
+                    current_refs = current if isinstance(current, list) else [current]
+                    current_identities = {identity for ref in current_refs if (identity := typed_reference(ref)) is not None}
+                    if valid - current_identities:
+                        errors.append(f"治理质量：{label}.详情.{field}不得丢失已有明确关联引用")
+    return errors
 
 
 def _relocate_additive_tags(patch, story):

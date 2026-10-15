@@ -34,7 +34,11 @@ from normalize_story_schema import (
     coerce_bool,
     coerce_int,
     coerce_string_list,
+    canonicalize_detail_ref_array,
+    decode_json_array,
+    is_detail_ref_array_field,
     is_iso_time,
+    restore_standard_detail_fields,
     stringify,
 )
 from registered_types import align_registered_types
@@ -67,41 +71,16 @@ def _ensure_detail(item: Dict[str, Any]) -> Dict[str, Any]:
     return item["详情"]
 
 
-_MISSING = object()
-
-
-def _fits_top_level_contract(collection: str, field: str, value: Any) -> bool:
-    """判断详情里的值是否符合该字段在顶层的类型契约。
-
-    以 ``DEFAULTS`` 为唯一类型来源，只做"形状"判定，不解释语义：
-    类型不符就不搬，宁可留给校验器报错，也不制造新的类型错误。
-    """
-    default = DEFAULTS.get(collection, {}).get(field, _MISSING)
-    if default is _MISSING or field == "详情":
-        return False
-    if isinstance(default, bool):
-        # bool 是 int 的子类，必须先判，否则 False/True 会被当成重量级。
-        return isinstance(value, bool)
-    if isinstance(default, int):
-        return isinstance(value, int) and not isinstance(value, bool)
-    if isinstance(default, str):
-        return isinstance(value, str) and bool(value.strip())
-    if isinstance(default, list):
-        return isinstance(value, list) and bool(value) and all(isinstance(entry, str) for entry in value)
-    return False
-
-
 def relocate_element_fields(delta: Dict[str, Any]) -> List[str]:
     """按同一字段契约无损迁移位置；冲突原样保留，交原校验器/模型处理。
 
-    保全比较也使用此函数，仅在内存中的副本上归一化位置，不改变文本、
-    类型或列表内容。不能用其他元素、其他字段中的同文替代本字段。
+    保全比较也使用此函数，仅在内存中的副本上归一化位置和声明数组编码，
+    不改变文本或数组内容。不能用其他字段中的同文替代本字段。
 
     双向迁移：
     - 顶层 → 详情：顶层出现规范外字段时迁入详情（既有行为）。
-    - 详情 → 顶层：模型把标准字段整组写进详情、导致顶层"缺少标准字段"
-      且详情内类型不合规（如 ``重量级`` 写成 int）时，按顶层契约把原值搬回。
-      没有这一步，该错误在程序侧无任何消除路径，只能反复交给模型重写。
+    - 详情 → 顶层：同名标准字段符合声明类型（含明确空值）时补回缺失/空值顶层字段。
+      列表只安全解开 JSON 数组；两处非空且不同的内容保留供校验器处理。
     """
     report = []
     for section_name in ("新增元素", "修改元素"):
@@ -125,19 +104,13 @@ def relocate_element_fields(delta: Dict[str, Any]) -> List[str]:
                         continue
                     detail[field] = item.pop(field)
                     report.append(f"{label} 从顶层迁回详情（原值完整保留）")
-                detail = item.get("详情")
-                if not isinstance(detail, dict):
-                    continue
-                for field in list(detail):
-                    # 名称由身份对齐负责，不从这里推断；顶层已有同名值时保留详情内副本。
-                    if field not in allowed or field in item or field in {"名称", "详情"}:
-                        continue
-                    value = detail[field]
-                    if not _fits_top_level_contract(collection, field, value):
-                        continue
-                    label = f"{section_name}.{collection}[{item.get('名称', '')}].{field}"
-                    item[field] = detail.pop(field)
-                    report.append(f"{label} 从详情迁回顶层（类型符合顶层契约，原值完整保留）")
+                restore_standard_detail_fields(item, collection, report)
+                for field, default in DEFAULTS[collection].items():
+                    if isinstance(default, list) and field in item:
+                        original = item[field]
+                        item[field] = decode_json_array(original)
+                        if item[field] != original:
+                            report.append(f"{collection}[{item.get('名称', '')}].{field} JSON字符串数组 → 数组")
     return report
 
 
@@ -186,8 +159,8 @@ def _coerce_supplementary_tags(detail: Dict[str, Any], label: str, report: List[
     report.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} 非法值 → 按原内容重建为可解析标签")
 
 
-def _coerce_archive_arrays(detail: Dict[str, Any], label: str, report: List[str]) -> None:
-    """详情普通数组转 JSON 字符串数组；类型引用数组保持真实数组。"""
+def _coerce_archive_arrays(collection_key: str, detail: Dict[str, Any], label: str, report: List[str]) -> None:
+    """普通档案数组转可逆字符串；引用、冲突标准字段保留真实类型。"""
     special_keys = {
         SUPPLEMENTARY_TAGS_DETAIL_KEY,
         "首次章节",
@@ -195,6 +168,15 @@ def _coerce_archive_arrays(detail: Dict[str, Any], label: str, report: List[str]
         "涉及章节",
     }
     for key, value in list(detail.items()):
+        if is_detail_ref_array_field(key):
+            normalized = canonicalize_detail_ref_array(value)
+            if normalized != value:
+                detail[key] = normalized
+                report.append(f"{label}.详情.{key} 按引用契约归一为数组")
+            continue
+        if key in VALID_FIELDS[collection_key]:
+            # 合法同名字段已归位；残留意味着冲突或类型错误，不应串化掩盖。
+            continue
         if key in special_keys or not isinstance(value, list):
             continue
         if value and all(isinstance(item, str) and DETAIL_REF_RE.match(item.strip()) for item in value):
@@ -256,66 +238,33 @@ def _coerce_detail_key_chapter_prefixes(
         report.append(f"{label}.详情键章节前缀[{key}]已剥离为[{target}]")
 
 
-def _append_pending_ref(
-    item: Dict[str, Any],
-    field: str,
-    value: str,
-    label: str,
-    report: List[str],
-) -> None:
-    detail = _ensure_detail(item)
-    pending = detail.get("待确认引用")
-    if isinstance(pending, str):
-        try:
-            values = json.loads(pending)
-            if not isinstance(values, list):
-                values = []
-        except json.JSONDecodeError:
-            values = []
-    elif isinstance(pending, list):
-        values = [stringify(v).strip() for v in pending if stringify(v).strip()]
-    else:
-        values = []
-
-    if value not in values:
-        values.append(value)
-    detail["待确认引用"] = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
-    report.append(f"{label}.{field} 不匹配类型前缀[{value}]，移入详情.待确认引用")
-
-
 def _coerce_structural_ref_prefixes(
     collection_key: str, item: Dict[str, Any], label: str, report: List[str]
 ) -> None:
-    """标准引用字段已知目标集合；匹配前缀剥离，错配前缀移入待确认引用。"""
+    """标准引用仅剥离匹配前缀；错配值留在原字段，避免掩盖入库错误。"""
     for field, target_collection, kind in STRUCTURAL_REF_FIELDS.get(collection_key, []):
         if kind == "relation_list" or field not in item:
             continue
 
-        def coerce_one(value: Any) -> tuple[Any, bool]:
+        def coerce_one(value: Any) -> Any:
             if not isinstance(value, str):
-                return value, True
+                return value
             clean = value.strip()
             match = DETAIL_REF_RE.match(clean)
             if not match:
-                return value, True
+                return value
             ref_type, ref_name = match.group(1), match.group(2).strip()
             if TYPE_TO_COLLECTION.get(ref_type) == target_collection:
                 report.append(f"{label}.{field} 标准字段前缀[{ref_type}:]已剥离")
-                return ref_name, True
-            _append_pending_ref(item, field, clean, label, report)
-            return value, False
+                return ref_name
+            report.append(f"{label}.{field} 不匹配类型前缀[{clean}]，保留原值待修复")
+            return value
 
         value = item.get(field)
         if kind == "scalar":
-            new_value, keep = coerce_one(value)
-            item[field] = new_value if keep else ""
+            item[field] = coerce_one(value)
         elif kind == "list" and isinstance(value, list):
-            coerced = []
-            for elem in value:
-                new_elem, keep = coerce_one(elem)
-                if keep:
-                    coerced.append(new_elem)
-            item[field] = coerced
+            item[field] = [coerce_one(elem) for elem in value]
 
 
 def _coerce_role(item: Dict[str, Any], label: str, report: List[str]) -> None:
@@ -428,8 +377,11 @@ def _coerce_item(collection_key: str, item: Any, idx: int, report: List[str]) ->
         return
     detail = _ensure_detail(item)
     _coerce_detail_key_chapter_prefixes(collection_key, detail, label, report)
+    # 章节前缀还原可能刚暴露同名标准字段，必须在本次校验前归位，
+    # 再交类型专属规则处理引用前缀，避免正确内容被迫调用模型重写。
+    restore_standard_detail_fields(item, collection_key, report)
     _coerce_supplementary_tags(detail, label, report)
-    _coerce_archive_arrays(detail, label, report)
+    _coerce_archive_arrays(collection_key, detail, label, report)
 
     # 元素类型专属纠错
     if collection_key == "角色集":

@@ -49,7 +49,7 @@ def good_delta():
                 {"名称": "李四", "是否主角": False, "性别": 1, "年龄": 18, "生日": "0001-01-01T00:00:00", "所属阵营": ["青云门"], "关系": ["同门:张三"], "分组": "主角团", "别名": [], "标签集": ["同伴"], "介绍": "李四首次登场。", "详情": {"初登场": "事件:入门试炼", "提取理由": "首次登场并进入主角团关系网", "首次章节": "0001", "最近章节": "0001"}}
             ],
             "事件集": [
-                {"名称": "入门试炼", "发生地点": "青云山", "参与成员": ["张三", "李四"], "重量级": 20, "目标事件": [], "分组": "0001-卷一", "时间": "0001-01-01T00:00:00", "别名": [], "标签集": ["试炼"], "介绍": "张三与李四参加入门试炼。", "详情": {"提取理由": "推动张三进入宗门情节", "涉及章节": "0001"}}
+                {"名称": "入门试炼", "发生地点": "青云山", "参与成员": ["张三", "李四"], "重量级": 20, "目标事件": [], "分组": "0001-卷一", "时间": "0001-01-01T00:00:00", "别名": [], "标签集": ["试炼", "入门成长+考验推进+紧张+任务挑战"], "介绍": "张三与李四参加入门试炼。", "详情": {"提取理由": "推动张三进入宗门情节", "涉及章节": "0001"}}
             ]
         },
         "修改元素": empty
@@ -148,15 +148,16 @@ def test_delta_without_evidence_fails_in_both_process_and_governance():
         assert "提取理由" in governance.stdout, governance.stdout
 
 
-def test_process_delta_allows_new_element_missing_trace_fields():
+def test_process_delta_rejects_new_element_missing_trace_fields():
+    """新增档案必须有可核对的来源；过程阶段不能靠默认值补造通过。"""
     with tempfile.TemporaryDirectory() as td:
         story = Path(td) / "story.json"
         delta = Path(td) / "delta.json"
         write_json(story, base_story())
         write_json(delta, bad_delta_missing_trace_for_new_element())
         result = run([sys.executable, str(VALIDATOR), "--mode", "process", str(story), str(delta)])
-        assert result.returncode == 0, result.stdout
-        assert "首次章节" in result.stdout or "警告" in result.stdout, result.stdout
+        assert result.returncode != 0, result.stdout
+        assert "[质量字段:/新增元素/角色集/0/详情/首次章节]" in result.stdout, result.stdout
 
 
 def test_process_delta_allows_modified_element_as_patch_without_trace_fields():
@@ -453,7 +454,8 @@ def test_governance_delta_still_requires_trace_fields_for_traceable_elements():
         assert "首次章节" in result.stdout, result.stdout
 
 
-def test_process_delta_minimal_new_element_merges_then_normalizes_to_valid_structure():
+def test_process_delta_rejects_incomplete_new_element_without_modifying_story():
+    """不完整新增必须先修复，不能通过合并补默认值伪装成完整档案。"""
     with tempfile.TemporaryDirectory() as td:
         story = Path(td) / "story.json"
         delta = Path(td) / "delta.json"
@@ -472,18 +474,14 @@ def test_process_delta_minimal_new_element_merges_then_normalizes_to_valid_struc
         }
         write_json(story, current)
         write_json(delta, patch)
+        original_story = story.read_bytes()
+        original_delta = delta.read_bytes()
 
         validate = run([sys.executable, str(VALIDATOR), "--mode", "process", str(story), str(delta)])
-        assert validate.returncode == 0, validate.stdout
-
-        merge = run([sys.executable, str(MERGER), str(story), str(delta)])
-        assert merge.returncode == 0, merge.stdout
-
-        normalize = run([sys.executable, str(ROOT / "normalize_story_schema.py"), str(story), "--in-place"])
-        assert normalize.returncode == 0, normalize.stdout
-
-        check = run([sys.executable, str(STRUCT_VALIDATOR), "--chapter-check", "--mode", "process", str(story), str(delta)])
-        assert check.returncode == 0, check.stdout
+        assert validate.returncode != 0, validate.stdout
+        assert "[质量字段:/新增元素/角色集/0/介绍]" in validate.stdout, validate.stdout
+        assert story.read_bytes() == original_story
+        assert delta.read_bytes() == original_delta
 
 
 if __name__ == "__main__":

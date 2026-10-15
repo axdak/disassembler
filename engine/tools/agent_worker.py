@@ -77,7 +77,11 @@ def structured_output_schema(task_type: str, expected_outputs: List[Path]) -> st
         schema_path = DELTA_SCHEMA_PATH if task_type in {"delta", "repair_chapter"} else DELTA_SCHEMA_PATH.with_name("audit_correction.schema.json")
         if task_type == "bounded_fragment":
             schema_path = DELTA_SCHEMA_PATH.with_name("bounded_fragment.schema.json")
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        if task_type in JSON_TASK_TYPES:
+            from generation_contract import build_generation_schema
+            schema = build_generation_schema("delta" if task_type in {"delta", "repair_chapter"} else "governance")
+        else:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return JSON_OBJECT_SCHEMA
     # Provider validation does not need documentation-only metadata, and
@@ -104,6 +108,39 @@ def default_codebuddy_bin() -> str:
 
 def split_command(command: str) -> List[str]:
     return shlex.split(command, posix=False)
+
+
+def codebuddy_command_prefix(parts: List[str]) -> List[str]:
+    """已验证的 npm shim 改用原生 Node，避免 cmd.exe 的 8191 字符限制。
+
+    仅识别官方包的 codebuddy.cmd，不执行或解析任意自定义脚本；真实入口
+    从已安装包的 bin 声明读取，路径必须位于该包中。自定义命令原样保留。
+    """
+    if not parts:
+        return parts
+    executable = parts[0].strip('"')
+    shim = Path(shutil.which(executable) or executable)
+    if shim.name.lower() != "codebuddy.cmd":
+        return parts
+    package = shim.parent / "node_modules" / "@tencent-ai" / "codebuddy-code"
+    try:
+        contents = shim.read_text(encoding="utf-8").replace("\\", "/")
+        if "node_modules/@tencent-ai/codebuddy-code/" not in contents:
+            return parts
+        metadata = json.loads((package / "package.json").read_text(encoding="utf-8"))
+        bins = metadata.get("bin")
+        entry_name = bins.get("codebuddy") if isinstance(bins, dict) else bins
+        if metadata.get("name") != "@tencent-ai/codebuddy-code" or not isinstance(entry_name, str):
+            return parts
+        entry = (package / entry_name).resolve()
+        entry.relative_to(package.resolve())
+        native = shim.parent / "node.exe"
+        node = str(native) if native.is_file() else shutil.which("node")
+        if not node or not entry.is_file():
+            return parts
+        return [node, str(entry), *parts[1:]]
+    except (OSError, ValueError, TypeError):
+        return parts
 
 
 def command_available(parts: List[str]) -> bool:
@@ -141,7 +178,7 @@ def provider_command(
             from controlled_runtime import CANDIDATE_TOOLS
             allowed_tools.extend("mcp__nd_context__" + name for name in CANDIDATE_TOOLS)
         allowed_tools.append("StructuredOutput")
-        parts = split_command(os.environ.get("ND_CODEBUDDY_BIN", default_codebuddy_bin())) + [
+        parts = codebuddy_command_prefix(split_command(os.environ.get("ND_CODEBUDDY_BIN", default_codebuddy_bin()))) + [
             "-p",
             "--output-format",
             output_format,

@@ -6,7 +6,7 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 """
 from __future__ import annotations
 
-from local_json_patch import delta_repair_scope, apply_scoped_patch
+from local_json_patch import delta_repair_scope, apply_scoped_patch, archived_reference_preserved
 from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED
 
 import hashlib
@@ -228,7 +228,8 @@ non-heading content line. Semantic correctness still needs evidence-based review
                     if (key == "关系" and ".角色集[" in path and isinstance(value, list)
                             and isinstance(b[key], list)):
                         value = [rel for rel in value if rel in b[key] or not _relation_retained_in_detail(rel, b)]
-                    visit(value, b[key], f"{path}.{key}")
+                    if not archived_reference_preserved(a, b, key):
+                        visit(value, b[key], f"{path}.{key}")
         elif isinstance(a, list):
             if not isinstance(b, list) or len(b) < len(a):
                 errors.append(f"{path} 原列表内容减少")
@@ -748,15 +749,20 @@ def recover_artifact(
                 advance()
                 continue
         if stage is None:
-            # 首次优先局部修改。范围不能表达全部混合错误时，后续策略保留
-            # 完整修复兜底，仍必须通过保全、原校验和独立复核。
+            # 字段可定位时，各策略均保持局部修改；重试不得扩大成整份重写。
+            # 身份歧义等尚不能表达的旧错误仍遵循原有保全与独立复核流程。
             scope = delta_repair_scope(reference, feedback, read_object(workspace / "故事结构_增量.json")) if (
-                index == 0 and task in {"repair_chapter", "audit_repair"}) else {}
+                task in {"repair_chapter", "audit_repair"}) else {}
+            if index > 0 and scope and not any(rule.get("kind") == "quality" for rule in scope.values()):
+                # 旧身份/理由补丁未覆盖的混合错误保留原升级策略；本次可定位的
+                # 质量字段始终走局部补丁，不因重试扩大到整份 JSON。
+                scope = {}
             if scope:
                 patch_path = workspace / "candidate_patch.json"
                 patch_prompt = (common + "\n本次输出局部修复补丁，不重写候选，不修改其他文件。"
                                 "所有理由必须核对原文，不能用模板句占位。只处理以下范围：\n"
                                 + json.dumps(scope, ensure_ascii=False)
+                                + '\nkind=quality的value必须使用value_type声明的真实JSON类型，数组不能编码成字符串；依据原文只补齐指定字段，保留已有列表内容，不虚构事实。'
                                 + f"\nbase_sha256 必须为 {digest(reference)}。"
                                 + '\n普通字段放changes；kind=move放moves，只选allowed_collections与指定target_section，省略target_section仅表示修改元素内跨类别迁移。'
                                 + '\nkind=identity可依据原文改成allowed_values内的正式名；如有promotion选项且确属本章新事实，则按promotion.path输出moves、显式指定target_section=新增元素，名称与原字段原样保留，不能为了过校验随意改名。没有promotion选项禁止修改转新增。'

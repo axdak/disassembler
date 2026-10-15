@@ -31,6 +31,9 @@ _CONTRACT_SCRIPTS = (
     "scripts/story_schema_rules.py",
     "scripts/registered_types.py",
     "scripts/governance_contract.py",
+    "scripts/generation_contract.py",
+    "scripts/local_json_patch.py",
+    "scripts/apply_governance_ops.py",
     "scripts/chronology.py",
     "scripts/element_identity.py",
 )

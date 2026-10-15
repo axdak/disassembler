@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$comment": "生成阶段要求名称及非空提取理由；详情允许完整自由档案。引用、章节/时间等业务规则仍以原校验器为准。",
+  "$comment": "元素字段由 scripts/generation_contract.py 根据正式骨架展开；新增完整，修改局部。",
   "type": "object",
   "properties": {
     "章节": {
@@ -12,46 +12,401 @@
         "角色集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "是否主角": {
+                "type": "boolean"
+              },
+              "性别": {
+                "type": "integer"
+              },
+              "年龄": {
+                "type": "integer"
+              },
+              "生日": {
+                "type": "string"
+              },
+              "所属阵营": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "关系": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_trace"
+              }
+            },
+            "required": [
+              "名称",
+              "是否主角",
+              "性别",
+              "年龄",
+              "生日",
+              "所属阵营",
+              "关系",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "事件集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "发生地点": {
+                "type": "string"
+              },
+              "参与成员": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "重量级": {
+                "type": "integer"
+              },
+              "目标事件": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "分组": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "时间": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "contains": {
+                  "type": "string",
+                  "pattern": "^[^+:：]*[^+:：\\s][^+:：]*\\+[^+:：]*[^+:：\\s][^+:：]*\\+[^+:：]*[^+:：\\s][^+:：]*\\+[^+:：]*[^+:：\\s][^+:：]*$"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_event"
+              }
+            },
+            "required": [
+              "名称",
+              "发生地点",
+              "参与成员",
+              "重量级",
+              "目标事件",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "地点集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "父级地点": {
+                "type": "string"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_trace"
+              }
+            },
+            "required": [
+              "名称",
+              "父级地点",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "线索集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "涉及事件": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_trace"
+              }
+            },
+            "required": [
+              "名称",
+              "涉及事件",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "阵营集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "父级阵营": {
+                "type": "string"
+              },
+              "座落地点": {
+                "type": "string"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_trace"
+              }
+            },
+            "required": [
+              "名称",
+              "父级阵营",
+              "座落地点",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "物品集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_trace"
+              }
+            },
+            "required": [
+              "名称",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "其他事项集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_other"
+              }
+            },
+            "required": [
+              "名称",
+              "分组",
+              "别名",
+              "标签集",
+              "介绍",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "修改元素": {
       "type": "object",
@@ -59,46 +414,338 @@
         "角色集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "是否主角": {
+                "type": "boolean"
+              },
+              "性别": {
+                "type": "integer"
+              },
+              "年龄": {
+                "type": "integer"
+              },
+              "生日": {
+                "type": "string"
+              },
+              "所属阵营": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "关系": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "事件集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "发生地点": {
+                "type": "string"
+              },
+              "参与成员": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "重量级": {
+                "type": "integer"
+              },
+              "目标事件": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "分组": {
+                "type": "string"
+              },
+              "时间": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "地点集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "父级地点": {
+                "type": "string"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "线索集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "涉及事件": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "阵营集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "父级阵营": {
+                "type": "string"
+              },
+              "座落地点": {
+                "type": "string"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "物品集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         },
         "其他事项集": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/element"
+            "type": "object",
+            "properties": {
+              "名称": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+              },
+              "分组": {
+                "type": "string"
+              },
+              "别名": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "标签集": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "介绍": {
+                "type": "string"
+              },
+              "详情": {
+                "$ref": "#/definitions/detail_patch"
+              }
+            },
+            "required": [
+              "名称",
+              "详情"
+            ],
+            "additionalProperties": false
           }
         }
-      }
+      },
+      "additionalProperties": false
     },
     "冲突声明": {
       "type": "array",
@@ -116,31 +763,359 @@
     "修改元素"
   ],
   "definitions": {
-    "element": {
+    "detail_patch": {
       "type": "object",
       "required": [
-        "名称",
-        "详情"
+        "提取理由"
       ],
       "properties": {
-        "名称": {
+        "提取理由": {
           "type": "string",
           "minLength": 1,
           "pattern": "\\S"
         },
-        "详情": {
-          "type": "object",
-          "required": [
-            "提取理由"
-          ],
-          "properties": {
-            "提取理由": {
+        "关联事件": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^事件:.+"
+          }
+        },
+        "关联其他事项": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^其他事项:.+"
+          }
+        },
+        "关联地点": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^地点:.+"
+          }
+        },
+        "关联物品": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:物品|道具):.+"
+          }
+        },
+        "关联线索": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^线索:.+"
+          }
+        },
+        "关联角色": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^角色:.+"
+          }
+        },
+        "关联阵营": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^阵营:.+"
+          }
+        },
+        "首次章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "最近章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "涉及章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}(?:，\\d{4,})*$"
+        }
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
               "type": "string",
-              "minLength": 1,
-              "pattern": "\\S"
+              "pattern": "^(角色|事件|地点|线索|阵营|物品|其他事项|道具):.+"
             }
           }
+        ]
+      }
+    },
+    "detail_event": {
+      "type": "object",
+      "required": [
+        "提取理由",
+        "涉及章节"
+      ],
+      "properties": {
+        "提取理由": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "关联事件": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^事件:.+"
+          }
+        },
+        "关联其他事项": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^其他事项:.+"
+          }
+        },
+        "关联地点": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^地点:.+"
+          }
+        },
+        "关联物品": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:物品|道具):.+"
+          }
+        },
+        "关联线索": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^线索:.+"
+          }
+        },
+        "关联角色": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^角色:.+"
+          }
+        },
+        "关联阵营": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^阵营:.+"
+          }
+        },
+        "首次章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "最近章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "涉及章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}(?:，\\d{4,})*$"
         }
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(角色|事件|地点|线索|阵营|物品|其他事项|道具):.+"
+            }
+          }
+        ]
+      }
+    },
+    "detail_trace": {
+      "type": "object",
+      "required": [
+        "提取理由",
+        "首次章节",
+        "最近章节"
+      ],
+      "properties": {
+        "提取理由": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "关联事件": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^事件:.+"
+          }
+        },
+        "关联其他事项": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^其他事项:.+"
+          }
+        },
+        "关联地点": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^地点:.+"
+          }
+        },
+        "关联物品": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:物品|道具):.+"
+          }
+        },
+        "关联线索": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^线索:.+"
+          }
+        },
+        "关联角色": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^角色:.+"
+          }
+        },
+        "关联阵营": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^阵营:.+"
+          }
+        },
+        "首次章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "最近章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "涉及章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}(?:，\\d{4,})*$"
+        }
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(角色|事件|地点|线索|阵营|物品|其他事项|道具):.+"
+            }
+          }
+        ]
+      }
+    },
+    "detail_other": {
+      "type": "object",
+      "required": [
+        "提取理由"
+      ],
+      "properties": {
+        "提取理由": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "关联事件": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^事件:.+"
+          }
+        },
+        "关联其他事项": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^其他事项:.+"
+          }
+        },
+        "关联地点": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^地点:.+"
+          }
+        },
+        "关联物品": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?:物品|道具):.+"
+          }
+        },
+        "关联线索": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^线索:.+"
+          }
+        },
+        "关联角色": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^角色:.+"
+          }
+        },
+        "关联阵营": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^阵营:.+"
+          }
+        },
+        "首次章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "最近章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}$"
+        },
+        "涉及章节": {
+          "type": "string",
+          "pattern": "^\\d{4,}(?:，\\d{4,})*$"
+        }
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(角色|事件|地点|线索|阵营|物品|其他事项|道具):.+"
+            }
+          }
+        ]
       }
     }
   }

@@ -13,6 +13,7 @@ Delta 入库前校验器。
 from __future__ import annotations
 
 from element_identity import build_lookup_index, find_index, missing_target_message
+from generation_contract import new_element_quality_errors, misplaced_field_errors, required_element_fields, reference_quality_errors
 
 import argparse
 import json
@@ -226,7 +227,7 @@ def validate_types(collection_key: str, item: Dict[str, Any], label: str, errors
             errors.append(f"{label}.详情.涉及章节 必须为固定宽度、升序、去重的字符串")
         else:
             expected_time = chapter_time(first_involved_chapter(item))
-            if (not partial or "时间" in item) and item.get("时间") != expected_time:
+            if "时间" in item and item.get("时间") != expected_time:
                 errors.append(f"{label}.时间 必须等于最小涉及章节对应章节时间[{expected_time}]")
 
 
@@ -362,6 +363,7 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
     warnings: List[str] = []
     name_sets = merge_name_sets(current, delta)
     alias_maps = alias_to_name_maps(current)
+    current_indexes = {key: build_lookup_index(current.get(key) or []) for key in COLLECTION_KEYS}
     # Existing declarations remain authoritative when an explicit addition
     # repeats them; new names in the same patch may also be modified.
     additions = delta.get("新增元素")
@@ -391,19 +393,24 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                     errors.append(f"{label}.名称 必须是非空字符串")
                     continue
                 label = f"{section}.{DISPLAY[collection_key]}[{name.strip()}]"
+                try:
+                    is_new_record = find_index(*current_indexes[collection_key], name.strip()) < 0
+                except ValueError as exc:
+                    errors.append(f"{label} {exc}")
+                    continue
                 if name.strip() in seen_in_delta[collection_key]:
                     warnings.append(f"Delta内部{DISPLAY[collection_key]}名称重复[{name.strip()}]")
                 seen_in_delta[collection_key].add(name.strip())
 
-                if section == "新增元素":
-                    missing = sorted(set(DEFAULTS[collection_key].keys()) - set(item.keys()))
+                if section == "新增元素" and is_new_record:
+                    missing = sorted(set(required_element_fields(collection_key)) - set(item.keys()))
                     if missing:
                         if mode == "process":
                             process_issue(warnings, label, f"新增元素缺少标准字段: {', '.join(missing)}；normalize 将补齐默认值")
                         else:
                             errors.append(f"{label} 新增元素缺少标准字段: {', '.join(missing)}")
-                    if name.strip() in exact_name_sets(current).get(collection_key, set()):
-                        warnings.append(f"{label} 已存在于当前结构，建议放入修改元素")
+                elif section == "新增元素":
+                    warnings.append(f"{label} 已存在于当前结构，建议放入修改元素")
                 else:
                     names, aliases = indexes[collection_key]
                     try:
@@ -419,9 +426,17 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                     # 过程库；缺失时回填脚本或修复任务补齐，不得静默放行。
                     validate_evidence_detail(item, label, errors)
                 else:
-                    validate_types(collection_key, item, label, errors, warnings, partial=section == "修改元素")
+                    validate_types(collection_key, item, label, errors, warnings,
+                                   partial=section == "修改元素" or not is_new_record)
                     validate_evidence_detail(item, label, errors)
                     validate_refs(collection_key, item, label, name_sets, alias_maps, errors, warnings, mode)
+                # 新增交付完整档案，修改继承旧档案。只约束真正新建的记录，
+                # 历史过程库空值不会在后续章节被强制全书重生成。
+                if section == "新增元素" and is_new_record:
+                    errors.extend(new_element_quality_errors(collection_key, item,
+                        f"/{section}/{collection_key}/{idx}"))
+                errors.extend(f"{label}.{error}" for error in misplaced_field_errors(collection_key, item))
+                errors.extend(reference_quality_errors(item, f"/{section}/{collection_key}/{idx}"))
                 if mode == "governance" and collection_key == "事件集":
                     existing_event = existing_event_by_name_or_alias(current, name.strip())
                     if existing_event is not None:
@@ -510,6 +525,10 @@ def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], 
             missing = json.dumps(sorted(set(current_normalized) - proposed), ensure_ascii=False)
             extra = json.dumps(sorted(proposed - set(current_normalized)), ensure_ascii=False)
             errors.append(f"{label} 保留标签与降级标签必须完整覆盖治理前标签集，且不得凭空新增；遗漏={missing}；额外={extra}")
+        if collection_key == "事件集":
+            from story_schema_rules import is_event_compound_tag
+            if any(is_event_compound_tag(tag) for tag in demoted):
+                errors.append(f"{label} 事件四维复合标签必须保留在主标签集，禁止降级到详情.补充标签")
         for error in validate_controlled_tags(collection_key, retained):
             errors.append(f"{label}.{error.split('.', 1)[1]}")
     return errors

@@ -37,7 +37,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from chronology import chapter_time
 from engine_contract import contract_version
-from governance_contract import normalize_governance_patch, periodic_introduction_errors
+from governance_contract import normalize_governance_patch, periodic_introduction_errors, governance_quality_errors
+from generation_contract import chapter_quality_errors
 from merge_delta import save_json as save_atomic_json
 from story_schema_rules import COLLECTION_KEYS
 from validate_chapter_analysis import validate_chapter_analysis_file
@@ -2821,6 +2822,15 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
             if rc != 0:
                 write_repair_pack(project_dir, chapter, reason, [merge_log, normalize_report, compress_report, p["chapter_report"]])
                 return rc
+        # 校验模型补丁之外，还验证实际将发布的结果；避免中间归位、压缩或
+        # 合并把有内容的字段变为空值。只检查本批真正新建的档案。
+        quality_errors = chapter_quality_errors(load_json(p["before"]), load_json(candidate), load_json(p["delta"]))
+        if quality_errors:
+            report = load_json(p["chapter_report"], {})
+            report.update(passed=False, errors=report.get("errors", []) + quality_errors)
+            save_json(p["chapter_report"], report)
+            write_repair_pack(project_dir, chapter, "章节候选质量校验失败", [p["chapter_report"]])
+            return 1
         # A pending receipt prevents prepublication snapshots from looking complete.
         # Hashes also allow recovery after replace but before the progress update.
         # contract 记录"本回执由哪个版本的校验语义签发"，供跨版本门禁判定。
@@ -3747,6 +3757,14 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         rc = run_cmd(normalize_cmd)
         if rc != 0:
             return failed("治理结构规范化失败，原结构未修改", project_dir / "质量治理" / "规范化" / f"normalize_governance_{ts}.txt")
+        # 治理只有在已有功能性字段不退化时才可发布；历史缺口不扩大为
+        # 全书重算，合法身份合并、重命名和引用重定向由门禁显式对齐。
+        previous, proposed, proposal = load_json(before), load_json(candidate), load_json(patch)
+        quality_errors = governance_quality_errors(previous, proposed, proposal)
+        quality_errors.extend(chapter_quality_errors(previous, proposed, proposal))
+        if quality_errors:
+            report_schema.write_text("\n".join(quality_errors), encoding="utf-8")
+            return failed("治理候选质量退化，原结构未修改", report_schema)
         rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--mode", "governance", str(candidate)], report_schema)
         if rc != 0:
             return failed("治理后结构校验失败，原结构未修改", report_schema)

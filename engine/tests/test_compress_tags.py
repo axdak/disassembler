@@ -217,18 +217,21 @@ def test_compress_structure_keeps_skeleton():
 
 def test_compressed_delta_passes_validation(tmp_path):
     """端到端：压缩后用 validate_delta 跑一次，原本会失败的标签不再报错。"""
-    from validate_delta import validate_delta
+    from validate_delta import delta_errors, validate_delta
 
     story = {
         "介绍": {"标题": "测试", "描述": "测试"},
         "角色集": [], "事件集": [], "地点集": [], "线索集": [],
         "阵营集": [], "物品集": [], "其他事项集": [],
     }
+    # 完整事件质量是独立前置条件，本例只允许受控标签压缩改变校验结果。
+    event = _event("退婚事件", ["婚约尊严+冲突爆发+愤怒+人际冲突", "剧情母题:武力对峙", "反转"])
+    event.update(分组="退婚冲突与尊严反击", 介绍="婚约解除引发双方对峙，角色展开尊严反击。")
     delta = {
         "章节": "第001章",
         "新增元素": {
             "角色集": [],
-            "事件集": [_event("退婚事件", ["剧情母题:武力对峙", "反转"])],
+            "事件集": [event],
             "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": [],
         },
         "修改元素": {
@@ -243,6 +246,7 @@ def test_compressed_delta_passes_validation(tmp_path):
     delta_path.write_text(json.dumps(delta, ensure_ascii=False), encoding="utf-8")
 
     # 压缩前会因「未知受控标签」失败
+    assert any("未知受控标签[剧情母题:武力对峙]" in error for error in delta_errors(story, delta)[0])
     assert validate_delta(str(story_path), str(delta_path), mode="process") is False
 
     # 压缩后通过

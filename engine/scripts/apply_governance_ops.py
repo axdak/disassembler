@@ -7,7 +7,7 @@ from element_identity import build_lookup_index, find_index
 from chronology import parse_chapter_numbers, format_chapter
 from story_schema_rules import (
     COLLECTION_KEYS, TYPE_TO_COLLECTION, STRUCTURAL_REF_FIELDS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
-    dump_supplementary_tags, is_cumulative_detail_field, merge_supplementary_tag_values,
+    dump_supplementary_tags, is_cumulative_detail_field, merge_supplementary_tag_values, is_event_compound_tag,
 )
 
 CUMULATIVE_DETAIL_ARRAY_FIELDS=DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
@@ -186,6 +186,16 @@ def merge_items(target, source):
             if target.get(k) in (None,'',[],{}) and v not in (None,'',[],{}): target[k]=v
 
 def apply_ops(data, patch):
+    # Reject protected-tag demotions before any other operation can run. This
+    # execution-layer guard also covers callers that bypass Delta validation;
+    # four-dimensional formal event semantics must not become mere details.
+    proposed_ops = patch.get('治理操作', {}) if isinstance(patch, dict) else {}
+    if isinstance(proposed_ops, dict) and isinstance(proposed_ops.get('治理标签', []), list):
+        for op in proposed_ops.get('治理标签', []):
+            if (isinstance(op, dict) and op.get('类型') == '事件'
+                    and isinstance(op.get('降级标签'), list)
+                    and any(is_event_compound_tag(tag) for tag in op['降级标签'])):
+                raise ValueError(f"治理标签[事件:{op.get('名称')}]禁止降级有效四维复合标签；应保留在标签集")
     original = copy.deepcopy(data)  # Any invalid operation aborts the entire patch.
     data = copy.deepcopy(data)
     logs=[]; warns=[]; ops=patch.get('治理操作',{}) if isinstance(patch,dict) else {}

@@ -9,8 +9,9 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-from story_schema_rules import COLLECTION_KEYS
+from story_schema_rules import COLLECTION_KEYS, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION
 from registered_types import is_unregistered_name
+from generation_contract import field_type, quality_marker
 
 PATCH_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -19,7 +20,9 @@ PATCH_SCHEMA = {
         "base_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "changes": {"type": "array", "items": {
             "type": "object", "additionalProperties": False, "required": ["path", "value"],
-            "properties": {"path": {"type": "string"}, "value": {"type": "string", "minLength": 1}}}},
+            "properties": {"path": {"type": "string"}, "value": {
+                "type": ["string", "array", "integer", "boolean"],
+                "items": {"type": "string"}}}}},
         "moves": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
             "required": ["path", "target_collection", "evidence"],
@@ -29,6 +32,55 @@ PATCH_SCHEMA = {
                            "evidence": {"type": "string", "minLength": 1}}}},
     },
 }
+
+REFERENCE_REPAIR_ARCHIVE = "引用修复原文"
+
+
+def _reference_values(value):
+    """只为证据比较解开关联值的一层数组编码，不解释普通档案。"""
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            value = decoded if isinstance(decoded, list) else [value]
+        except ValueError:
+            value = [value]
+    return value if isinstance(value, list) else []
+
+
+def _correct_reference_values(field, value):
+    target = TYPE_TO_COLLECTION[field.removeprefix("关联")]
+    return [entry for entry in _reference_values(value) if isinstance(entry, str)
+            and (match := DETAIL_REF_RE.fullmatch(entry.strip())) and TYPE_TO_COLLECTION[match[1]] == target]
+
+
+def archived_reference_preserved(before: dict, after: dict, field: str) -> bool:
+    """仅接受同一详情内逐值归档的错误引用，不允许档案别处同文替代证据。"""
+    if field == REFERENCE_REPAIR_ARCHIVE:
+        try:
+            old_entries, new_entries = json.loads(before[field]), json.loads(after.get(field, "[]"))
+            return (isinstance(old_entries, list) and isinstance(new_entries, list)
+                    and all(isinstance(entry, str) and entry in new_entries for entry in old_entries))
+        except (ValueError, TypeError):
+            return False
+    if field not in DETAIL_REF_ARRAY_KEYS or field not in after or not isinstance(after[field], list):
+        return False
+    if len(_correct_reference_values(field, after[field])) != len(after[field]):
+        return False
+    if any(value not in after[field] for value in _correct_reference_values(field, before[field])):
+        return False
+    try:
+        entries = json.loads(after.get(REFERENCE_REPAIR_ARCHIVE, "[]"))
+        if not isinstance(entries, list):
+            return False
+        for entry in entries:
+            try:
+                if isinstance(entry, str) and json.loads(entry) == {"字段": field, "原值": before[field]}:
+                    return True
+            except ValueError:
+                continue  # 原有非JSON证据也保留，不影响后续合法条目的逐值匹配。
+        return False
+    except (ValueError, TypeError):
+        return False
 
 
 def patch_shape_errors(value) -> list[str]:
@@ -40,9 +92,12 @@ def patch_shape_errors(value) -> list[str]:
     if not isinstance(changes, list) or not isinstance(moves, list) or not (changes or moves):
         return ["局部修复 changes/moves 必须是数组且至少有一项修改"]
     if any(not isinstance(item, dict) or set(item) != {"path", "value"}
-           or not isinstance(item["path"], str) or not isinstance(item["value"], str)
-           or not item["value"].strip() for item in changes):
-        return ["局部修复每项必须提供 path 和非空字符串 value"]
+           or not isinstance(item["path"], str)
+           or not (isinstance(item["value"], str)
+                   or isinstance(item["value"], (int, bool))
+                   or isinstance(item["value"], list) and all(isinstance(value, str) for value in item["value"]))
+           for item in changes):
+        return ["局部修复每项必须提供 path 和声明类型的字符串、字符串数组、整数或布尔值"]
     if any(not isinstance(item, dict) or not {"path", "target_collection", "evidence"} <= set(item)
            or set(item) - {"path", "target_collection", "target_section", "evidence"}
            or not isinstance(item["path"], str) or item["target_collection"] not in COLLECTION_KEYS
@@ -76,6 +131,24 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
                     continue
                 prefix = f"/{section}/{collection}/{index}"
                 detail = item.get("详情", {})
+                # 仅采纳校验器实际标记的字段；不能凭一个泛化错误开放整条档案写入。
+                from story_schema_rules import DEFAULTS
+                for field, default in DEFAULTS[collection].items():
+                    path = prefix + "/" + field
+                    if field in {"名称", "详情", "时间"} or quality_marker(path) not in feedback:
+                        continue
+                    scope[path] = {"name": item.get("名称"), "kind": "quality", "value_type": field_type(default),
+                                   "collection": collection, "field": field}
+                for field in ("涉及章节", "首次章节", "最近章节"):
+                    path = prefix + "/详情/" + field
+                    if quality_marker(path) in feedback:
+                        scope[path] = {"name": item.get("名称"), "kind": "quality", "value_type": "string",
+                                       "collection": collection, "field": field}
+                for field in DETAIL_REF_ARRAY_KEYS:
+                    path = prefix + "/详情/" + field
+                    if quality_marker(path) in feedback:
+                        scope[path] = {"name": item.get("名称"), "kind": "quality", "value_type": "array",
+                                       "collection": collection, "field": field, "reference": True}
                 if isinstance(detail, dict) and (detail.get("提取理由") is None or
                         isinstance(detail.get("提取理由"), str) and not detail["提取理由"].strip()):
                     scope[prefix + "/详情/提取理由"] = {"name": item.get("名称"), "kind": "evidence"}
@@ -141,6 +214,18 @@ def apply_scoped_patch(reference: Path, candidate: Path, patch: dict, scope: dic
         rule = scope[change["path"]]
         if rule["kind"] == "move":
             raise ValueError("迁移不能使用字符串替换")
+        value = change["value"]
+        if rule["kind"] == "quality":
+            if field_type(value) != rule["value_type"]:
+                raise ValueError("局部质量字段类型不符合本次声明契约")
+            if (rule["field"] == "介绍" or rule["field"] == "分组" and rule["collection"] == "事件集") and not value.strip():
+                raise ValueError("事件分组和档案介绍必须依据原文补齐，不能提交空值")
+            if rule["field"] == "标签集" and rule["collection"] == "事件集":
+                from story_schema_rules import is_event_compound_tag
+                if not any(is_event_compound_tag(tag) for tag in value):
+                    raise ValueError("局部事件标签必须包含四维复合主标签")
+        elif not isinstance(value, str) or not value.strip():
+            raise ValueError("身份和提取理由修复必须是非空字符串")
         if "allowed_values" in rule and change["value"] not in rule["allowed_values"]:
             raise ValueError("修改名称必须复用已有正式名称")
         parts = change["path"].strip("/").split("/")
@@ -150,7 +235,27 @@ def apply_scoped_patch(reference: Path, candidate: Path, patch: dict, scope: dic
                 node = node[int(part)]
             else:
                 node = node.setdefault(part, {})
-        node[parts[-1]] = change["value"]
+        previous = node.get(parts[-1]) if isinstance(node, dict) else node[int(parts[-1])]
+        if rule.get("reference"):
+            if (len(_correct_reference_values(rule["field"], value)) != len(value)
+                    or any(entry not in value for entry in _correct_reference_values(rule["field"], previous))):
+                raise ValueError("关联修复必须匹配引用类型且保留已有正确类型引用")
+            # 宿主固定生成逐字段原值档案，模型不能用自由文字假称已保全。
+            archived = node.get(REFERENCE_REPAIR_ARCHIVE, "[]")
+            try:
+                entries = json.loads(archived)
+                if not isinstance(entries, list) or any(not isinstance(entry, str) for entry in entries):
+                    entries = [archived]
+            except (ValueError, TypeError):
+                entries = [str(archived)]
+            entry = json.dumps({"字段": rule["field"], "原值": previous}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if entry not in entries:
+                entries.append(entry)
+            node[REFERENCE_REPAIR_ARCHIVE] = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+        elif rule["kind"] == "quality" and isinstance(previous, list) and isinstance(value, list):
+            if any(entry not in value for entry in previous):
+                raise ValueError("局部质量补齐不得删除已有列表内容")
+        node[parts[-1]] = value
     # 先完成原索引上的字段修复，再按对象身份搬移，避免多次pop导致索引漂移。
     selected = []
     for move in patch.get("moves", []):

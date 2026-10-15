@@ -135,6 +135,9 @@ def test_synopsis_change_invalidates_audit_prompt_cache(tmp_path, monkeypatch):
     scripts.mkdir()
     dependency = scripts / "synopsis_contract.py"
     dependency.write_text("old", encoding="utf-8")
+    # 该夹具模拟提示词的全部文件依赖，只有简介契约在本例发生变化。
+    for filename in ("generation_contract.py", "story_schema_rules.py"):
+        (scripts / filename).write_text("unchanged contract", encoding="utf-8")
     monkeypatch.setattr(prompt_loader, "PROMPTS_DIR", prompts)
     monkeypatch.setattr(prompt_loader, "__file__", str(scripts / "prompt_loader.py"))
     before = prompt_loader.prompt_fingerprint("流水线/周期审计.j2")

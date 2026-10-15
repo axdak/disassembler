@@ -56,15 +56,17 @@ def test_invalid_detail_keeps_original_analysis():
 
 
 def test_program_relocation_keeps_process_and_governance_boundary():
-    """Relocating a field must not invent evidence/trace data or relax governance."""
+    """字段归位不能补造新增来源；过程和治理都必须阻止缺来源档案入库。"""
     from test_validate_delta import base_story, bad_delta_missing_trace_for_new_element
     from validate_delta import validate_elements
     delta = bad_delta_missing_trace_for_new_element()
     item = delta["新增元素"]["角色集"][0]
     item["本章状态"] = "前往山门"
     coerce_delta_in_place(delta)
-    assert validate_elements(base_story(), delta, "process")[0] == []
-    assert validate_elements(base_story(), delta, "governance")[0]
+    assert item["详情"]["本章状态"] == "前往山门"
+    assert "首次章节" not in item["详情"]
+    for mode in ("process", "governance"):
+        assert any("首次章节" in error for error in validate_elements(base_story(), delta, mode)[0])
     item["详情"].pop("提取理由")
     assert validate_elements(base_story(), delta, "process")[0]
     assert validate_elements(base_story(), delta, "governance")[0]
@@ -236,7 +238,7 @@ def test_标准字段_匹配类型前缀_自动剥离():
     assert any("标准字段前缀" in line for line in report)
 
 
-def test_标准字段_不匹配类型前缀_移入待确认引用():
+def test_标准字段_不匹配类型前缀_保留原字段供校验():
     delta = _empty_delta()
     delta["新增元素"]["事件集"].append(
         {
@@ -251,12 +253,10 @@ def test_标准字段_不匹配类型前缀_移入待确认引用():
     report = coerce_delta_in_place(delta)
 
     event = delta["新增元素"]["事件集"][0]
-    assert event["参与成员"] == ["约翰娜·奥尔森多"]
-    assert event["目标事件"] == ["后续"]
-    pending = json.loads(event["详情"]["待确认引用"])
-    assert "地点:城堡" in pending
-    assert "角色:误写成角色的事件" in pending
-    assert any("移入详情.待确认引用" in line for line in report)
+    assert event["参与成员"] == ["约翰娜·奥尔森多", "地点:城堡"]
+    assert event["目标事件"] == ["后续", "角色:误写成角色的事件"]
+    assert "待确认引用" not in event["详情"]
+    assert any("保留原值待修复" in line for line in report)
 
 
 def test_重量级_字符串数字_转int():
@@ -553,8 +553,8 @@ def test_详情内整组标准字段被搬回顶层():
     assert not any("详情[重量级]" in line for line in validate_elements(base_story(), delta, "process")[0])
 
 
-def test_详情内标准字段为空值不搬迁():
-    """空字符串/空数组不携带信息，搬上去只会掩盖"缺少标准字段"，交给 normalize。"""
+def test_详情内标准字段为空值按声明类型归位():
+    """明确空值也保留在正确位置；事件必需内容是否为空由质量校验负责。"""
     delta = _empty_delta()
     delta["新增元素"]["事件集"].append(
         {"名称": "X", "时间": "0001-01-01T00:00:00",
@@ -562,12 +562,12 @@ def test_详情内标准字段为空值不搬迁():
     )
     report = coerce_delta_in_place(delta)
     event = delta["新增元素"]["事件集"][0]
-    assert "发生地点" not in event and "参与成员" not in event and "分组" not in event
-    assert not any("迁回顶层" in line for line in report)
+    assert event["发生地点"] == "" and event["参与成员"] == [] and event["分组"] == "   "
+    assert any("迁回顶层" in line for line in report)
 
 
-def test_详情内标准字段类型不符则不搬迁():
-    """标签集顶层契约是字符串数组；详情里是字符串时不搬，交给校验器报错。"""
+def test_详情内标准字段JSON数组编码安全归位():
+    """标签集声明为字符串数组；合法 JSON 数组编码可无损解开并归位。"""
     delta = _empty_delta()
     delta["新增元素"]["事件集"].append(
         {"名称": "X", "时间": "0001-01-01T00:00:00",
@@ -575,8 +575,8 @@ def test_详情内标准字段类型不符则不搬迁():
     )
     coerce_delta_in_place(delta)
     event = delta["新增元素"]["事件集"][0]
-    assert "标签集" not in event
-    assert event["详情"]["标签集"] == '["宝物交易","冲突升级"]'
+    assert event["标签集"] == ["宝物交易", "冲突升级"]
+    assert "标签集" not in event["详情"]
 
 
 def test_布尔值不会被当成重量级搬迁():
@@ -728,11 +728,16 @@ def test_唯一类别目标完整迁移():
 def test_同章新增后的修改保留并实际合入(target):
     """新增和修改承载不同信息，正式名及新增别名都不能被当成无效修改丢弃。"""
     from merge_delta import merge_collection
+    from story_schema_rules import DEFAULTS
     from validate_delta import validate_elements
 
     delta = _mod_delta(target)
-    delta["新增元素"]["角色集"] = [{"名称": "萧玉", "别名": ["萧玉的别名"],
-                                    "详情": {"提取理由": "本章首次出场", "原始信息": "回到家族"}}]
+    # 新档案满足完整交付契约，让本例只检验同章新增与修改的内容合并。
+    new_role = deepcopy(DEFAULTS["角色集"])
+    new_role.update(名称="萧玉", 别名=["萧玉的别名"], 介绍="萧玉回到家族，并与萧炎发生争执。",
+                    详情={"提取理由": "本章首次出场", "原始信息": "回到家族",
+                        "首次章节": "0001", "最近章节": "0001"})
+    delta["新增元素"]["角色集"] = [new_role]
     delta["修改元素"]["角色集"][0]["详情"]["补充信息"] = "与萧炎发生争执"
     coerce_delta_in_place(delta, {"角色集": []})
     assert validate_elements({"角色集": []}, delta, "process")[0] == []

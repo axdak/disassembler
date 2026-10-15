@@ -21,6 +21,7 @@ from typing import Any, Dict, List
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from generation_contract import generation_contract_text
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
@@ -43,6 +44,8 @@ _JINJA_ENV = Environment(
     undefined=StrictUndefined,
     keep_trailing_newline=True,
 )
+# 两个阶段引用同一份生成说明，保护字段不再靠复制提示词维持一致。
+_JINJA_ENV.globals["generation_contract_text"] = generation_contract_text
 
 # 匹配单独成行的 ``---``（frontmatter 开/闭界符，允许行尾空白）。
 _FM_DELIM = re.compile(r"^---[ \t]*$", re.MULTILINE)
@@ -121,6 +124,10 @@ def list_prompts() -> List[Dict[str, Any]]:
 def prompt_fingerprint(name: str) -> str:
     """模板和其生成参数共同使任务包失效，不影响提交回执的校验契约。"""
     digest = hashlib.sha256((PROMPTS_DIR / name).read_bytes())
+    if name in {"流水线/单章增量提取.j2", "流水线/周期审计.j2"}:
+        # 只更新后续任务包，不据提示词变化重新生成已提交历史。
+        for module in ("generation_contract.py", "story_schema_rules.py"):
+            digest.update(Path(__file__).with_name(module).read_bytes())
     if name == "流水线/周期审计.j2":
         # 简介字数/分节是生成约束；改变后必须重建任务包，但不能重生成历史章节。
         digest.update(Path(__file__).with_name("synopsis_contract.py").read_bytes())

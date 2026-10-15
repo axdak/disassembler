@@ -153,6 +153,12 @@ def make_empty_structure() -> Dict[str, Any]:
     return {"介绍": {"标题": "", "描述": ""}, "角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
 
 
+def is_event_compound_tag(value: Any) -> bool:
+    """四个非空维度组成的事件主标签；生成、治理和校验共用定义。"""
+    return (isinstance(value, str) and not any(mark in value for mark in (":", "："))
+            and len(value.split("+")) == 4 and all(part.strip() for part in value.split("+")))
+
+
 def validate_controlled_tags(collection_key: str, tags: Any) -> List[str]:
     """仅校验本集合允许的带前缀标签；无前缀普通标签保持兼容。"""
     if not isinstance(tags, list):
@@ -389,6 +395,16 @@ def validate_detail_schema(
             except ValueError as exc:
                 errors.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} {exc}")
             continue
+        if key in DETAIL_REF_ARRAY_KEYS:
+            # 明确关联字段统一数组，不能把编码数组当叙述字符串绕过引用校验。
+            if not isinstance(value, list):
+                errors.append(f"{label}.详情.{key} 必须为真正的引用数组，不得使用数组字符串或单个字符串；先执行限定字段规范化")
+                continue
+            expected_collection = TYPE_TO_COLLECTION.get(key.removeprefix("关联"))
+            for elem in value:
+                match = DETAIL_REF_RE.match(elem.strip()) if isinstance(elem, str) else None
+                if match and TYPE_TO_COLLECTION.get(match.group(1)) != expected_collection:
+                    errors.append(f"{label}.详情.{key} 引用类型不匹配，必须引用{key.removeprefix('关联')}")
         if isinstance(value, str):
             m = DETAIL_REF_RE.match(value.strip())
             if m:

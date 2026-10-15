@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Tuple
 from story_schema_rules import (
     COLLECTION_KEYS, TOP_LEVEL_KEYS, DEFAULTS, VALID_FIELDS, TRACEABLE_COLLECTION_KEYS,
     TYPE_TO_COLLECTION, COLLECTION_TO_TYPE, DETAIL_REF_RE, DETAIL_KEY_RE,
+    DETAIL_REF_ARRAY_KEYS, STRUCTURAL_REF_FIELDS,
     DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS, is_cumulative_detail_field,
     make_empty_structure, exact_name_sets, alias_to_name_maps,
     SUPPLEMENTARY_TAGS_DETAIL_KEY, canonicalize_supplementary_tags,
@@ -95,6 +96,90 @@ def stringify(value: Any) -> str:
     if isinstance(value, (int, float, bool)):
         return str(value)
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def decode_json_array(value: Any) -> Any:
+    """仅解开一层 JSON 数组编码；无效文本和非数组值逐字保留。"""
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (ValueError, TypeError):
+            return value
+        if isinstance(decoded, list):
+            return decoded
+    return value
+
+
+def is_detail_ref_array_field(key: Any) -> bool:
+    """明确的关联字段才采用引用数组契约，普通叙述不猜测类型。"""
+    return isinstance(key, str) and (key in DETAIL_REF_ARRAY_KEYS or key.startswith("关联"))
+
+
+def canonicalize_detail_ref_array(value: Any) -> Any:
+    """关联数组可解码或由单个类型引用包装；错误项完整留待校验。"""
+    decoded = decode_json_array(value)
+    if isinstance(decoded, str) and is_typed_ref(decoded):
+        return [decoded]
+    return decoded
+
+
+def strip_matching_ref_prefix(value: Any, target_collection: str) -> Any:
+    """标准引用使用裸正式名；错误类型前缀保留在原字段供校验拦截。"""
+    if isinstance(value, str):
+        match = DETAIL_REF_RE.match(value.strip())
+        if match and TYPE_TO_COLLECTION.get(match.group(1)) == target_collection:
+            return match.group(2).strip()
+    return value
+
+
+def _standard_field_comparison(collection: str, field: str, value: Any) -> Any:
+    """比较只忽略可逆数组编码和正确的类型前缀，不猜测业务等价关系。"""
+    if isinstance(DEFAULTS[collection].get(field), list):
+        value = decode_json_array(value)
+    for ref_field, target, kind in STRUCTURAL_REF_FIELDS.get(collection, []):
+        if field == ref_field and kind != "relation_list":
+            if kind == "list" and isinstance(value, list):
+                return [strip_matching_ref_prefix(entry, target) for entry in value]
+            return strip_matching_ref_prefix(value, target)
+    return value
+
+
+def restore_standard_detail_fields(item: Dict[str, Any], collection: str, logs: List[str]) -> None:
+    """按真实类型归位同名标准字段（含明确空值）；有差异时保留双方证据。"""
+    detail = item.get("详情")
+    if not isinstance(detail, dict):
+        return
+    for field in list(detail):
+        if field not in VALID_FIELDS[collection] or field in {"名称", "详情"}:
+            continue
+        value = detail[field]
+        default = DEFAULTS[collection].get(field)
+        if isinstance(default, list):
+            value = decode_json_array(value)
+        # 使用默认值的真实类型作为形状契约；bool 不能冒充 int。
+        fits = (
+            (isinstance(default, bool) and isinstance(value, bool))
+            or (type(default) is int and type(value) is int)
+            or (isinstance(default, str) and isinstance(value, str))
+            or (isinstance(default, list) and isinstance(value, list)
+                and all(isinstance(entry, str) for entry in value))
+        )
+        if not fits:
+            continue
+        top = item.get(field)
+        if isinstance(default, list):
+            top = decode_json_array(top)
+        empty = top is None or top == [] or top == {} or (isinstance(top, str) and not top.strip())
+        label = f"{collection}[{item.get('名称', '')}].{field}"
+        if field not in item or empty:
+            item[field] = value
+            detail.pop(field)
+            logs.append(f"{label} 从详情迁回顶层（按声明契约保全原值）")
+        elif _standard_field_comparison(collection, field, top) == _standard_field_comparison(collection, field, value):
+            detail.pop(field)
+            logs.append(f"{label} 已归位，移除详情内等值副本")
+        else:
+            logs.append(f"{label} 与详情同名标准字段冲突，保留两处原值待修复")
 
 
 def sanitize_key(key: Any, fallback_prefix: str = "迁移字段") -> str:
@@ -288,6 +373,11 @@ def normalize_refs(item: Dict[str, Any], collection_key: str, name_sets: Dict[st
         value = item.get(field, "")
         if not value:
             continue
+        match = DETAIL_REF_RE.match(value.strip()) if isinstance(value, str) else None
+        if match and TYPE_TO_COLLECTION.get(match.group(1)) != target_collection:
+            # 类型错配是硬错误；即使启用不存在引用隔离，也不能清空错误字段。
+            continue
+        value = strip_matching_ref_prefix(value, target_collection)
         resolved = resolve_name(stringify(value), target_collection, name_sets, alias_maps, logs)
         if resolved not in name_sets.get(target_collection, set()) and quarantine_invalid_refs:
             quarantine_ref(item, field, resolved, target_collection, logs)
@@ -297,9 +387,20 @@ def normalize_refs(item: Dict[str, Any], collection_key: str, name_sets: Dict[st
 
     # 列表引用
     for field, target_collection in REF_LIST_FIELDS.get(collection_key, {}).items():
-        values = coerce_string_list(item.get(field, []))
+        values = item.get(field, [])
+        if not isinstance(values, list):
+            values = coerce_string_list(values)
         keep = []
         for value in values:
+            if not isinstance(value, str):
+                # 错误数组项不可转字符串或丢弃，否则类型校验失去原始证据。
+                keep.append(value)
+                continue
+            match = DETAIL_REF_RE.match(value.strip())
+            if match and TYPE_TO_COLLECTION.get(match.group(1)) != target_collection:
+                keep.append(value)
+                continue
+            value = strip_matching_ref_prefix(value, target_collection)
             resolved = resolve_name(value, target_collection, name_sets, alias_maps, logs)
             if resolved not in name_sets.get(target_collection, set()) and quarantine_invalid_refs:
                 quarantine_ref(item, field, resolved, target_collection, logs)
@@ -334,6 +435,9 @@ def normalize_refs(item: Dict[str, Any], collection_key: str, name_sets: Dict[st
 def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], alias_maps: Dict[str, Dict[str, str]], logs: List[str], quarantine_invalid_refs: bool) -> None:
     # 详情的引用保持 类型:名称；数组项开启 quarantine 时，不存在引用下沉到待确认引用。
     for key, value in list(detail.items()):
+        if is_detail_ref_array_field(key):
+            value = canonicalize_detail_ref_array(value)
+            detail[key] = value
         if isinstance(value, str):
             m = DETAIL_REF_RE.match(value.strip())
             if m:
@@ -345,14 +449,22 @@ def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], ali
         elif isinstance(value, list):
             new = []
             invalid = []
+            expected_collection = (TYPE_TO_COLLECTION.get(key.removeprefix("关联"))
+                                   if key in DETAIL_REF_ARRAY_KEYS else None)
             for elem in value:
                 if not isinstance(elem, str):
+                    new.append(elem)
                     continue
                 m = DETAIL_REF_RE.match(elem.strip())
                 if not m:
+                    new.append(elem)
                     continue
                 typ, ref = m.group(1), m.group(2).strip()
                 target = TYPE_TO_COLLECTION[typ]
+                if expected_collection and target != expected_collection:
+                    # 错类型是字段契约错误，不是前向引用；保留原字段才能继续拦截。
+                    new.append(elem)
+                    continue
                 resolved = resolve_name(ref, target, name_sets, alias_maps, logs)
                 display_type = "物品" if typ == "道具" else typ
                 new_elem = f"{display_type}:{resolved}"
@@ -368,7 +480,7 @@ def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], ali
             elif invalid:
                 detail[key] = []
             else:
-                detail.pop(key, None)
+                detail[key] = []
 
 
 def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, Any]:
@@ -377,6 +489,10 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
         logs.append(f"{collection_key}中存在非对象元素，已转为默认元素并把原值写入详情.原始值")
         defaults["详情"]["原始值"] = stringify(raw)
         return defaults
+
+    # 先处理历史错层字段，再补默认值；否则默认空数组会掩盖原始质量内容。
+    raw = copy.deepcopy(raw)
+    restore_standard_detail_fields(raw, collection_key, logs)
 
     item = copy.deepcopy(defaults)
     detail = {}
@@ -399,6 +515,11 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
                     logs.append(f"{raw.get('名称','?')}.详情.{safe_key} 已按原内容规范化")
                 if not normalized_value:
                     continue
+            elif is_detail_ref_array_field(safe_key):
+                normalized_value = canonicalize_detail_ref_array(v)
+            elif safe_key in VALID_FIELDS[collection_key]:
+                # 同名标准字段仍在详情表示冲突或类型错误，不能串化掩盖原值。
+                normalized_value = copy.deepcopy(v)
             else:
                 normalized_value = normalize_detail_value(v, logs)
             if safe_key in detail:
@@ -416,7 +537,8 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
             logs.append(f"{raw.get('名称','?')} 的规范外字段[{field}]已迁入详情")
             continue
         if field in LIST_FIELDS:
-            item[field] = coerce_string_list(value)
+            decoded = decode_json_array(value)
+            item[field] = copy.deepcopy(decoded) if isinstance(decoded, list) else coerce_string_list(decoded)
         elif field in STRING_FIELDS:
             item[field] = stringify(value).strip()
         elif field == "是否主角":
