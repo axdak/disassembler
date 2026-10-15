@@ -12,6 +12,7 @@ import type {
   ArtifactStatusResponse,
   AppendPlan,
   RecoverSnapshot,
+  ConcurrencyPolicy,
 } from './types'
 
 declare global {
@@ -42,6 +43,7 @@ declare global {
       logs(id: number): Promise<LogEntry[]>
       log(id: number, name: string): Promise<{ content: string }>
       getSettings(): Promise<Record<string, unknown>>
+      getConcurrencyPolicy(): Promise<ConcurrencyPolicy>
       updateSettings(s: Record<string, unknown>): Promise<Record<string, unknown>>
       queueAdd(id: number): Promise<{ position: number }>
       queueList(): Promise<QueueItem[]>

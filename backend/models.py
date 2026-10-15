@@ -11,6 +11,9 @@ DEFAULT_FULLBOOK_TASKS = [
     "plotlines", "outline", "detailed_outline", "narrative_structure", "report",
 ]
 
+# Bound thread-pool allocation for desktop tasks; this is not a provider quota.
+MAX_TASK_CONCURRENCY = 32
+
 TASK_STATUSES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
 TaskType = Literal[
     "analysis",
@@ -65,8 +68,8 @@ class RunConfig(BaseModel):
     max_attempts: int = Field(default=10, gt=0)
     stagnant_limit: int = Field(default=3, gt=0)
     max_repair_rounds: int = Field(default=3, ge=0)
-    analysis_concurrency: int = Field(default=1, gt=0)
-    per_chapter_concurrency: int = Field(default=2, gt=0)  # 分章任务并行度；1=逐章串行
+    analysis_concurrency: int = Field(default=1, gt=0, le=MAX_TASK_CONCURRENCY, strict=True)
+    per_chapter_concurrency: int = Field(default=2, gt=0, le=MAX_TASK_CONCURRENCY, strict=True)  # 1=逐章串行
     chapter_mode: Literal["two_phase", "interleaved"] = "two_phase"
     end_chapter_seq: int = Field(default=0, ge=0)  # 0=全书；正数为本次运行包含的最后章节序号
     fullbook_tasks: list[str] = Field(default_factory=lambda: list(DEFAULT_FULLBOOK_TASKS))

@@ -150,6 +150,8 @@ function mountFakeApi(opts: { appendPreview?: AppendPlan } = {}): FakeApi {
     logs: async () => [{ name: 'worker.log', size: 0, mtime: 0, task_type: 'analysis', seq: 0, stage: '章节分析' }],
     log: async () => { calls.log++; return { content: 'worker 日志内容' } },
     getSettings: async () => ({ worker_provider: 'agy' }),
+    getConcurrencyPolicy: async () => ({ deployment_limit: null, limit_source: 'task_config',
+      warning: '', scope: 'backend_process', max_task_concurrency: 32 }),
     updateSettings: async () => ({}),
     queueAdd: async () => ({ position: 1 }),
     queueList: async () => [],
@@ -209,6 +211,25 @@ describe('workbench seven-tab UI', () => {
     for (const label of ['概览', '章节', '分析工作台', '质量治理', '导出', '日志', '维护']) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
     }
+  })
+
+  it('settings loads saved values and current backend concurrency policy separately', async () => {
+    fake.api.getSettings = async () => ({ analysis_concurrency: 5, per_chapter_concurrency: 10 })
+    fake.api.getConcurrencyPolicy = async () => ({ deployment_limit: 2, limit_source: 'environment',
+      warning: '', scope: 'backend_process', max_task_concurrency: 32 })
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    await screen.findByText(/本进程部署总上限：2/)
+    expect(screen.getByLabelText('分析并发量：')).toHaveValue(5)
+    const row = screen.getByRole('row', { name: /章节分析/ })
+    expect(within(row).getByText('2')).toBeInTheDocument()
+  })
+
+  it('settings retains saved values when runtime policy is unavailable', async () => {
+    fake.api.getSettings = async () => ({ analysis_concurrency: 5 })
+    fake.api.getConcurrencyPolicy = async () => { throw new Error('backend unavailable') }
+    fireEvent.click(screen.getByRole('button', { name: '设置' }))
+    await waitFor(() => expect(screen.getByLabelText('分析并发量：')).toHaveValue(5))
+    expect(screen.getByText(/尚未读取部署上限/)).toBeInTheDocument()
   })
 
   it('switches between tabs', async () => {

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ModelLimitsSettings, modelLimitsState } from './components/ModelLimitsSettings'
+import { ConcurrencySettings, concurrencyError } from './components/ConcurrencySettings'
+import type { ConcurrencyPolicy } from './types'
 import type { Project, StageEvent, Status, Chapter, LogEntry, QueueItem, TaskType, RecoverSnapshot } from './types'
 import { eventRefresh } from './hooks/eventRefresh'
 import { useProjectTasks } from './hooks/useProjectTasks'
@@ -37,6 +39,7 @@ export function App() {
   const [snapshots, setSnapshots] = useState<RecoverSnapshot[]>([])
   const [queue, setQueue] = useState<QueueItem[]>([])
   const [settings, setSettings] = useState<Record<string, unknown>>({})
+  const [concurrencyPolicy, setConcurrencyPolicy] = useState<ConcurrencyPolicy | null>(null)
   const [err, setErr] = useState('')
   const [ok, setOk] = useState('')
   const [drawer, setDrawer] = useState<ArtifactDrawerState>({ open: false, kind: 'artifact', path: '', content: '' })
@@ -51,7 +54,12 @@ export function App() {
     try { setQueue((await window.api.queueList()) as QueueItem[]) } catch { /* ignore */ }
   }
   async function refreshSettings() {
-    try { setSettings(await window.api.getSettings()) } catch { /* ignore */ }
+    // A missing metadata endpoint must not hide saved settings or imply no cap.
+    setConcurrencyPolicy(null)
+    await Promise.allSettled([
+      window.api.getSettings().then(setSettings),
+      window.api.getConcurrencyPolicy().then(setConcurrencyPolicy),
+    ])
   }
 
   useEffect(() => {
@@ -167,7 +175,7 @@ export function App() {
   }
   async function saveSettings() {
     try {
-      await window.api.updateSettings(settings)
+      setSettings(await window.api.updateSettings(settings))
       setErr('')
       setOk('设置已保存')
       setTimeout(() => setOk(''), 3000)
@@ -218,7 +226,7 @@ export function App() {
 
         <main style={{ flex: 1, padding: 12, overflowY: 'auto', position: 'relative' }}>
           {view === 'settings' ? (
-            <SettingsView settings={settings} setSettings={setSettings} onSave={saveSettings} />
+            <SettingsView settings={settings} setSettings={setSettings} onSave={saveSettings} concurrencyPolicy={concurrencyPolicy} />
           ) : status && selected != null && status.project.id === selected ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
@@ -316,12 +324,12 @@ export function App() {
   )
 }
 
-export function SettingsView({ settings, setSettings, onSave }: {
+export function SettingsView({ settings, setSettings, onSave, concurrencyPolicy }: {
   settings: Record<string, unknown>
   setSettings: (s: Record<string, unknown>) => void
   onSave: () => void
+  concurrencyPolicy?: ConcurrencyPolicy | null
 }) {
-  const prov = (settings.worker_provider as string) || 'agy'
   // 分区样式：浅灰边框 + 顶/底留白，与组件其余行内 style 风格一致
   const sectionStyle = {
     border: '1px solid #e0e0e0', borderRadius: 4, padding: '10px 12px',
@@ -333,41 +341,8 @@ export function SettingsView({ settings, setSettings, onSave }: {
       <h3>设置</h3>
       <ModelLimitsSettings settings={settings} onChange={setSettings} />
 
-      {/* 第一组：运行调度 —— 影响流水线怎么跑（worker/并发/章节编排），与压缩无关 */}
-      <div style={sectionStyle}>
-        <h4 style={{ margin: '0 0 6px' }}>运行调度</h4>
-        <div style={groupHintStyle}>控制 worker 后端、章节编排方式与各阶段并发度。</div>
-        <label>worker provider: </label>
-        <select value={prov} onChange={(e) => setSettings({ ...settings, worker_provider: e.target.value })}>
-          <option value="agy">agy</option>
-          <option value="codebuddy">codebuddy</option>
-        </select>
-        <div style={{ marginTop: 8 }}>
-          <label>章节模式: </label>
-          <select value={(settings.chapter_mode as string) || 'two_phase'} onChange={(e) => setSettings({ ...settings, chapter_mode: e.target.value })}>
-            <option value="two_phase">两阶段（先全部分析再 delta）</option>
-            <option value="interleaved">交错流水线（分析并行+delta 串行重叠）</option>
-          </select>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>分析并发量: </label>
-          <input
-            type="number" min={1} style={{ width: 60 }}
-            value={String((settings.analysis_concurrency as number) ?? 1)}
-            onChange={(e) => setSettings({ ...settings, analysis_concurrency: Math.max(1, Number(e.target.value) || 1) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> &gt;1 时章节分析并行（delta 仍串行）</span>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <label>分章任务并发量: </label>
-          <input
-            type="number" min={1} style={{ width: 60 }}
-            value={String((settings.per_chapter_concurrency as number) ?? 2)}
-            onChange={(e) => setSettings({ ...settings, per_chapter_concurrency: Math.max(1, Number(e.target.value) || 1) })}
-          />
-          <span style={{ fontSize: 12, color: '#888' }}> 章节结构/视觉资产多章并行；1=逐章串行</span>
-        </div>
-      </div>
+      {/* Runtime policy is read-only; editing a task budget never changes the deployment cap. */}
+      <ConcurrencySettings settings={settings} onChange={setSettings} policy={concurrencyPolicy} />
 
       {/* 第二组：分析任务包 —— 全书分析/章节结构分析/视觉资产三类任务共用 build_pack 的打包参数 */}
       <div style={sectionStyle}>
@@ -409,7 +384,7 @@ export function SettingsView({ settings, setSettings, onSave }: {
       <p style={{ fontSize: 12, color: '#888' }}>
         全书分析任务类型等其他参数可通过后端 <code>/settings</code> 设置。
       </p>
-      <button onClick={onSave} disabled={Boolean(modelLimitsState(settings).error)}>保存</button>
+      <button onClick={onSave} disabled={Boolean(modelLimitsState(settings).error || concurrencyError(settings, concurrencyPolicy))}>保存</button>
     </div>
   )
 }

@@ -922,3 +922,42 @@ def test_saving_settings_does_not_change_running_task_budget(tmp_path):
         release.set()
         manager.shutdown()
         db.close()
+
+
+@pytest.mark.parametrize("deployment_limit,initially_admitted", [(None, 3), (1, 1)])
+def test_independent_workbench_tasks_get_separate_admission_scopes(tmp_path, deployment_limit, initially_admitted):
+    """Three real scheduler threads must not inherit the standalone shared quota."""
+    from worker_admission import WorkerAdmission
+    gate = WorkerAdmission(deployment_limit)
+    db = Database(tmp_path / 'admission.db')
+    release, lock = threading.Event(), threading.Lock()
+    entered, limits = [], []
+
+    class Adapter:
+        def run(self, context):
+            with gate.slot(context.cancellation_event) as acquired:
+                assert acquired
+                with lock:
+                    entered.append(context.task_id)
+                    limits.append(gate.effective_limit())
+                assert release.wait(3)
+            return {}
+
+    manager = WorkbenchTaskManager(db, BroadcastHub(), {'governance': Adapter()}, poll_interval=0.01)
+    try:
+        tasks = []
+        for number in range(3):
+            folder = tmp_path / str(number)
+            folder.mkdir()
+            project = db.create_project(str(folder))
+            tasks.append(manager.create(project['id'], 'governance', {}))
+        wait_for(lambda: len(entered) >= initially_admitted)
+        assert len(entered) == initially_admitted
+        assert limits == [1] * initially_admitted
+        release.set()
+        wait_for(lambda: all(db.get_task(task['id'])['status'] == 'done' for task in tasks))
+        assert len(entered) == 3 and gate._active == 0
+    finally:
+        release.set()
+        manager.shutdown()
+        db.close()

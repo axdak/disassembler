@@ -24,6 +24,7 @@ from hub import BroadcastHub
 from models import (
     AppendApply, AppendPreview, FromBook, Project, ProjectCreate, QueueAdd, RecoverSnapshot,
     Run, RunConfig, RunRangeUpdate, RunStart, SettingsUpdate, StageEvent, Status, TaskCreate, WorkbenchTask,
+    MAX_TASK_CONCURRENCY,
 )
 from orchestrator import Orchestrator  # noqa: F401
 from pipeline_state import PipelineState
@@ -45,6 +46,7 @@ from artifact_status import (
 )
 from revisions import project_revisions
 from storyer_export import export_storyer_document
+from worker_admission import worker_admission
 
 ARTIFACT_MAX_CHARS = 200_000
 
@@ -514,6 +516,11 @@ def create_app(
     @app.get("/settings", dependencies=[Depends(require_token)])
     def get_settings():
         return app.state.db.all_settings()
+
+    @app.get("/settings/concurrency", dependencies=[Depends(require_token)])
+    def get_concurrency_policy():
+        # Runtime metadata is read-only and separate from persisted task settings.
+        return {**worker_admission.configuration(), "max_task_concurrency": MAX_TASK_CONCURRENCY}
 
     @app.put("/settings", dependencies=[Depends(require_token)])
     def update_settings(body: SettingsUpdate):

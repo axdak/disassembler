@@ -150,3 +150,12 @@ export interface RecoverSnapshot {
   size: number
   replayable_to: number
 }
+
+/** Frozen deployment policy from the current backend, kept out of saved settings. */
+export interface ConcurrencyPolicy {
+  deployment_limit: number | null
+  limit_source: 'task_config' | 'environment' | 'invalid_environment'
+  warning: string
+  scope: 'backend_process'
+  max_task_concurrency: number
+}

@@ -123,7 +123,14 @@ class Orchestrator:
             if self.config.chapter_mode == "interleaved":
                 concurrency = max(concurrency, self.config.analysis_concurrency + 1)
             with capacity_scope(asdict(self.config)), worker_concurrency_scope(concurrency):
-                self.emit("log", detail=f"模型并发：任务配置 {concurrency}，实际共享上限 {worker_admission.effective_limit()}")
+                # Task allowance is distinct from the ceiling shared by this process.
+                policy = worker_admission.configuration()
+                ceiling = policy["deployment_limit"]
+                self.emit("log", detail=f"模型并发：本任务各阶段最大配置 {concurrency}，"
+                          f"任务生效上限 {worker_admission.effective_limit()}，"
+                          f"本进程部署总上限 {ceiling if ceiling is not None else '未设置'}")
+                if policy["warning"]:
+                    self.emit("log", detail=policy["warning"])
                 return self._run()
         except Exception as exc:
             # Only ordinary failures are converted: cancellation/system-exit

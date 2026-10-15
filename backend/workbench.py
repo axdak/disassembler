@@ -20,6 +20,7 @@ if _ENGINE_SCRIPTS not in sys.path:
 from run_pipeline import set_cancel_event  # noqa: E402
 from repair_budget import begin_retry_session  # noqa: E402
 from context_budget import capacity_scope  # noqa: E402
+from worker_admission import worker_concurrency_scope  # noqa: E402
 
 
 WRITER_TASK_TYPES = frozenset({
@@ -412,7 +413,9 @@ class WorkbenchTaskManager:
                 begin_retry_session(context.project_path)
             # Freeze one budget across pack building, recovery and nested workers.
             # Explicit task overrides win; saving new settings cannot alter this task.
-            with capacity_scope({**context.settings, **context.params}):
+            # Adapters execute one model request at a time. Give each independent
+            # task its own quota; process admission still applies the shared cap.
+            with capacity_scope({**context.settings, **context.params}), worker_concurrency_scope(1):
                 prepare = getattr(adapter, "prepare", None)
                 if callable(prepare):
                     prepared_input = prepare(context)

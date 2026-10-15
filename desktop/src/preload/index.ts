@@ -33,6 +33,7 @@ const api = {
   logs: (id: number) => ipcRenderer.invoke('nd:projects:logs', id),
   log: (id: number, name: string) => ipcRenderer.invoke('nd:projects:log', id, name),
   getSettings: () => ipcRenderer.invoke('nd:settings:get'),
+  getConcurrencyPolicy: () => ipcRenderer.invoke('nd:settings:concurrency'),
   updateSettings: (settings: Record<string, unknown>) =>
     ipcRenderer.invoke('nd:settings:update', settings),
   queueAdd: (id: number) => ipcRenderer.invoke('nd:queue:add', id),

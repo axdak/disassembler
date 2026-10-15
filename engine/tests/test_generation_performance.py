@@ -214,7 +214,10 @@ def test_desktop_run_propagates_its_settings_to_admission(tmp_path, monkeypatch,
     monkeypatch.setattr(worker_admission, "limit", None)
     orch = Orchestrator(tmp_path, Config(analysis_concurrency=5, chapter_mode=mode))
     observed = []
+    events = []
+    orch.bus.subscribe(events.append)
     monkeypatch.setattr(orch, "_run", lambda: observed.append(worker_admission.effective_limit()) or 0)
     assert orch.run() == 0
     assert observed == [expected]
+    assert "本进程部署总上限 未设置" in events[0].detail
     assert worker_admission.effective_limit() == 2

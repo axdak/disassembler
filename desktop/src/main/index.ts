@@ -91,6 +91,7 @@ function registerIpc(): void {
   ipcMain.handle('nd:projects:log', (_e, id: number, name: string) =>
     bget(`/projects/${id}/logs/${encodeURIComponent(name)}`))
   ipcMain.handle('nd:settings:get', () => bget('/settings'))
+  ipcMain.handle('nd:settings:concurrency', () => bget('/settings/concurrency'))
   ipcMain.handle('nd:settings:update', (_e, settings: Record<string, unknown>) =>
     fetch(`${backendBase}/settings`, {
       method: 'PUT',
