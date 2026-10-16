@@ -111,12 +111,14 @@ def decode_json_array(value: Any) -> Any:
 
 
 def is_detail_ref_array_field(key: Any) -> bool:
-    """明确的关联字段才采用引用数组契约，普通叙述不猜测类型。"""
+    """关联字段采用引用容器；只有正式声明的关联字段能确定目标类型。"""
     return isinstance(key, str) and (key in DETAIL_REF_ARRAY_KEYS or key.startswith("关联"))
 
 
-def canonicalize_detail_ref_array(value: Any) -> Any:
-    """规范确定的引用容器和类型拼写；未知类型与错配目标留待原校验。"""
+def canonicalize_detail_ref_array(value: Any, *, field_key: str | None = None) -> Any:
+    """按明确字段补裸名类型并规范容器；不猜目标，错类型留待原校验。"""
+    declared_type = field_key.removeprefix("关联") if field_key in DETAIL_REF_ARRAY_KEYS else None
+
     def canonical(entry):
         if not isinstance(entry, str):
             return entry
@@ -124,6 +126,9 @@ def canonicalize_detail_ref_array(value: Any) -> Any:
         if separator and prefix.strip() in COLLECTION_TO_TYPE and name.strip():
             # 集合名到类型是一一映射；仅修拼写，不猜人物身份或跨类别改目标。
             return f"{COLLECTION_TO_TYPE[prefix.strip()]}:{name.strip()}"
+        if declared_type and not separator and "：" not in entry and entry.strip():
+            # 字段已声明唯一类型；完整保留名称，不拆词、不匹配近名或替换已有类型。
+            return f"{declared_type}:{entry.strip()}"
         return entry
     decoded = decode_json_array(value)
     if isinstance(decoded, list):
@@ -354,6 +359,48 @@ def coerce_string_list(value: Any) -> List[str]:
     return result
 
 
+def historical_aliases_are_superseded(detail: Dict[str, Any]) -> bool:
+    """已有字段纠错优先于历史声明；不完整的纠错证据也不能授权复活旧身份。"""
+    from information_preservation import CORRECTION_FIELD
+    from local_json_patch import FIELD_REPAIR_ARCHIVE
+    for field in (CORRECTION_FIELD, FIELD_REPAIR_ARCHIVE):
+        if field not in detail:
+            continue
+        try:
+            records = decode_json_array(detail[field])
+            if not isinstance(records, list):
+                return True
+            for entry in records:
+                record = json.loads(entry) if isinstance(entry, str) else entry
+                if not isinstance(record, dict) or record.get("字段") == "别名":
+                    return True
+        except (ValueError, TypeError):
+            return True
+    return False
+
+
+def restore_historical_aliases(data: Dict[str, Any], logs: List[str]) -> None:
+    """归位明确的章号别名数组；原记录保留，歧义仍交既有身份索引处理。"""
+    for collection in COLLECTION_KEYS:
+        for item in data.get(collection, []):
+            detail = item.get("详情", {})
+            if historical_aliases_are_superseded(detail):
+                continue
+            for key, value in detail.items():
+                if not re.fullmatch(r"\d{4,}-别名", key):
+                    continue
+                declared = decode_json_array(value)
+                # 只读取明确数组，不能从说明文字、混合类型或标点猜出昵称。
+                if (not isinstance(declared, list) or not declared
+                        or any(not isinstance(alias, str) or not alias.strip() for alias in declared)):
+                    continue
+                for alias in declared:
+                    alias = alias.strip()
+                    if alias != item["名称"] and alias not in item["别名"]:
+                        item["别名"].append(alias)
+                        logs.append(f"{item['名称']}.详情.{key} 声明的别名[{alias}]已归位，原记录保留")
+
+
 def build_alias_maps(data: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     return alias_to_name_maps(data)
 
@@ -447,7 +494,7 @@ def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], ali
     # 详情的引用保持 类型:名称；数组项开启 quarantine 时，不存在引用下沉到待确认引用。
     for key, value in list(detail.items()):
         if is_detail_ref_array_field(key):
-            value = canonicalize_detail_ref_array(value)
+            value = canonicalize_detail_ref_array(value, field_key=key)
             detail[key] = value
         if isinstance(value, str):
             m = DETAIL_REF_RE.match(value.strip())
@@ -526,8 +573,11 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
                     logs.append(f"{raw.get('名称','?')}.详情.{safe_key} 已按原内容规范化")
                 if not normalized_value:
                     continue
+            elif re.fullmatch(r"\d{4,}-别名", safe_key) and isinstance(v, list):
+                # 身份声明先保留原始类型和空项，不能由普通字符串化洗成有效别名。
+                normalized_value = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
             elif is_detail_ref_array_field(safe_key):
-                normalized_value = canonicalize_detail_ref_array(v)
+                normalized_value = canonicalize_detail_ref_array(v, field_key=safe_key)
             elif safe_key in VALID_FIELDS[collection_key]:
                 # 同名标准字段仍在详情表示冲突或类型错误，不能串化掩盖原值。
                 normalized_value = copy.deepcopy(v)
@@ -622,6 +672,9 @@ def normalize_structure(data: Any, *, quarantine_invalid_refs: bool = False) -> 
             normalized_items.append(normalize_item(raw, collection_key, logs))
         result[collection_key] = normalized_items
 
+    # 历史快照可能把明确别名加了章节前缀；先恢复声明，再解析引用。
+    # 不推测身份：正式名优先，多个档案共享的别名仍不会被任意绑定。
+    restore_historical_aliases(result, logs)
     # 第二轮：基于名称/别名规范化引用。
     name_sets = exact_name_sets(result)
     alias_maps = build_alias_maps(result)

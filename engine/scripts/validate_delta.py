@@ -12,7 +12,7 @@ Delta 入库前校验器。
 
 from __future__ import annotations
 
-from element_identity import build_lookup_index, find_index, missing_target_message
+from element_identity import build_lookup_index, find_index, missing_target_message, same_patch_rename_targets
 from generation_contract import new_element_quality_errors, misplaced_field_errors, required_element_fields, reference_quality_errors
 
 import argparse
@@ -361,7 +361,14 @@ def validate_refs(collection_key: str, item: Dict[str, Any], label: str, name_se
 def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str) -> Tuple[List[str], List[str]]:
     errors: List[str] = []
     warnings: List[str] = []
+    try:
+        renamed_targets = same_patch_rename_targets(current, delta)
+    except ValueError as exc:
+        errors.append(str(exc))
+        renamed_targets = {}
     name_sets = merge_name_sets(current, delta)
+    for collection, names in renamed_targets.items():
+        name_sets[collection].update(names)
     alias_maps = alias_to_name_maps(current)
     current_indexes = {key: build_lookup_index(current.get(key) or []) for key in COLLECTION_KEYS}
     # Existing declarations remain authoritative when an explicit addition
@@ -393,8 +400,12 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                     errors.append(f"{label}.名称 必须是非空字符串")
                     continue
                 label = f"{section}.{DISPLAY[collection_key]}[{name.strip()}]"
+                # New names declared by a safe same-patch rename still refer to
+                # the old record, including its immutable chapter/time fields.
+                lookup_name = (renamed_targets.get(collection_key, {}).get(name.strip(), name.strip())
+                               if section == "修改元素" else name.strip())
                 try:
-                    is_new_record = find_index(*current_indexes[collection_key], name.strip()) < 0
+                    is_new_record = find_index(*current_indexes[collection_key], lookup_name) < 0
                 except ValueError as exc:
                     errors.append(f"{label} {exc}")
                     continue
@@ -414,7 +425,7 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                 else:
                     names, aliases = indexes[collection_key]
                     try:
-                        if find_index(names, aliases, name.strip()) < 0:
+                        if find_index(names, aliases, lookup_name) < 0:
                             errors.append(f"{label} {missing_target_message(name.strip(), names)}")
                     except ValueError as exc:
                         errors.append(f"{label} {exc}")
@@ -438,7 +449,7 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                 errors.extend(f"{label}.{error}" for error in misplaced_field_errors(collection_key, item))
                 errors.extend(reference_quality_errors(item, f"/{section}/{collection_key}/{idx}"))
                 if mode == "governance" and collection_key == "事件集":
-                    existing_event = existing_event_by_name_or_alias(current, name.strip())
+                    existing_event = existing_event_by_name_or_alias(current, lookup_name)
                     if existing_event is not None:
                         if "时间" in item and item.get("时间") != existing_event.get("时间"):
                             errors.append(f"{label}.时间 不得在普通治理中修改；治理只能重分类，时序字段和数组位置必须保持")

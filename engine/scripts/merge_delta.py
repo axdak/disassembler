@@ -11,7 +11,7 @@ Delta合并脚本 - 将单章Delta合并到增量JSON（字段级深度合并）
 合并策略（字段级深度合并，只增不删）:
     - 元素匹配: 优先按"名称"匹配，找不到再按"别名"匹配（别名命中时合并到主名称元素）
     - 新增元素: 与已有元素同名/别名命中 → 字段级深度合并；否则追加
-    - 修改元素: 同上（语义上"修改"只需包含要更新的字段，但合并函数对两者一视同仁）
+    - 修改元素: 仅匹配已有身份；同批无冲突重命名的新名可定位原档案，未知修改禁止自动新增
     - 字段级合并规则:
         * 介绍 (string): 追加，去重，以换行分隔
         * 列表字段 (标签集/别名/关系/所属阵营/参与成员/目标事件/涉及事件): 去重合并，保持原顺序
@@ -30,7 +30,7 @@ Delta合并脚本 - 将单章Delta合并到增量JSON（字段级深度合并）
     ...
 """
 
-from element_identity import build_lookup_index, find_index, index_item, missing_target_message
+from element_identity import build_lookup_index, find_index, index_item, missing_target_message, same_patch_rename_targets
 
 import sys
 import os
@@ -322,7 +322,7 @@ def deep_merge_item(existing_item, delta_item, collection_key="", chapter_prefix
     return existing_item
 
 
-def merge_collection(existing_items, new_items, modified_items, collection_key="", chapter_prefix=""):
+def merge_collection(existing_items, new_items, modified_items, collection_key="", chapter_prefix="", *, renamed_targets=None):
     """
     合并单个元素集（字段级深度合并 + 别名匹配）。
 
@@ -334,7 +334,7 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
     updated = 0
     skipped = 0
 
-    # 新增元素和修改元素走同一深度合并路径，只是统计口径不同
+    # 已知身份共用深度合并；只有新增区允许创建档案，修改区始终要求明确目标。
     for bucket, is_modified_bucket in [
         (new_items, False),
         (modified_items, True),
@@ -349,7 +349,10 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
             if not name:
                 skipped += 1
                 continue
-            idx = find_index(name_index, alias_index, name)
+            # Resolve the declared future name without performing the rename;
+            # deep_merge_item keeps the original canonical name until apply_ops.
+            lookup_name = (renamed_targets or {}).get(name, name) if is_modified_bucket else name
+            idx = find_index(name_index, alias_index, lookup_name)
             if idx >= 0:
                 # 命中已有元素 → 字段级深度合并
                 deep_merge_item(existing_items[idx], item, collection_key, chapter_prefix)
@@ -414,6 +417,8 @@ def merge_delta(incremental_path, delta_path, *, replace_description=False):
     ensure_skeleton(incremental)
 
     delta = load_json(delta_path)
+    # Preflight the shared identity projection before any output is written.
+    renamed_targets = same_patch_rename_targets(incremental, delta)
 
     chapter_prefix = normalize_chapter_value(delta.get("章节", ""))
 
@@ -429,7 +434,8 @@ def merge_delta(incremental_path, delta_path, *, replace_description=False):
         mod_items = modified_elements.get(key, []) or []
 
         merged, added, updated, skipped = merge_collection(
-            existing, new_items, mod_items, key, chapter_prefix=chapter_prefix
+            existing, new_items, mod_items, key, chapter_prefix=chapter_prefix,
+            renamed_targets=renamed_targets.get(key)
         )
         incremental[key] = merged
         stats[key] = {

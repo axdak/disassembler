@@ -169,7 +169,7 @@ def _coerce_archive_arrays(collection_key: str, detail: Dict[str, Any], label: s
     }
     for key, value in list(detail.items()):
         if is_detail_ref_array_field(key):
-            normalized = canonicalize_detail_ref_array(value)
+            normalized = canonicalize_detail_ref_array(value, field_key=key)
             if normalized != value:
                 detail[key] = normalized
                 report.append(f"{label}.详情.{key} 按引用契约归一为数组")

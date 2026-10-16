@@ -236,6 +236,11 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
                 if quality_marker(pointer) in feedback:
                     scope[pointer] = {"kind": "quality", "value_type": "string",
                                       "collection": "", "field": field, "metadata": True}
+    from element_identity import same_patch_rename_targets
+    try:
+        renamed_targets = same_patch_rename_targets(story, data)
+    except ValueError:
+        return {}  # A conflicting declared rename must never authorize promotion.
     for section in ("新增元素", "修改元素"):
         bucket = data.get(section)
         if not isinstance(bucket, dict):
@@ -246,6 +251,9 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
             historical = story.get(collection, [])
             known = {item["名称"] for item in historical if isinstance(item, dict)
                      and isinstance(item.get("名称"), str)} if isinstance(historical, list) else set()
+            # A validated future name belongs to an existing record; even stale
+            # missing-target feedback must not offer a move into 新增元素.
+            known.update(renamed_targets.get(collection, {}))
             for index, item in enumerate(items):
                 if not isinstance(item, dict):
                     continue

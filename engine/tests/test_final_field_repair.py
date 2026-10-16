@@ -114,7 +114,8 @@ def test_final_driver_completes_more_than_one_field_batch(tmp_path, monkeypatch)
     assert "本批候选摘要" in calls[0][1]
 
 
-@pytest.mark.parametrize("field,value", [("关联角色", ["甲"]), ("关联事项", ["其他事项集:策略"])])
+# 已登记角色的裸名现可按明确字段归一；未知目标仍必须留下局部修复定位。
+@pytest.mark.parametrize("field,value", [("关联角色", ["未登记角色"]), ("关联事项", ["其他事项集:策略"])])
 def test_final_bad_detail_reference_has_local_repair_pointer(tmp_path, field, value):
     from normalize_story_schema import normalize_structure
     from local_json_patch import final_repair_scope

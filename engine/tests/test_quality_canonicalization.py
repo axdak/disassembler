@@ -67,10 +67,11 @@ def test_declared_detail_references_have_real_arrays(value):
 
 
 @pytest.mark.parametrize("value", [["角色:徐六", 7, "未经确认"], '["角色:徐六",7,"未经确认"]'])
-def test_invalid_detail_reference_entries_survive_both_paths(value):
+def test_invalid_detail_reference_entries_keep_names_and_nonstring_evidence(value):
     event = {"名称": "诊病", "详情": {"关联角色": deepcopy(value)}}
     coerce_delta_in_place(_event_delta(event))
-    expected = ["角色:徐六", 7, "未经确认"]
+    # 明确字段可确定“角色”类型，但未知姓名和错误数值仍留待严格校验。
+    expected = ["角色:徐六", 7, "角色:未经确认"]
     assert event["详情"]["关联角色"] == expected
     normalized, _ = normalize_structure({"事件集": [event]})
     assert normalized["事件集"][0]["详情"]["关联角色"] == expected
