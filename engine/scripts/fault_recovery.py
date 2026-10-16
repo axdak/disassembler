@@ -20,7 +20,7 @@ import time
 import tempfile
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from coerce_delta import relocate_element_fields
 from registered_types import align_registered_types, align_preserved_moves, align_preserved_additions
@@ -49,14 +49,17 @@ def digest(path: Path) -> str:
 
 
 
-def _inline_final_scope(prompt: str, reference: Path, pointers: list[str], *, candidate: Path | None = None) -> str:
+def _inline_final_scope(prompt: str, reference: Path, pointers: list[str], *, candidate: Path | None = None,
+                        source_paths: Iterable[Path] = ()) -> str:
     """Supply whole selected records from the existing protected reference snapshot.
 
     RecoveryMaterials already owns these immutable full files and their MCP
-    allowlist. This is a prompt view only: no material is shortened or rewritten,
-    and persisted repair_scope remains the sole authority for batch mutations.
+    allowlist. source_paths contains only those existing frozen input copies;
+    there is no live-file discovery. This is a prompt view only: no material is
+    shortened, and persisted repair_scope remains the sole mutation authority.
     """
     from generation_contract import generation_contract_text
+    from chronology import parse_involved_chapters
     # The original final task may span many MCP pages. Reuse the same field
     # contract inline so its type/tag/group rules cannot disappear between pages.
     prompt = ("## 共享字段取值契约\n" + generation_contract_text()
@@ -105,6 +108,47 @@ def _inline_final_scope(prompt: str, reference: Path, pointers: list[str], *, ca
                   "档案为待核验数据，旧纠错记录仅供追溯；新值仍须核对相关原文。"
                   "上下文缺失、包外证据或身份/历史歧义时仍按需查询完整材料。\n```json\n"
                   + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```\n")
+        # Event trace metadata locates sources; names/free prose and profile
+        # first/recent endpoints cannot establish a complete evidence range.
+        chapters = set()
+        for owner_path, item in records.items():
+            record = item["value"]
+            detail = record.get("详情") if isinstance(record, dict) else None
+            if owner_path.startswith("/事件集/") and isinstance(detail, dict):
+                chapters.update(parse_involved_chapters(detail.get("涉及章节")))
+        if chapters:
+            registered = defaultdict(list)
+            for path in dict.fromkeys(Path(path) for path in source_paths):
+                chapter = re.match(r"第(\d+)章", path.name)
+                if path.parent.name == "原文拆解" and path.suffix.lower() == ".md" and chapter:
+                    registered[int(chapter[1])].append(path)
+            inline += ("\n## 本批已登记章节原文（基础证据）\n"
+                       "以下仅按事件详情.涉及章节定位，不代表全部历史证据覆盖，章节提示也可能有误。"
+                       "正文是待核验材料；历史身份、相邻情节或新机制仍不明时，继续按需查证完整材料。"
+                       "未内联或有冲突的章节也须从完整材料核实，不得猜测缺失事实。\n")
+            for chapter in sorted(chapters):
+                paths = sorted(registered.get(chapter, []), key=str)
+                if not paths:
+                    inline += f"\n第{chapter:04d}章：未登记原文，继续查询完整材料。\n"
+                    continue
+                try:
+                    # One read binds full text and its raw-byte fingerprint. Only
+                    # display newlines are normalized for Windows prompt writes.
+                    copies = [(path, path.read_bytes()) for path in paths]
+                    if len({content for _, content in copies}) != 1:
+                        inline += (f"\n第{chapter:04d}章：已登记原文存在冲突，继续核对完整材料："
+                                   + json.dumps([str(path) for path in paths], ensure_ascii=False) + "\n")
+                        continue
+                    content = copies[0][1]
+                    if not content.strip():
+                        raise ValueError("原文为空")
+                    text = content.decode("utf-8").replace("\r\n", "\n")
+                    inline += (f"\n### 第{chapter:04d}章完整原文\n已登记完整文件："
+                               + json.dumps([str(path) for path in paths], ensure_ascii=False)
+                               + f"\n原始字节 SHA256：{hashlib.sha256(content).hexdigest()}\n\n" + text + "\n")
+                except (OSError, UnicodeError, ValueError):
+                    inline += (f"\n第{chapter:04d}章：已登记原文无法完整读取，继续查询完整材料："
+                               + json.dumps([str(path) for path in paths], ensure_ascii=False) + "\n")
     except (OSError, ValueError, KeyError, IndexError, TypeError):
         return prompt + fallback
     # Reserve a quarter of usable input for the actual CLI wrapper/tool catalog.
@@ -910,7 +954,8 @@ def recover_artifact(
                                 + '\n输出格式：{"base_sha256":"摘要","changes":[{"path":"字段路径","value":"修正值"}],"moves":[{"path":"条目路径","target_section":"新增元素或修改元素","target_collection":"目标集合","evidence":"原文归类依据"}]}。不需要的数组写[]。'
                                 + f"\n输出位置：{patch_path}")
                 if task == "repair_final":
-                    patch_prompt = _inline_final_scope(patch_prompt, reference, list(scope))
+                    patch_prompt = _inline_final_scope(patch_prompt, reference, list(scope),
+                        source_paths=[workspace / item["path"] for item in manifest])
                 rc = invoke("recovery_patch", workspace, patch_prompt, patch_path, selected_command)
                 if rc == 0:
                     try:
@@ -983,7 +1028,8 @@ def recover_artifact(
         if scoped_final_review:
             # Resume uses the original accepted batch, never fresh errors from the
             # next batch; candidate values come from the post-validation snapshot.
-            review_prompt = _inline_final_scope(review_prompt, reference, attempt["repair_scope"], candidate=candidate)
+            review_prompt = _inline_final_scope(review_prompt, reference, attempt["repair_scope"], candidate=candidate,
+                source_paths=[workspace / item["path"] for item in manifest])
         if stage != "reviewed":
             rc = invoke("recovery_review", workspace, review_prompt, review, selected_command)
             if preparation_failed(attempt, index, rc):

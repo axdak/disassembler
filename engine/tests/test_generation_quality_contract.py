@@ -84,6 +84,9 @@ def test_generation_schemas_and_prompt_contract_have_one_source():
         assert set(modification["required"]) == {"名称", "详情"}
     text = generation_contract_text()
     assert all(field in text for field in ["关联角色", "标签集", "分组", "参与成员"])
+    # A legacy derived tag is a hypothesis until checked against the original.
+    assert "旧标签、补充标签及档案概括不构成事实依据" in text
+    assert "不得把猜测、传闻、条件或未完成行动改写为已证结论" in text
 
 
 def test_quality_field_repair_keeps_unrelated_event_content(tmp_path):
