@@ -89,6 +89,50 @@ def test_generation_schemas_and_prompt_contract_have_one_source():
     assert "不得把猜测、传闻、条件或未完成行动改写为已证结论" in text
 
 
+@pytest.mark.parametrize("entrypoint", ["shared", "chapter", "periodic", "final_repair"])
+def test_emitted_contract_requires_literal_plus_in_one_four_dimension_tag(tmp_path, entrypoint):
+    """All real prompt consumers must disambiguate the delimiter before generation."""
+    from generation_contract import generation_contract_text
+    from prompt_loader import render_prompt
+    if entrypoint == "shared":
+        prompt = generation_contract_text()
+    elif entrypoint == "chapter":
+        prompt = render_prompt("流水线/单章增量提取.j2", chapter_id="0001",
+                               delta_path="delta.json", summary="正式档案索引",
+                               analysis_text="章节分析", chapter_text="本章原文")
+    elif entrypoint == "periodic":
+        prompt = render_prompt("流水线/周期审计.j2", start=1, end=1,
+                               correction_path="correction.json", run_pipeline_path="run_pipeline.py",
+                               project_dir=str(tmp_path), chapters=[], synopsis_max_chars=1000,
+                               synopsis_sections="【主线】【主角处境】【核心冲突】【当前进展】",
+                               taxonomy_json="", full_story_json="", story_index="", relevant_details="")
+    else:
+        from fault_recovery import _inline_final_scope
+        reference = tmp_path / "reference.json"
+        reference.write_text(json.dumps({"事件集": [event()]}, ensure_ascii=False), encoding="utf-8")
+        prompt = _inline_final_scope("只补当前事件标签", reference, ["/事件集/0/标签集"])
+    # The validator already requires literal +; every generated task must say so.
+    for instruction in ("四个非空维度", "同一个字符串", "半角+连接",
+                        "不能用/、|作为维度分隔符", "不能拆成四个独立标签"):
+        assert instruction in prompt
+
+
+@pytest.mark.parametrize("tags,accepted", [
+    (["主题+叙事功能+情绪+冲突"], True),
+    (["主题/叙事功能/情绪/冲突"], False),
+    (["主题|叙事功能|情绪|冲突"], False),
+    (["主题", "叙事功能", "情绪", "冲突"], False),
+    (["主题+ +情绪+冲突"], False),
+])
+def test_existing_compound_tag_format_gate_requires_one_nonempty_plus_string(tags, accepted):
+    """Clarifying the prompt must not broaden the existing acceptance format."""
+    item = event()
+    item["标签集"] = tags
+    errors, _ = delta_errors(make_empty_structure(), delta(item))
+    invalid_tag = any("/新增元素/事件集/0/标签集" in error for error in errors)
+    assert invalid_tag is not accepted
+
+
 def test_quality_field_repair_keeps_unrelated_event_content(tmp_path):
     item = event()
     item.pop("标签集")

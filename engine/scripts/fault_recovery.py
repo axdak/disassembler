@@ -59,7 +59,8 @@ def _inline_final_scope(prompt: str, reference: Path, pointers: list[str], *, ca
     shortened, and persisted repair_scope remains the sole mutation authority.
     """
     from generation_contract import generation_contract_text
-    from chronology import parse_involved_chapters
+    from chronology import (EVENT_GROUP_RANK_WIDTH, event_group_name_errors,
+                            event_group_rank_text, parse_involved_chapters, split_event_group)
     # The original final task may span many MCP pages. Reuse the same field
     # contract inline so its type/tag/group rules cannot disappear between pages.
     prompt = ("## 共享字段取值契约\n" + generation_contract_text()
@@ -153,9 +154,40 @@ def _inline_final_scope(prompt: str, reference: Path, pointers: list[str], *, ca
         return prompt + fallback
     # Reserve a quarter of usable input for the actual CLI wrapper/tool catalog.
     # The normal admission gate remains authoritative for the complete real input.
-    if estimate_tokens(prompt + inline) > ContextBudget.from_env().usable_input * 3 // 4:
+    limit = ContextBudget.from_env().usable_input * 3 // 4
+    result = prompt + inline
+    if estimate_tokens(result) > limit:
         return prompt + fallback
-    return prompt + inline
+    if any(len(parts) == 3 and parts[0] == "事件集" and parts[2] == "分组" for parts in selected.values()):
+        # Existing segment anchors are outside the selected empty-group records.
+        # Reuse format rules and this same parsed reference; never infer a group,
+        # renumber it, or promote a candidate value into historical evidence.
+        groups = {}
+        for index, event in enumerate(document.get("事件集", [])):
+            if not isinstance(event, dict):
+                continue
+            value = event.get("分组")
+            if not isinstance(value, str) or not value.strip():
+                continue
+            rank, name = split_event_group(value)
+            rank_text = event_group_rank_text(value)
+            if (rank is None or not rank_text or len(rank_text) < EVENT_GROUP_RANK_WIDTH
+                    or not name or event_group_name_errors(name)):
+                continue
+            groups.setdefault(value, {"value": value, "records": []})["records"].append(
+                {"path": f"/事件集/{index}", "name": event.get("名称")})
+        if groups:
+            registry = ("\n## 已有格式合法的分组原值及使用档案\n"
+                        "以下只读清单用于定位既有分组及相邻事件，剧情归属仍须核对原文。"
+                        "这些既有字段原值不证明剧情分类或全局段号分配正确，不作为原文事实依据；"
+                        "不得修改本次范围外的分组或段号，原全局校验与独立复核保持。\n```json\n"
+                        + json.dumps({"reference_sha256": payload["reference_sha256"],
+                                      "groups": list(groups.values())}, ensure_ascii=False, indent=2) + "\n```\n")
+            # This optional whole block cannot displace complete records/raw text.
+            # When it does not fit, retain the original body and all MCP read rights.
+            if estimate_tokens(result + registry) <= limit:
+                result += registry
+    return result
 
 
 def preserve_quality_notes(before: Path, after: Path) -> None:
