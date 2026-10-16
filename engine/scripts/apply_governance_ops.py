@@ -5,9 +5,10 @@ import argparse, copy, json, os, shutil, sys, datetime as dt, tempfile
 from typing import Any, Dict, List, Set
 from element_identity import build_lookup_index, find_index
 from chronology import parse_chapter_numbers, format_chapter
-from information_preservation import ARCHIVE_FIELD, CORRECTION_FIELD, append_record, reference_context, evidenced_correction
+from information_preservation import (ARCHIVE_FIELD, CORRECTION_FIELD, append_record, reference_context,
+                                      evidenced_correction, is_trace_field_correction, set_field_operation_errors)
 from story_schema_rules import (
-    COLLECTION_KEYS, TYPE_TO_COLLECTION, STRUCTURAL_REF_FIELDS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
+    COLLECTION_KEYS, TYPE_TO_COLLECTION, STRUCTURAL_REF_FIELDS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS, TRACEABLE_COLLECTION_KEYS,
     dump_supplementary_tags, is_cumulative_detail_field, merge_supplementary_tag_values, is_event_compound_tag,
 )
 
@@ -218,6 +219,10 @@ def apply_ops(data, patch):
                 raise ValueError(f"治理标签[事件:{op.get('名称')}]禁止降级有效四维复合标签；应保留在标签集")
     original = copy.deepcopy(data)  # Any invalid operation aborts the entire patch.
     data = copy.deepcopy(data)
+    # 对象身份跨本补丁的重命名保持不变；旧值始终来自操作前快照。
+    preimages = {id(item): original[key][index] for key in COLLECTION_KEYS
+                 for index, item in enumerate(data.get(key, [])) if isinstance(item, dict)}
+    merged_trace_values = {}
     logs=[]; warns=[]; ops=patch.get('治理操作',{}) if isinstance(patch,dict) else {}
     if not isinstance(ops,dict): return data,logs,['治理操作不是对象']
     # 合并
@@ -236,6 +241,10 @@ def apply_ops(data, patch):
                     raise ValueError(f'禁止自合并{typ}:{s}')
                 old=source_names(data,typ,src)
                 merge_items(target,src)
+                if key in TRACEABLE_COLLECTION_KEYS:
+                    # 仅记录本补丁真正执行的合并结果，不把“目标值相等”当作忽略原值的许可。
+                    merged_trace_values[id(target)] = {field: copy.deepcopy(target['详情'].get(field))
+                                                      for field in ('首次章节', '最近章节')}
                 target['别名']=append_unique(target.get('别名',[]), sorted(old-{target.get('名称')}))
                 c=replace_refs(data,typ,old,target['名称'])
                 for idx,candidate in enumerate(data[key]):
@@ -262,24 +271,29 @@ def apply_ops(data, patch):
     # 设置字段/追加详情
     for op in ops.get('设置字段',[]) or []:
         try:
+            boundary_errors = set_field_operation_errors(op, patch)
+            if boundary_errors:
+                raise ValueError('；'.join(boundary_errors))
             idx=find_idx(data,op['类型'],op['名称']); key=TYPE_TO_COLLECTION[op['类型']]
             if idx<0: raise ValueError('找不到元素')
             item=data[key][idx]; field=op['字段']; owner=item; leaf=field
-            # 整个详情覆盖会抹掉档案与宿主纠错记录；已有追加和逐字段纠错足够表达修改。
-            if field == '详情':
-                raise ValueError('不得整体替换详情；请使用追加详情或详情/字段纠错')
             if field.startswith('详情/'):
                 leaf=field.removeprefix('详情/'); owner=item.setdefault('详情', {})
-                if not leaf or leaf in {'首次章节','最近章节','涉及章节',ARCHIVE_FIELD,CORRECTION_FIELD}:
-                    raise ValueError('不能通过详情纠错改变机器追溯或归档字段')
             old=copy.deepcopy(owner.get(leaf))
-            if '原值' in op and op['原值'] != old:
+            snapshot_detail = preimages.get(id(item), {}).get('详情', {})
+            merge_value = merged_trace_values.get(id(item), {}).get(leaf)
+            merge_satisfied = (is_trace_field_correction(op) and isinstance(snapshot_detail, dict)
+                               and leaf in snapshot_detail and op.get('原值') == snapshot_detail[leaf]
+                               and snapshot_detail[leaf] != merge_value and old == merge_value == op.get('值'))
+            if '原值' in op and op['原值'] != old and not merge_satisfied:
                 raise ValueError('纠错原值已经变化，拒绝覆盖')
-            if owner is not item and not evidenced_correction(op, old, op.get('值')):
+            archive_old = copy.deepcopy(snapshot_detail[leaf]) if merge_satisfied else old
+            if owner is not item and not evidenced_correction(op, archive_old, op.get('值')):
                 raise ValueError('详情纠错必须声明原值、理由和原文章节引文')
-            if old != op.get('值'):
+            if old != op.get('值') or merge_satisfied:
+                # 合并已达成目标时仍归档原主档案值，不能让合并过程抹掉纠错依据。
                 append_record(item.setdefault('详情', {}), CORRECTION_FIELD,
-                              {"字段": field, "原值": old, "新值": op.get('值'),
+                              {"字段": field, "原值": archive_old, "新值": op.get('值'),
                                "理由": op.get('理由', ''), "证据": op.get('证据', [])})
             owner[leaf]=op.get('值'); logs.append(f"设置字段 {op['类型']}:{op['名称']}.{field}")
         except Exception as e: warns.append(f'设置字段失败: {e}')

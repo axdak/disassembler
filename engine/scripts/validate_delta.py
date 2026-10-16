@@ -546,13 +546,8 @@ def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], 
 
 
 def validate_set_field_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], mode: str) -> List[str]:
-    """校验治理操作.设置字段不得改变既有事件的不可变字段。
-
-    story_structure_quality_governance.md: 对既有事件只允许重分类，不允许改变
-    时间、涉及章节或数组位置。设置字段直接覆写顶层字段：作用于事件的 时间
-    会改时序；作用于 详情 会整块替换详情（含 涉及章节）。两者均违反该约束。
-    事件详情更新应走 追加详情（按键追加去重），不得用 设置字段 整块覆盖。
-    """
+    """与执行器共用字段边界；非事件追溯只通过有据、可归档的显式纠错更新。"""
+    from information_preservation import set_field_operation_errors
     ops = delta.get("治理操作", {}) if isinstance(delta, dict) else {}
     if not isinstance(ops, dict) or "设置字段" not in ops:
         return []
@@ -562,18 +557,12 @@ def validate_set_field_governance_ops(current: Dict[str, Any], delta: Dict[str, 
     if not isinstance(set_ops, list):
         return ["治理操作.设置字段 必须是数组"]
     errors: List[str] = []
-    immutable_fields = {"时间", "详情"}
     for index, op in enumerate(set_ops):
         if not isinstance(op, dict):
             errors.append(f"治理操作.设置字段[{index}] 必须是对象")
             continue
-        type_name = op.get("类型")
-        field = op.get("字段")
-        if type_name == "事件" and (field in immutable_fields or field in {"详情/涉及章节", "详情/首次章节", "详情/最近章节"}):
-            errors.append(
-                f"治理操作.设置字段[{index}] 不得设置事件[{op.get('名称')}]的 {field}；"
-                "对既有事件只允许重分类，时间/涉及章节/数组位置不可变（详情更新请用追加详情）"
-            )
+        errors.extend(f"治理操作.设置字段[{index}] {message}"
+                      for message in set_field_operation_errors(op, delta))
     return errors
 
 

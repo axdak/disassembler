@@ -14,7 +14,7 @@ from chronology import normalize_chapter_value, normalize_involved_chapters, par
 
 from story_schema_rules import (
     COLLECTION_KEYS, DEFAULTS, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION,
-    TRACEABLE_COLLECTION_KEYS, is_event_compound_tag,
+    TRACEABLE_COLLECTION_KEYS, CHAPTER_TRACE_FIELDS, is_event_compound_tag,
 )
 
 SCHEMAS_DIR = Path(__file__).resolve().parents[1] / "schemas"
@@ -114,6 +114,7 @@ def generation_contract_text() -> str:
         "当前状态与累计事实分别处理：章节Delta记录身份、阵营、关系等本章变化及证据，不提交治理操作；周期治理使用有原文证据的设置字段更新当前状态，并保留旧状态及发生章节，不把已退出阵营或已结束关系盲目并入当前值。新增事实和未证实的状态仍按普通追加处理，不能根据猜测删除旧事实。",
         "标准字段写在元素顶层，不放进详情。关联角色等明确关联字段使用真正的类型:名称数组，单个引用也使用数组；禁止将数组编码成字符串。",
         "补充标签、轨迹等既有JSON字符串数组约定保持不变。未知事实按既有未知值表达，不虚构人物、地点或关系。",
+        "角色、地点、线索、阵营、物品的详情/首次章节及详情/最近章节可用设置字段有据纠错，须提供操作前精确原值、理由及已处理原文证据，值用规范正数章节序号如0157；旧值由宿主归档，最终首次不得晚于最近。首次/最近不是正式顶层字段，不得省略详情/绕过纠错。事件的时间与章节追溯、治理档案记录、治理纠错记录、字段修复原文和引用修复原文等宿主归档禁止直接设置。同补丁先合并再纠错；仅合并已达成目标且原值匹配操作前快照时可幂等验收，其余原值失配仍拒绝。",
     ])
     return "\n".join(lines)
 
@@ -166,6 +167,20 @@ def generation_scope_errors(patch: dict, *, chapter_seq: int = 0, start: int = 0
                     if invalid:
                         path = f"/{section}/{collection}/{index}/详情/{field}"
                         errors.append(f"{quality_marker(path)} 来源必须属于已处理章节，不能错用或包含第{end + 1:04d}章以后的材料")
+    # setter 的来源值同样受宿主范围约束；模型扩大自报范围不能放行未来追溯。
+    from information_preservation import is_trace_field_correction, set_field_operation_errors
+    operations = patch.get("治理操作", {})
+    setters = operations.get("设置字段", []) if isinstance(operations, dict) else []
+    for index, op in enumerate(setters if isinstance(setters, list) else []):
+        field = op.get("字段") if isinstance(op, dict) else None
+        if isinstance(field, str) and field in CHAPTER_TRACE_FIELDS:
+            path = f"/治理操作/设置字段/{index}/字段"
+            errors.extend(f"{quality_marker(path)} {message}" for message in set_field_operation_errors(op))
+        elif is_trace_field_correction(op):
+            numbers = parse_chapter_numbers(op.get("值"))
+            if not numbers or max(numbers) > end:
+                path = f"/治理操作/设置字段/{index}/值"
+                errors.append(f"{quality_marker(path)} 追溯纠错值必须属于已处理章节，不能指向第{end + 1:04d}章以后")
     return errors
 
 

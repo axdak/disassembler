@@ -6,7 +6,9 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 """
 from __future__ import annotations
 
-from local_json_patch import delta_repair_scope, final_repair_scope, apply_scoped_patch, archived_reference_preserved, archived_field_preserved
+from local_json_patch import (delta_repair_scope, final_repair_scope, apply_scoped_patch,
+                              archived_reference_preserved, archived_field_preserved,
+                              FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE)
 from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED
 
 import hashlib
@@ -26,7 +28,7 @@ from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, REVIEW_CHECKS, recovery_output_errors
 from recovery_materials import RecoveryMaterials, read_material_document, rebase_material_paths, write_change_index
-from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, salvage_supplementary_tags
+from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, salvage_supplementary_tags, is_cumulative_detail_field
 from code_fingerprint import code_digest
 from project_lock import project_write_lock
 from worker_checkpoint import atomic_write_bytes
@@ -159,7 +161,8 @@ def _raw_tag_evidence(item: dict, *, include_primary: bool = False) -> set[str]:
 
 
 def preservation_errors(before: Path, after: Path, current: dict | None = None, *,
-                        editable_metadata_paths: set[str] | None = None) -> list[str]:
+                        editable_metadata_paths: set[str] | None = None,
+                        allow_field_archives: bool = True) -> list[str]:
     """Reject destructive shortcuts independently of model self-assessment.
 
 JSON may add fields and correct scalar identifiers/types, but may not remove
@@ -167,7 +170,8 @@ existing fields/items or shorten narrative strings. Lossless field relocation is
 compared at its schema-defined destination, including types proven by the trusted
 registry. Only host-scoped source declarations/quotes may replace invalid candidate
 metadata; source validation and independent review must still accept those changes.
-Revised conflict metadata requires archived originals. Markdown retains each existing
+Only the final field repair owner may trust its host-written old-value archives;
+governance comparisons explicitly disable that exemption. Revised conflict metadata requires archived originals. Markdown retains each existing
 non-heading content line. Semantic correctness still needs evidence-based review.
 """
     errors = []
@@ -209,7 +213,8 @@ non-heading content line. Semantic correctness still needs evidence-based review
                 old.pop("冲突声明")
 
     # 终稿字段归档不得扩大旧 Delta 整份修复的保全豁免。
-    final_field_archive = isinstance(old, dict) and isinstance(new, dict) and "事件集" in old and "新增元素" not in old
+    final_field_archive = (allow_field_archives and isinstance(old, dict) and isinstance(new, dict)
+                           and "事件集" in old and "新增元素" not in old)
 
     metadata = editable_metadata_paths or set()
 
@@ -248,6 +253,20 @@ non-heading content line. Semantic correctness still needs evidence-based review
                     if (key == "关系" and ".角色集[" in path and isinstance(value, list)
                             and isinstance(b[key], list)):
                         value = [rel for rel in value if rel in b[key] or not _relation_retained_in_detail(rel, b)]
+                    # 累积字符串数组按完整记录保全；追加后原JSON的结尾括号会移动，
+                    # 不能因此把合法追加/格式化当成删改。普通叙述仍逐字保护。
+                    if (pointer.endswith("/详情") and isinstance(value, str) and isinstance(b[key], str)
+                            and (is_cumulative_detail_field(key) or key in {FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE})):
+                        try:
+                            previous, updated = json.loads(value), json.loads(b[key])
+                        except ValueError:
+                            previous = updated = None
+                        if (isinstance(previous, list) and isinstance(updated, list)
+                                and all(isinstance(entry, str) for entry in previous + updated)):
+                            remaining = iter(updated)
+                            if not all(entry in remaining for entry in dict.fromkeys(previous)):
+                                errors.append(f"{path}.{key} 原列表记录被删除、改写或乱序")
+                            continue
                     if not archived_reference_preserved(a, b, key):
                         child_pointer = pointer + "/" + key.replace("~", "~0").replace("/", "~1")
                         visit(value, b[key], f"{path}.{key}", child_pointer)
@@ -848,11 +867,13 @@ def recover_artifact(
             preserve_quality_notes(reference, candidate)
             registry = read_object(workspace / "故事结构_增量.json")
             metadata_paths = set(attempt.get("editable_metadata_paths", []))
-            errors = preservation_errors(reference, candidate, registry, editable_metadata_paths=metadata_paths)
+            errors = preservation_errors(reference, candidate, registry, editable_metadata_paths=metadata_paths,
+                                         allow_field_archives=task == "repair_final")
             if not errors:
                 rc, feedback = evaluate(workspace)
                 # Mechanical normalization is part of validation; verify its result too.
-                errors = preservation_errors(reference, candidate, registry, editable_metadata_paths=metadata_paths)
+                errors = preservation_errors(reference, candidate, registry, editable_metadata_paths=metadata_paths,
+                                             allow_field_archives=task == "repair_final")
             if errors or rc != 0:
                 # 失败反馈独立存完整文本，不修改旧阶段的材料目录。
                 # 写反馈与切换策略之间退出也能从完整旧阶段安全重做。

@@ -77,22 +77,61 @@ def affected_records(before: Path, after: Path, proposal: Path) -> dict:
 
 
 def governance_preservation_errors(before: Path, after: Path, proposal: Path, baseline: Path) -> list[str]:
-    """Compare archives after explicit, lossless identity/tag transformations.
+    """Align explicit identity operations and exact, evidenced field corrections.
 
-    A legitimate merge reduces record count but retains archives in its target.
-    Mirror only those deterministic operations, never deletion or arbitrary field
-    replacement, so the generic preservation check does not misclassify a merge.
-    Semantic correctness of the proposed identity still requires model review.
+    Replay both together so a trace correction still sees the merge preimage.
+    Bare setters and candidate-written archives never authorize old fact removal;
+    source quotes are checked by the caller before applying the proposal.
     """
+    from element_identity import build_lookup_index, find_index
+    from information_preservation import evidenced_correction
+    from story_schema_rules import TYPE_TO_COLLECTION
+
     patch = json.loads(proposal.read_text(encoding="utf-8"))
     operations = patch.get("治理操作", {})
+    if not isinstance(operations, dict):
+        return ["治理操作必须为对象"]
     allowed = {key: operations[key] for key in ("合并元素", "重命名元素", "替换引用", "治理标签")
                if key in operations}
-    value, _, warnings = apply_ops(json.loads(before.read_text(encoding="utf-8")), {"治理操作": allowed})
+    setters = operations.get("设置字段", [])
+    corrections = [op for op in setters if isinstance(op, dict) and "值" in op
+                   and evidenced_correction(op, op.get("原值"), op["值"])] if isinstance(setters, list) else []
+    if corrections:
+        allowed["设置字段"] = corrections
+    # One apply call preserves the original target snapshot across merge/rename.
+    value, _, warnings = apply_ops(json.loads(before.read_text(encoding="utf-8")),
+                                   {**patch, "治理操作": allowed})
     if warnings:
         return warnings
     save_json(baseline, value)
-    return preservation_errors(baseline, after)
+    errors = preservation_errors(baseline, after, allow_field_archives=False)
+    candidate = json.loads(after.read_text(encoding="utf-8"))
+    missing = object()
+    for op in corrections:
+        try:
+            collection = TYPE_TO_COLLECTION[op["类型"]]
+            target = op["值"] if op["字段"] == "名称" else op["名称"]
+            expected_items = value.get(collection, [])
+            expected_index = find_index(*build_lookup_index(expected_items), target)
+            if expected_index < 0:
+                raise ValueError("纠错后的档案身份不存在")
+            expected = expected_items[expected_index]
+            actual_items = candidate.get(collection, [])
+            actual_index = find_index(*build_lookup_index(actual_items), expected["名称"])
+            if actual_index < 0:
+                raise ValueError("候选缺少纠错后的档案")
+            actual = actual_items[actual_index]
+            field = op["字段"]
+            if field.startswith("详情/"):
+                field = field.removeprefix("详情/")
+                expected, actual = expected.get("详情", {}), actual.get("详情", {})
+            # Generic preservation permits short scalar changes; an authorized
+            # correction must still land its exact final value at the same field.
+            if expected.get(field, missing) != actual.get(field, missing):
+                errors.append(f"治理纠错[{op['类型']}:{target}].{op['字段']} 与声明的新值不一致")
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            errors.append(f"治理纠错无法对齐唯一字段身份：{exc}")
+    return errors
 
 
 def split_text(text: str, tokens: int) -> list[str]:
@@ -439,6 +478,19 @@ def run_bounded_final(command, project: Path, pack: Path, draft: Path, worker, *
             save_json(state_path, state)
             continue
         if not validate_delta(str(candidate), str(proposal), mode="governance", report_json=str(report)):
+            state.pop("pending_proposal", None)
+            state["feedback"] = report.read_text(encoding="utf-8")
+            save_json(state_path, state)
+            continue
+        # Capacity fallback shares the normal commit's real-source evidence gate.
+        # The host snapshot, never the proposal's range, bounds trace corrections.
+        from information_preservation import project_correction_evidence_errors
+        from run_pipeline import latest_snapshot_seq
+        evidence_errors = project_correction_evidence_errors(
+            project, patch, latest_snapshot_seq(project) or 0)
+        if evidence_errors:
+            save_json(report, {"passed": False, "mode": "governance",
+                               "errors": evidence_errors, "warnings": []})
             state.pop("pending_proposal", None)
             state["feedback"] = report.read_text(encoding="utf-8")
             save_json(state_path, state)
