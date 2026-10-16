@@ -566,7 +566,8 @@ def run_structured_stream(command, prompt, project_dir):
     """
     import threading
     import time
-    from run_pipeline import _kill_tree, worker_idle_limit
+    from run_pipeline import (_close_windows_job, _create_windows_kill_on_close_job,
+                              _kill_tree, worker_idle_limit)
     from provider_stream import CodeBuddyCapacityLog, CodeBuddyFailureLog
     from worker_stream_trace import DeliveryTrace, valid_terminal_result
 
@@ -588,6 +589,21 @@ def run_structured_stream(command, prompt, project_dir):
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=None, cwd=str(project_dir), env=env,
                             text=True, encoding="utf-8", errors="replace")
+    windows_job = _create_windows_kill_on_close_job(proc)
+    cleanup_lock = proc.__dict__.setdefault("_nd_cleanup_lock", threading.RLock())
+
+    def stop_cli():
+        """共享单次 Job 关闭凭据；并发清理只消费一次本调用的专属句柄。"""
+        nonlocal windows_job
+        if not cleanup_lock.acquire(timeout=5.0):
+            raise RuntimeError("worker 进程清理锁等待超时，无法确认退出")
+        try:
+            # 先移出句柄再关闭，避免 watcher/finally 重复关闭已复用的系统句柄。
+            owned_job, windows_job = windows_job, None
+            job_closed = _close_windows_job(owned_job)
+            _kill_tree(proc, job_closed=job_closed)
+        finally:
+            cleanup_lock.release()
 
     # 无进展判据：activity 只在真正收到流事件时刷新，心跳类日志不算进展。
     idle_limit = worker_idle_limit()
@@ -601,7 +617,7 @@ def run_structured_stream(command, prompt, project_dir):
             if time.monotonic() - activity >= idle_limit:
                 stalled.set()
                 # 杀掉整棵进程树；stdout 关闭后上面的读取循环自然结束。
-                _kill_tree(proc)
+                stop_cli()
                 return
 
     def watch_conclusion():
@@ -616,7 +632,7 @@ def run_structured_stream(command, prompt, project_dir):
         while not finished.wait(2.0):
             if failure_log.check():
                 concluded.set()
-                _kill_tree(proc)
+                stop_cli()
                 return
 
     def report_progress():
@@ -684,7 +700,7 @@ def run_structured_stream(command, prompt, project_dir):
                 exhausted = capacity_log.check(request_ids) or exhausted
                 last_log_check = time.monotonic()
             if exhausted:
-                _kill_tree(proc)
+                stop_cli()
                 print(
                     "本轮模型输出达到单次输出上限被截断：已接收约 "
                     f"{truncated_tokens} token（保守估算，含思维链），"
@@ -733,8 +749,9 @@ def run_structured_stream(command, prompt, project_dir):
         finished.set()
         print("worker stream metrics: " + json.dumps({"worker_session": project_dir.name, **trace.report()},
                                                     ensure_ascii=False), file=sys.stderr, flush=True)
-        if proc.poll() is None:
-            _kill_tree(proc)
+        # 即使根进程刚自然退出，也关闭本调用的 Job，清掉仍存活的后代。
+        # stop_cli 只有确认根退出才正常返回，因此随后 wait 不再无界等待运行进程。
+        stop_cli()
         proc.wait()
         if watchdog is not None:
             watchdog.join(timeout=1)

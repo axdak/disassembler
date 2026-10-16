@@ -271,37 +271,75 @@ def _create_windows_kill_on_close_job(proc: "subprocess.Popen") -> object | None
     return job
 
 
-def _close_windows_job(job: object | None) -> None:
-    """Close a Windows job handle, terminating any descendants still in it."""
+def _close_windows_job(job: object | None) -> bool:
+    """Return true only when closing an owned KILL_ON_CLOSE job succeeds."""
     if job is None or sys.platform != "win32":
-        return
+        return False
     import ctypes
     from ctypes import wintypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
-    kernel32.CloseHandle(job)
+    return bool(kernel32.CloseHandle(job))
 
 
-def _kill_tree(proc: "subprocess.Popen") -> None:
-    """杀掉 proc 及其整棵子进程树。
+def _kill_tree(proc: "subprocess.Popen", *, job_closed: bool = False) -> None:
+    """有界清理同一专属 worker；未确认树终止或根退出时必须抛错。
 
-    Windows 上 Popen.kill()（= TerminateProcess）只杀直接子进程；经 shell=True
-    启动的 worker 实为 cmd.exe -> python -> agy/node，单杀 cmd.exe 会让真正在
-    干活的 agy 成孤儿、继续占锁，导致续跑时新 worker 启动即报错。故取消/
-    超时统一用 taskkill /T 递归杀整棵树。
+    每次锁等待、taskkill 和 wait 固定最多 5 秒。仅可信 KILL_ON_CLOSE Job
+    成功关闭或 taskkill /T 返回 0 能确认 Windows 子树；直接 kill 仅作根进程
+    兜底。确认凭据和锁只随该 Popen 存活，供并发 watcher/finally 复用。
     """
-    if proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            capture_output=True,
-        )
-    else:
-        proc.kill()
-    proc.wait()
+    cleanup_timeout = 5.0
+    lock = proc.__dict__.setdefault("_nd_cleanup_lock", threading.RLock())
+    if not lock.acquire(timeout=cleanup_timeout):
+        raise RuntimeError("worker 进程清理锁等待超时，无法确认退出")
+    try:
+        if job_closed is True:
+            proc._nd_tree_terminated = True
+            proc._nd_cleanup_error = None
+        confirmed = getattr(proc, "_nd_tree_terminated", False) is True
+        previous_error = getattr(proc, "_nd_cleanup_error", None)
+        if proc.poll() is not None:
+            if previous_error is not None and not confirmed:
+                # 上一次兜底只杀了根；不能因 poll 已退出就抹掉未确认子树失败。
+                raise RuntimeError("worker 进程树清理仍未确认") from previous_error
+            return
+        tree_error = None
+        if sys.platform == "win32" and not confirmed:
+            command = ["taskkill", "/F", "/T", "/PID", str(proc.pid)]
+            try:
+                result = subprocess.run(command, capture_output=True, timeout=cleanup_timeout)
+                if result.returncode:
+                    tree_error = subprocess.CalledProcessError(result.returncode, command)
+                else:
+                    proc._nd_tree_terminated = True
+                    proc._nd_cleanup_error = None
+                    confirmed = True
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                tree_error = exc
+            if tree_error is not None:
+                proc._nd_cleanup_error = tree_error
+        if confirmed:
+            try:
+                proc.wait(timeout=cleanup_timeout)
+                return
+            except subprocess.TimeoutExpired:
+                pass  # 子树终止已有凭据；根退出延迟时再做一次直接 kill。
+        try:
+            proc.kill()
+        except OSError as exc:
+            if proc.poll() is None:
+                raise RuntimeError("worker 进程清理失败，无法确认退出") from exc
+        try:
+            proc.wait(timeout=cleanup_timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("worker 进程清理超时，无法确认退出") from exc
+        if tree_error is not None:
+            raise RuntimeError("worker 进程树清理失败，根进程已退出但子树未确认") from tree_error
+    finally:
+        lock.release()
 
 
 # 无进展判据的数值下限：防止误配置（例如 5 秒）把正常的启动/初始化阶段直接掐断。
@@ -394,9 +432,9 @@ def stream_shell_command(
     def stop(message: str, returncode: int) -> Tuple[int, str]:
         """统一的终止收尾：先杀进程树，再回传已转发过的完整输出。"""
         nonlocal windows_job
-        _close_windows_job(windows_job)
+        job_closed = _close_windows_job(windows_job)
         windows_job = None
-        _kill_tree(proc)
+        _kill_tree(proc, job_closed=job_closed)
         reader.join(timeout=1)
         drain_output()
         forward(message)
@@ -513,9 +551,9 @@ def run_visible_powershell_command(
             while proc.poll() is None:
                 cancel_event = _get_cancel_event()
                 if cancel_event is not None and cancel_event.is_set():
-                    _close_windows_job(windows_job)
+                    job_closed = _close_windows_job(windows_job)
                     windows_job = None
-                    _kill_tree(proc)
+                    _kill_tree(proc, job_closed=job_closed)
                     proc.wait()
                     return 130, "[cancelled by user]\n"
                 if idle_limit:
@@ -523,9 +561,9 @@ def run_visible_powershell_command(
                     if size != last_size:
                         last_size, last_progress = size, time.monotonic()
                     elif time.monotonic() - last_progress >= idle_limit:
-                        _close_windows_job(windows_job)
+                        job_closed = _close_windows_job(windows_job)
                         windows_job = None
-                        _kill_tree(proc)
+                        _kill_tree(proc, job_closed=job_closed)
                         proc.wait()
                         message = (f"worker 连续 {idle_limit:g} 秒没有任何输出（无进展），"
                                    "已终止并交由上层立即重试。\n")
@@ -534,9 +572,9 @@ def run_visible_powershell_command(
                         log_path.write_text(previous + message, encoding="utf-8")
                         return 124, previous + message
                 if deadline is not None and time.monotonic() >= deadline:
-                    _close_windows_job(windows_job)
+                    job_closed = _close_windows_job(windows_job)
                     windows_job = None
-                    _kill_tree(proc)
+                    _kill_tree(proc, job_closed=job_closed)
                     proc.wait()
                     launcher_output = ""
                     message = timeout_output(
