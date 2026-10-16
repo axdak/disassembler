@@ -158,13 +158,16 @@ def _raw_tag_evidence(item: dict, *, include_primary: bool = False) -> set[str]:
     return evidence
 
 
-def preservation_errors(before: Path, after: Path, current: dict | None = None) -> list[str]:
+def preservation_errors(before: Path, after: Path, current: dict | None = None, *,
+                        editable_metadata_paths: set[str] | None = None) -> list[str]:
     """Reject destructive shortcuts independently of model self-assessment.
 
 JSON may add fields and correct scalar identifiers/types, but may not remove
 existing fields/items or shorten narrative strings. Lossless field relocation is
 compared at its schema-defined destination, including types proven by the trusted
-registry. Revised conflict metadata requires archived originals. Markdown retains each existing
+registry. Only host-scoped source declarations/quotes may replace invalid candidate
+metadata; source validation and independent review must still accept those changes.
+Revised conflict metadata requires archived originals. Markdown retains each existing
 non-heading content line. Semantic correctness still needs evidence-based review.
 """
     errors = []
@@ -208,7 +211,16 @@ non-heading content line. Semantic correctness still needs evidence-based review
     # 终稿字段归档不得扩大旧 Delta 整份修复的保全豁免。
     final_field_archive = isinstance(old, dict) and isinstance(new, dict) and "事件集" in old and "新增元素" not in old
 
-    def visit(a, b, path):
+    metadata = editable_metadata_paths or set()
+
+    def visit(a, b, path, pointer=""):
+        # 仅宿主错误指针已授权的来源元数据可替换。错误引文不属于既有档案事实，
+        # 要求新值包含旧错误会阻断真实原文纠正；仍保留完整结构、原文核验和复核。
+        if pointer in metadata and re.fullmatch(
+                r"/(?:章节|章节范围|证据范围)|/治理操作/设置字段/\d+/证据/\d+/(?:章节|原文)", pointer):
+            expected_type = list if pointer == "/证据范围" else str
+            if isinstance(b, expected_type):
+                return
         if isinstance(a, dict):
             if not isinstance(b, dict):
                 errors.append(f"{path} 对象被替换为其他类型")
@@ -237,7 +249,8 @@ non-heading content line. Semantic correctness still needs evidence-based review
                             and isinstance(b[key], list)):
                         value = [rel for rel in value if rel in b[key] or not _relation_retained_in_detail(rel, b)]
                     if not archived_reference_preserved(a, b, key):
-                        visit(value, b[key], f"{path}.{key}")
+                        child_pointer = pointer + "/" + key.replace("~", "~0").replace("/", "~1")
+                        visit(value, b[key], f"{path}.{key}", child_pointer)
         elif isinstance(a, list):
             if not isinstance(b, list) or len(b) < len(a):
                 errors.append(f"{path} 原列表内容减少")
@@ -261,7 +274,7 @@ non-heading content line. Semantic correctness still needs evidence-based review
                     selected = index if index in unused else next(i for i in available if i in unused)
                     unused.remove(selected)
                 target = b[selected]
-                visit(value, target, f"{path}[{index}]")
+                visit(value, target, f"{path}[{index}]", pointer + f"/{index}")
         elif isinstance(a, str) and len(a.strip()) >= 24:
             if not isinstance(b, str) or a not in b:
                 errors.append(f"{path} 原叙述内容被删减或重写；应保留原文并补充必要内容")
@@ -808,6 +821,9 @@ def recover_artifact(
                         rc = CONTRACT_INVALID
                         attempt["patch_error"] = str(exc)
                 attempt["repair_scope"] = list(scope)
+                # 随生成断点保存宿主授权范围，续接也不能扩大保全豁免。
+                attempt["editable_metadata_paths"] = [pointer for pointer, rule in scope.items()
+                                                      if rule.get("metadata") is True]
             elif task == "repair_final":
                 attempt.update(status="unscoped_final_error", validation_feedback=feedback)
                 persist()
@@ -831,11 +847,12 @@ def recover_artifact(
             persist()  # 必须先落盘，再允许任何宿主规范化写入候选工作副本。
             preserve_quality_notes(reference, candidate)
             registry = read_object(workspace / "故事结构_增量.json")
-            errors = preservation_errors(reference, candidate, registry)
+            metadata_paths = set(attempt.get("editable_metadata_paths", []))
+            errors = preservation_errors(reference, candidate, registry, editable_metadata_paths=metadata_paths)
             if not errors:
                 rc, feedback = evaluate(workspace)
                 # Mechanical normalization is part of validation; verify its result too.
-                errors = preservation_errors(reference, candidate, registry)
+                errors = preservation_errors(reference, candidate, registry, editable_metadata_paths=metadata_paths)
             if errors or rc != 0:
                 # 失败反馈独立存完整文本，不修改旧阶段的材料目录。
                 # 写反馈与切换策略之间退出也能从完整旧阶段安全重做。
