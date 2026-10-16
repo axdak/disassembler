@@ -77,6 +77,10 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
             continue
         for collection in COLLECTION_KEYS:
             decode(bucket, collection, list, f"{section}.{collection}")
+    operations = result.get("治理操作")
+    if isinstance(operations, dict):
+        for key in ("合并元素", "重命名元素", "替换引用", "设置字段", "追加详情", "治理标签", "降级元素", "删除元素"):
+            decode(operations, key, list, f"治理操作.{key}")
     if isinstance(story, dict):
         # Reuse the exact same registry rules as chapter coercion/preservation.
         # Compare mirrors before trace formatting can make different raw values equal.
@@ -105,10 +109,6 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
                         if value != normalized:
                             detail[field] = normalized
                             changes.append(f"{section}.{collection}[{item.get('名称')}].{field}：规范章节序号")
-    operations = result.get("治理操作")
-    if isinstance(operations, dict):
-        for key in ("合并元素", "重命名元素", "替换引用", "设置字段", "追加详情", "治理标签", "降级元素", "删除元素"):
-            decode(operations, key, list, f"治理操作.{key}")
     if isinstance(story, dict):
         changes.extend(_retain_event_compound_tags(result, story))
         changes.extend(_relocate_additive_tags(result, story))

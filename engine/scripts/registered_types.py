@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 
+from element_identity import build_lookup_index, same_patch_rename_targets
 from story_schema_rules import COLLECTION_KEYS, COLLECTION_TO_TYPE, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION
 
 
@@ -147,6 +148,7 @@ def align_registered_types(delta: dict, current: dict) -> list[str]:
     只有正式名称在唯一类别恰有一条记录时才自动修复。目的集合恰有
     一条类型敏感 JSON 完全相同的补丁时，仅移除错误类别镜像；其他
     同名冲突、关联字段类型异常或登记歧义仍交原校验器处理。
+    原类别已有正式名或别名时保持该命名空间，歧义别名也不得跨类处理。
     同一实现也用于保全比较，避免把无损迁移或精确镜像去重当成删除。
     """
     categories: dict[str, set[str]] = {}
@@ -171,6 +173,35 @@ def align_registered_types(delta: dict, current: dict) -> list[str]:
               if len(kinds) == 1 and registrations[name] == 1}
     report = []
     modifications = delta.get("修改元素", {})
+    try:
+        renamed = same_patch_rename_targets(current, delta)
+    except ValueError:
+        # Invalid/ambiguous declarations must reach their original validator;
+        # reclassification cannot erase the source update that exposes them.
+        return report
+    identities = {}
+    for collection in COLLECTION_KEYS:
+        existing = current.get(collection, [])
+        proposed = additions.get(collection, []) if isinstance(additions, dict) else []
+        updates = modifications.get(collection, []) if isinstance(modifications, dict) else []
+        # Only additions declare new canonical names. Updates declare explicit
+        # aliases, never their own requested target as an already valid name.
+        declared_aliases = [{"别名": item.get("别名")} for item in updates
+                            if isinstance(item, dict)] if isinstance(updates, list) else []
+        identities[collection] = build_lookup_index(
+            (existing if isinstance(existing, list) else [])
+            + (proposed if isinstance(proposed, list) else []) + declared_aliases)
+        identities[collection][0].update({name: None for name in renamed.get(collection, {})})
+    operations = delta.get("治理操作", {})
+    declared_renames = operations.get("重命名元素", []) if isinstance(operations, dict) else []
+    for op in declared_renames if isinstance(declared_renames, list) else []:
+        kind = op.get("类型") if isinstance(op, dict) else None
+        collection = TYPE_TO_COLLECTION.get(kind) if isinstance(kind, str) else None
+        name = op.get("新名称") if isinstance(op, dict) else None
+        if collection in identities and isinstance(name, str) and name:
+            # Presence protects explicit source intent even for ref-only names;
+            # it never accepts the declaration or extends reference validation.
+            identities[collection][0][name] = None
     if isinstance(modifications, dict):
         for collection in COLLECTION_KEYS:
             items = modifications.get(collection)
@@ -179,7 +210,9 @@ def align_registered_types(delta: dict, current: dict) -> list[str]:
             for item in list(items):
                 name = item.get("名称") if isinstance(item, dict) else None
                 target = unique.get(name) if isinstance(name, str) else None
-                if not target or target == collection:
+                # Membership includes ambiguous None entries: the existing
+                # validator, not another category, must resolve source identities.
+                if not target or target == collection or any(name in index for index in identities[collection]):
                     continue
                 destinations = modifications.get(target, [])
                 if not isinstance(destinations, list):
@@ -214,7 +247,9 @@ def align_registered_types(delta: dict, current: dict) -> list[str]:
                     for ref in list(refs):
                         match = DETAIL_REF_RE.fullmatch(ref) if isinstance(ref, str) else None
                         target = unique.get(match[2]) if match else None
-                        if not target or TYPE_TO_COLLECTION[match[1]] == target:
+                        source = TYPE_TO_COLLECTION[match[1]] if match else None
+                        if (not target or source == target
+                                or any(match[2] in index for index in identities[source])):
                             continue
                         kind = COLLECTION_TO_TYPE[target]
                         destination = "关联" + kind

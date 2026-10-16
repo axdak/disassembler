@@ -91,6 +91,8 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
         tree = CapacityTree(project, command, worker,
                             "为故事 JSON 收尾正式简介。完整阅读已治理故事的证据，建立主角、主线、核心冲突与发展结果的定位索引。"
                             "仅概括当前已完成范围，不虚构未处理章节，不写阶段性进度、审计笔记。"
+                            "以当前有效档案为准，纠错记录和字段归档中的旧值仅用于追溯，不能复活已纠正错误。"
+                            "原简介仅供参考，须与当前档案重新核对；保持推测、传闻、条件和未完成行动的限定。"
                             "禁止修改任何角色、事件或其他故事档案。标题须有依据。",
                             "正式简介.json", [(source, "已完成范围的完整故事资料")],
                             **{**options, "adaptive_overviews": True, "protected_materials": [draft, source]})
