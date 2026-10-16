@@ -168,3 +168,31 @@ def test_final_custom_reference_array_keeps_exact_archived_old_value(tmp_path):
         "changes":[{"path":"/角色集/0/详情/见证人","value":["角色:甲"]}]},scope)
     assert validate_exact_story_schema(json.loads(target.read_text(encoding="utf-8")),mode="final")[0] == []
     assert preservation_errors(source,target) == []
+
+
+def test_finalize_valid_standalone_draft_does_not_fail_after_publication(tmp_path):
+    """既有CLI允许独立合法草稿，不能交付后再因过程库不存在抛异常。"""
+    import run_pipeline as pipeline
+    draft=tmp_path/"故事结构_草稿.json"
+    draft.write_text(json.dumps(complete_story(),ensure_ascii=False),encoding="utf-8")
+    assert pipeline.cmd_finalize(tmp_path) == 0
+    from story_source import select_analysis_story_source
+    path, raw, reason=select_analysis_story_source(tmp_path)
+    assert path == tmp_path/"故事结构.json"
+    assert raw == path.read_bytes()
+
+
+@pytest.mark.parametrize("changed", ["故事结构_草稿.json", "故事结构_增量.json"])
+def test_finalize_rejects_input_changed_during_validation(tmp_path, monkeypatch, changed):
+    """交付回执绑定实际受检字节，验证期间变化时保留上一终稿。"""
+    import run_pipeline as pipeline
+    for filename in ("故事结构_草稿.json", "故事结构_增量.json"):
+        (tmp_path/filename).write_text(json.dumps(complete_story(),ensure_ascii=False),encoding="utf-8")
+    final=tmp_path/"故事结构.json"; final.write_text('{"old":true}',encoding="utf-8")
+    def validate_then_change(*args):
+        (tmp_path/changed).write_text('{"external":"change"}',encoding="utf-8")
+        return 0
+    monkeypatch.setattr(pipeline,"run_cmd",validate_then_change)
+    assert pipeline.cmd_finalize(tmp_path) == 65
+    assert final.read_text(encoding="utf-8") == '{"old":true}'
+    assert not (tmp_path/"质量治理/最终审计/finalize_log.json").exists()

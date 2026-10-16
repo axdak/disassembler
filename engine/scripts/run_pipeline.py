@@ -4025,6 +4025,11 @@ def cmd_finalize(project_dir: Path) -> int:
         print("故事结构_草稿.json 不存在。请先运行 final-pack 生成草稿。")
         return 1
 
+    # Bind publication and receipt to the same bytes that pass validation.
+    # Standalone valid drafts remain supported when no process library exists.
+    process = project_dir / "故事结构_增量.json"
+    process_raw = process.read_bytes() if process.is_file() else b""
+    draft_raw = draft.read_bytes()
     report = audit_dir / "validate_report.txt"
     rc = run_cmd([sys.executable, str(script_path("validate_structure.py")),
                   "--strict", str(draft)], report)
@@ -4034,7 +4039,11 @@ def cmd_finalize(project_dir: Path) -> int:
         return 1
 
     # Readers must see either complete version even if publication is interrupted.
-    atomic_write_bytes(final, draft.read_bytes())
+    if (draft.read_bytes() != draft_raw
+            or (process.read_bytes() if process.is_file() else b"") != process_raw):
+        print("最终校验期间输入发生变化，保留上一终稿；请基于当前输入重新提交。")
+        return REPAIR_EXHAUSTED
+    atomic_write_bytes(final, draft_raw)
     print(f"已生成最终交付: {final}")
 
     run_cmd([sys.executable, str(script_path("progress_manager.py")),
@@ -4048,9 +4057,9 @@ def cmd_finalize(project_dir: Path) -> int:
         "draft_size_bytes": draft.stat().st_size,
         "final_size_bytes": final.stat().st_size,
         # 下游仅在三份当前内容仍匹配本次交付时使用终稿，不能读到过期终稿。
-        "process_sha256": hashlib.sha256((project_dir / "故事结构_增量.json").read_bytes()).hexdigest(),
-        "draft_sha256": hashlib.sha256(draft.read_bytes()).hexdigest(),
-        "final_sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+        "process_sha256": hashlib.sha256(process_raw).hexdigest(),
+        "draft_sha256": hashlib.sha256(draft_raw).hexdigest(),
+        "final_sha256": hashlib.sha256(draft_raw).hexdigest(),
     }
     save_json(audit_dir / "finalize_log.json", finalize_log)
     print(f"交付日志: {audit_dir / 'finalize_log.json'}")
