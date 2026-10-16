@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 from story_schema_rules import COLLECTION_KEYS, COLLECTION_TO_TYPE, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION
 
@@ -143,16 +144,19 @@ def align_preserved_moves(before: dict, after: dict, current: dict) -> None:
 def align_registered_types(delta: dict, current: dict) -> list[str]:
     """迁移唯一已登记的修改目标及关联引用，保留完整档案与冲突原值。
 
-    只有正式名称在一个类别中唯一存在时才自动修复。目的集合已含同名
-    补丁、关联字段类型异常或名称跨类别重复时，留给原校验器处理。
-    同一实现也用于保全比较，避免把合法迁移当成删除。
+    只有正式名称在唯一类别恰有一条记录时才自动修复。目的集合恰有
+    一条类型敏感 JSON 完全相同的补丁时，仅移除错误类别镜像；其他
+    同名冲突、关联字段类型异常或登记歧义仍交原校验器处理。
+    同一实现也用于保全比较，避免把无损迁移或精确镜像去重当成删除。
     """
     categories: dict[str, set[str]] = {}
+    registrations: dict[str, int] = {}
     for collection in COLLECTION_KEYS:
         items = current.get(collection, [])
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and isinstance(item.get("名称"), str):
                 categories.setdefault(item["名称"], set()).add(collection)
+                registrations[item["名称"]] = registrations.get(item["名称"], 0) + 1
     # An explicit same-name proposal in another category makes the batch
     # ambiguous even if the old registry alone had exactly one category.
     additions = delta.get("新增元素", {})
@@ -163,7 +167,8 @@ def align_registered_types(delta: dict, current: dict) -> list[str]:
                 name = item.get("名称") if isinstance(item, dict) else None
                 if isinstance(name, str) and name in categories:
                     categories[name].add(collection)
-    unique = {name: next(iter(kinds)) for name, kinds in categories.items() if len(kinds) == 1}
+    unique = {name: next(iter(kinds)) for name, kinds in categories.items()
+              if len(kinds) == 1 and registrations[name] == 1}
     report = []
     modifications = delta.get("修改元素", {})
     if isinstance(modifications, dict):
@@ -177,9 +182,16 @@ def align_registered_types(delta: dict, current: dict) -> list[str]:
                 if not target or target == collection:
                     continue
                 destinations = modifications.get(target, [])
-                if not isinstance(destinations, list) or any(
-                    isinstance(other, dict) and other.get("名称") == item["名称"] for other in destinations
-                ):
+                if not isinstance(destinations, list):
+                    continue
+                matches = [other for other in destinations
+                           if isinstance(other, dict) and other.get("名称") == name]
+                if matches:
+                    # Sorted JSON ignores only object key order: unlike dict equality,
+                    # it keeps bool/number distinctions and the complete array order.
+                    if len(matches) == 1 and json.dumps(item, sort_keys=True) == json.dumps(matches[0], sort_keys=True):
+                        items[:] = [other for other in items if other is not item]
+                        report.append(f"修改元素[{name}] {collection} → {target}（移除完全相同的重复镜像，保留目的档案）")
                     continue
                 modifications.setdefault(target, destinations).append(item)
                 items.remove(item)

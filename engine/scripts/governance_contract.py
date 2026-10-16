@@ -77,6 +77,16 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
             continue
         for collection in COLLECTION_KEYS:
             decode(bucket, collection, list, f"{section}.{collection}")
+    if isinstance(story, dict):
+        # Reuse the exact same registry rules as chapter coercion/preservation.
+        # Compare mirrors before trace formatting can make different raw values equal.
+        from registered_types import align_registered_types
+        changes.extend(align_registered_types(result, story))
+    for section in ("新增元素", "修改元素"):
+        bucket = result.get(section)
+        if not isinstance(bucket, dict):
+            continue
+        for collection in COLLECTION_KEYS:
             items = bucket.get(collection)
             if not isinstance(items, list):
                 continue

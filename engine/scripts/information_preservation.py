@@ -57,11 +57,11 @@ def set_field_operation_errors(op: dict, patch: dict | None = None, *, max_chapt
         return ["字段必须是非空字符串"]
     if field in CHAPTER_TRACE_FIELDS:
         return ["首次/最近章节不是正式顶层字段；必须使用详情/首次章节或详情/最近章节的有据纠错协议"]
+    if op.get("类型") == "事件" and field in {
+            "时间", "详情", "涉及章节", "首次章节", "最近章节", "详情/涉及章节", "详情/首次章节", "详情/最近章节"}:
+        return [f"不得设置事件[{op.get('名称')}]的 {field}；时间/涉及章节/数组位置不可变"]
     if field == "详情":
         return ["不得整体替换详情；请使用追加详情或详情/字段纠错"]
-    if op.get("类型") == "事件" and field in {
-            "时间", "涉及章节", "首次章节", "最近章节", "详情/涉及章节", "详情/首次章节", "详情/最近章节"}:
-        return [f"不得设置事件[{op.get('名称')}]的 {field}；时间/涉及章节/数组位置不可变"]
     leaf = field.removeprefix("详情/")
     if (field.startswith("详情/") and not leaf) or leaf in {ARCHIVE_FIELD, CORRECTION_FIELD, FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE, "涉及章节"}:
         return ["不能通过设置字段改变机器追溯或宿主归档字段"]
