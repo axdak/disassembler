@@ -123,6 +123,10 @@ def test_audit_prompt_uses_runtime_synopsis_contract(monkeypatch):
         full_story_json="", story_index="", relevant_details="", previous_correction=None,
         taxonomy_json="")
     assert "上限 1234 字" in text
+    # The real periodic prompt must not narrow the existing factual audit to formatting.
+    assert "只修正结构质量问题" not in text
+    assert "同时核对事实与结构质量" in text
+    assert "不能仅完成标签、分组和引用整理就认为内容已审计" in text
     assert "`【甲】`、`【乙】`、`【丙】`、`【丁】`" in text
 
 
