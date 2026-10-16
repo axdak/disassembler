@@ -1,8 +1,9 @@
 """Deliver the accumulated story without an obligatory whole-book model rewrite.
 
-The only unconditional model task is the formal introduction. It has read-only
-evidence and can replace two introduction fields only. Original strict final
-validation and the program-first repair scheduler remain the publication gate.
+A source-bound synopsis is preserved, including accepted draft-only repairs.
+Missing descriptions or untrusted drafts retain read-only evidence generation.
+Strict final validation and scoped repair remain the publication gate, including
+missing titles; reusing a synopsis does not assert its semantic correctness.
 """
 from __future__ import annotations
 
@@ -49,28 +50,40 @@ def ensure_delivery_governance(project: Path, command: str, *, end_chapter_seq=0
 
 
 def prepare_delivery(project: Path) -> int:
-    """Refresh a draft only when the accumulated source changes, retaining backups."""
+    """Refresh a source-bound draft, retaining backups and pre-normalization proof."""
     from run_pipeline import ensure_story, cmd_commit_final_draft
-    source = ensure_story(project)
-    draft = project / "故事结构_草稿.json"
-    root = project / "质量治理/最终审计/交付"
-    root.mkdir(parents=True, exist_ok=True)
-    receipt = root / "source.json"
-    state = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
-    signature = digest(source)
-    if state.get("source") != signature or not draft.is_file():
-        if draft.is_file():
-            atomic_write_bytes(root / f"previous_draft_{digest(draft)}.json", draft.read_bytes())
-        atomic_write_bytes(draft, source.read_bytes())
-        save_json(receipt, {"source": signature})
-    # Run deterministic normalization first. A failed validation is retained for
-    # the subsequent repair stage; it does not authorize skipping final checks.
-    cmd_commit_final_draft(project)
+    with project_write_lock(project):
+        # ensure_story may coerce malformed descriptions into nonempty strings.
+        # Capture only their original shape under the same lock, not another
+        # synopsis copy; this is type/nonempty evidence, not semantic approval.
+        source = project / "故事结构_增量.json"
+        try:
+            original = json.loads(source.read_bytes())
+        except (OSError, ValueError):
+            original = {}
+        intro = original.get("介绍") if isinstance(original, dict) else None
+        description = intro.get("描述") if isinstance(intro, dict) else None
+        description_valid = isinstance(description, str) and bool(description.strip())
+        source = ensure_story(project)
+        draft = project / "故事结构_草稿.json"
+        root = project / "质量治理/最终审计/交付"
+        root.mkdir(parents=True, exist_ok=True)
+        receipt = root / "source.json"
+        state = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
+        signature = digest(source)
+        if state.get("source") != signature or not draft.is_file():
+            if draft.is_file():
+                atomic_write_bytes(root / f"previous_draft_{digest(draft)}.json", draft.read_bytes())
+            atomic_write_bytes(draft, source.read_bytes())
+            save_json(receipt, {"source": signature, "source_description_valid": description_valid})
+        # Run deterministic normalization first. A failed validation is retained
+        # for subsequent scoped repair; it never authorizes skipping final checks.
+        cmd_commit_final_draft(project)
     return 0
 
 
 def finish_introduction(project: Path, command: str, worker, **options) -> int:
-    """Read complete evidence hierarchically and publish title/description only."""
+    """Reuse a trusted synopsis; otherwise synthesize from complete evidence."""
     source = project / "故事结构_增量.json"
     draft = project / "故事结构_草稿.json"
     root = project / "质量治理/最终审计/交付"
@@ -86,6 +99,30 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
             value = json.loads(draft_bytes)
             if state.get("source") == source_signature and state.get("introduction") == value.get("介绍"):
                 return 0
+            # The source receipt also covers accepted repairs made only to the
+            # draft. Preserve that current value instead of restoring the older
+            # process synopsis; missing titles remain strict final-repair work.
+            intro = value.get("介绍")
+            description = intro.get("描述") if isinstance(intro, dict) else None
+            if isinstance(description, str) and description.strip():
+                source_receipt = root / "source.json"
+                prepared = (json.loads(source_receipt.read_text(encoding="utf-8"))
+                            if source_receipt.is_file() else {})
+                prepared_source = isinstance(prepared, dict) and prepared.get("source") == source_signature
+                if prepared_source and "source_description_valid" in prepared:
+                    # Preserve the pre-normalization result across resume; a
+                    # normalized "42" must not become evidence on the next run.
+                    source_description_valid = prepared["source_description_valid"] is True
+                else:
+                    source_value = json.loads(source.read_bytes())
+                    source_intro = source_value.get("介绍") if isinstance(source_value, dict) else None
+                    source_description = source_intro.get("描述") if isinstance(source_intro, dict) else None
+                    source_description_valid = isinstance(source_description, str) and bool(source_description.strip())
+                if source_description_valid and (draft_signature == source_signature or prepared_source):
+                    # Publish the resume receipt under the writer lock, without
+                    # rewriting any draft field or changing final schema checks.
+                    save_json(receipt, {"source": source_signature, "introduction": intro})
+                    return 0
         if not command:
             return 2
         tree = CapacityTree(project, command, worker,

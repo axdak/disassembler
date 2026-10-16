@@ -166,9 +166,16 @@ def test_delivery_cycles_include_tail_and_reject_incomplete_chapters(tmp_path, m
     assert len(seen) == 2
 
 
+def story_without_description():
+    """Exercise introduction generation rather than reuse an accepted synopsis."""
+    value = empty_story()
+    value["介绍"]["描述"] = ""
+    return value
+
+
 def test_introduction_changes_only_intro_and_reuses_completed_work(tmp_path):
     source = tmp_path / "故事结构_增量.json"
-    save_json(source, empty_story())
+    save_json(source, story_without_description())
     assert prepare_delivery(tmp_path) == 0
     draft = tmp_path / "故事结构_草稿.json"
     before = json.loads(draft.read_text(encoding="utf-8"))
@@ -196,7 +203,7 @@ def test_introduction_changes_only_intro_and_reuses_completed_work(tmp_path):
 
 
 def test_wrong_intro_contract_uses_bounded_repair_and_keeps_draft(tmp_path):
-    save_json(tmp_path / "故事结构_增量.json", empty_story())
+    save_json(tmp_path / "故事结构_增量.json", story_without_description())
     prepare_delivery(tmp_path)
     draft = tmp_path / "故事结构_草稿.json"
     before = draft.read_bytes()
@@ -242,7 +249,7 @@ def test_introduction_rejects_source_or_draft_changes_before_publication(tmp_pat
     from project_lock import project_write_lock
     from repair_budget import REPAIR_EXHAUSTED
     source = tmp_path / "故事结构_增量.json"
-    save_json(source, empty_story())
+    save_json(source, story_without_description())
     prepare_delivery(tmp_path)
     draft = tmp_path / "故事结构_草稿.json"
     before = draft.read_bytes()
@@ -289,7 +296,7 @@ def test_introduction_publishes_under_project_lock_and_retains_metadata(tmp_path
     import story_delivery
     from project_lock import project_write_lock
     source = tmp_path / "故事结构_增量.json"
-    save_json(source, empty_story())
+    save_json(source, story_without_description())
     prepare_delivery(tmp_path)
     draft = tmp_path / "故事结构_草稿.json"
     value = json.loads(draft.read_text(encoding="utf-8"))

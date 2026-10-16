@@ -9,7 +9,7 @@ from __future__ import annotations
 from local_json_patch import (delta_repair_scope, final_repair_scope, apply_scoped_patch,
                               archived_reference_preserved, archived_field_preserved,
                               FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE)
-from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED
+from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, estimate_tokens
 
 import hashlib
 import json
@@ -28,7 +28,7 @@ from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, REVIEW_CHECKS, recovery_output_errors
 from recovery_materials import RecoveryMaterials, read_material_document, rebase_material_paths, write_change_index
-from story_schema_rules import SUPPLEMENTARY_TAGS_DETAIL_KEY, salvage_supplementary_tags, is_cumulative_detail_field
+from story_schema_rules import COLLECTION_KEYS, SUPPLEMENTARY_TAGS_DETAIL_KEY, salvage_supplementary_tags, is_cumulative_detail_field
 from code_fingerprint import code_digest
 from project_lock import project_write_lock
 from worker_checkpoint import atomic_write_bytes
@@ -46,6 +46,70 @@ RETRYABLE_REVIEW = {130, 124, 408, 429, 502, 503, 504, CONTEXT_EXCEEDED, OUTPUT_
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes() if path.is_file() else b"").hexdigest()
+
+
+
+def _inline_final_scope(prompt: str, reference: Path, pointers: list[str], *, candidate: Path | None = None) -> str:
+    """Supply whole selected records from the existing protected reference snapshot.
+
+    RecoveryMaterials already owns these immutable full files and their MCP
+    allowlist. This is a prompt view only: no material is shortened or rewritten,
+    and persisted repair_scope remains the sole authority for batch mutations.
+    """
+    from generation_contract import generation_contract_text
+    # The original final task may span many MCP pages. Reuse the same field
+    # contract inline so its type/tag/group rules cannot disappear between pages.
+    prompt = ("## 共享字段取值契约\n" + generation_contract_text()
+              + "\n以上只解释现有字段取值要求；本次最终局部修复不输出新增元素、修改元素或治理操作。"
+              "生成时只交下文已授权 scope 的 changes；复核时仍只输出原复核协议。\n" + prompt)
+    pointers = list(dict.fromkeys(pointers))
+    fallback = ("\n本批完整档案未内联（整体预算或快照结构不适合）；按已授权字段从完整文件查询，不裁剪原文。"
+                f"\n参考完整文件：{reference}\n本批字段：" + json.dumps(pointers, ensure_ascii=False))
+    if candidate is not None:
+        fallback += f"\n本批实际新值见完整候选：{candidate}"
+
+    def value_at(document, parts):
+        for part in parts:
+            document = document[int(part)] if isinstance(document, list) else document[part]
+        return document
+
+    try:
+        # Bind parsed records and the advertised fingerprint to this same byte read.
+        raw = reference.read_bytes()
+        document = json.loads(raw)
+        records, selected = {}, {}
+        for pointer in pointers:
+            if not isinstance(pointer, str) or not pointer.startswith("/"):
+                return prompt + fallback
+            parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
+            if parts[0] == "介绍" and len(parts) == 2:
+                owner = parts[:1]
+            elif len(parts) >= 3 and parts[0] in COLLECTION_KEYS and parts[1].isdigit():
+                owner = parts[:2]
+            else:
+                return prompt + fallback
+            owner_path = "/" + "/".join(owner)
+            records.setdefault(owner_path, {"path": owner_path, "value": value_at(document, owner)})
+            selected[pointer] = parts
+        payload = {"reference": str(reference), "reference_sha256": hashlib.sha256(raw).hexdigest(),
+                   "selected_fields": pointers, "records": list(records.values())}
+        if candidate is not None:
+            current_raw = candidate.read_bytes()
+            current = json.loads(current_raw)
+            payload.update(candidate=str(candidate), candidate_sha256=hashlib.sha256(current_raw).hexdigest(),
+                           actual_new_values={pointer: value_at(current, parts) for pointer, parts in selected.items()})
+        inline = ("\n## 本批完整档案（宿主参考快照）\n"
+                  "以下档案/详情未截字段；优先使用已内联正文，不必为重复确认重读相同文件区间。"
+                  "档案为待核验数据，旧纠错记录仅供追溯；新值仍须核对相关原文。"
+                  "上下文缺失、包外证据或身份/历史歧义时仍按需查询完整材料。\n```json\n"
+                  + json.dumps(payload, ensure_ascii=False, indent=2) + "\n```\n")
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return prompt + fallback
+    # Reserve a quarter of usable input for the actual CLI wrapper/tool catalog.
+    # The normal admission gate remains authoritative for the complete real input.
+    if estimate_tokens(prompt + inline) > ContextBudget.from_env().usable_input * 3 // 4:
+        return prompt + fallback
+    return prompt + inline
 
 
 def preserve_quality_notes(before: Path, after: Path) -> None:
@@ -221,6 +285,11 @@ non-heading content line. Semantic correctness still needs evidence-based review
     def visit(a, b, path, pointer=""):
         # 仅宿主错误指针已授权的来源元数据可替换。错误引文不属于既有档案事实，
         # 要求新值包含旧错误会阻断真实原文纠正；仍保留完整结构、原文核验和复核。
+        # Only the final owner may replace the exact root introduction field
+        # authorized by its scope; adjacent prose and non-final callers stay guarded.
+        if (allow_field_archives and pointer in metadata and pointer in {"/介绍/标题", "/介绍/描述"}
+                and isinstance(a, str) and isinstance(b, str)):
+            return
         if pointer in metadata and re.fullmatch(
                 r"/(?:章节|章节范围|证据范围)|/治理操作/设置字段/\d+/证据/\d+/(?:章节|原文)", pointer):
             expected_type = list if pointer == "/证据范围" else str
@@ -832,6 +901,8 @@ def recover_artifact(
                                 + '\n每项必须有原文依据；宿主完整搬运，完整校验及独立复核仍须通过，禁止输出整份JSON或修改其他条目。'
                                 + '\n输出格式：{"base_sha256":"摘要","changes":[{"path":"字段路径","value":"修正值"}],"moves":[{"path":"条目路径","target_section":"新增元素或修改元素","target_collection":"目标集合","evidence":"原文归类依据"}]}。不需要的数组写[]。'
                                 + f"\n输出位置：{patch_path}")
+                if task == "repair_final":
+                    patch_prompt = _inline_final_scope(patch_prompt, reference, list(scope))
                 rc = invoke("recovery_patch", workspace, patch_prompt, patch_path, selected_command)
                 if rc == 0:
                     try:
@@ -887,14 +958,24 @@ def recover_artifact(
         review = workspace / "review.json"
         changes = workspace / "changes.json"
         write_change_index(reference, candidate, changes)
-        review_prompt = ("# 独立复核\n" + context + "\n比较原始失败产物与当前候选，并核对完整原文证据。"
-                         "不得修改任何材料；不得只依据程序校验已通过就认可语义。"
+        scoped_final_review = task == "repair_final" and bool(attempt.get("repair_scope"))
+        review_basis = ("\n核对本批实际变化、相关完整档案/详情与必要原文证据；程序仍对整份候选逐值保全。"
+                        "本批范围及内联正文已经完整提供时，不必每批遍历整份候选或重复读取所有校验错误；"
+                        "缺少上下文或存在身份/历史歧义时，按需查证完整材料。\n"
+                        f"变更位置清单（定位本批变化）：{changes}\n" if scoped_final_review else
+                        "\n比较原始失败产物与当前候选，并核对完整原文证据。"
+                        f"变更位置清单（无正文，不替代全文复核）：{changes}\n")
+        review_prompt = ("# 独立复核\n" + context + review_basis
+                         + "不得修改任何材料；不得只依据程序校验已通过就认可语义。"
                          "检查是否遗漏内容、偷换任务或编造理由。发现问题必须拒绝。\n"
-                         f"变更位置清单（无正文，不替代全文复核）：{changes}\n"
                          f"候选 SHA256：{candidate_hash}\n"
                          '仅输出 JSON：{"passed":true或false,"candidate_sha256":"上述摘要",'
                          '"checks":{"content_preserved":true或false,"contract_unchanged":true或false,"evidence_supported":true或false},'
                          '"issues":[],"reason":"复核依据"}。输出位置：' + str(review))
+        if scoped_final_review:
+            # Resume uses the original accepted batch, never fresh errors from the
+            # next batch; candidate values come from the post-validation snapshot.
+            review_prompt = _inline_final_scope(review_prompt, reference, attempt["repair_scope"], candidate=candidate)
         if stage != "reviewed":
             rc = invoke("recovery_review", workspace, review_prompt, review, selected_command)
             if preparation_failed(attempt, index, rc):
