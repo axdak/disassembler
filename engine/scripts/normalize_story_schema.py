@@ -116,8 +116,19 @@ def is_detail_ref_array_field(key: Any) -> bool:
 
 
 def canonicalize_detail_ref_array(value: Any) -> Any:
-    """关联数组可解码或由单个类型引用包装；错误项完整留待校验。"""
+    """规范确定的引用容器和类型拼写；未知类型与错配目标留待原校验。"""
+    def canonical(entry):
+        if not isinstance(entry, str):
+            return entry
+        prefix, separator, name = entry.partition(":")
+        if separator and prefix.strip() in COLLECTION_TO_TYPE and name.strip():
+            # 集合名到类型是一一映射；仅修拼写，不猜人物身份或跨类别改目标。
+            return f"{COLLECTION_TO_TYPE[prefix.strip()]}:{name.strip()}"
+        return entry
     decoded = decode_json_array(value)
+    if isinstance(decoded, list):
+        return [canonical(entry) for entry in decoded]
+    decoded = canonical(decoded)
     if isinstance(decoded, str) and is_typed_ref(decoded):
         return [decoded]
     return decoded

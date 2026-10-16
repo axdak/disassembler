@@ -196,3 +196,12 @@ def test_finalize_rejects_input_changed_during_validation(tmp_path, monkeypatch,
     assert pipeline.cmd_finalize(tmp_path) == 65
     assert final.read_text(encoding="utf-8") == '{"old":true}'
     assert not (tmp_path/"质量治理/最终审计/finalize_log.json").exists()
+
+
+def test_collection_name_reference_prefix_is_canonicalized_without_guessing_identity():
+    """真实151章的“其他事项集:名称”属于确定的类型拼写，不需模型重写。"""
+    from normalize_story_schema import canonicalize_detail_ref_array
+    assert canonicalize_detail_ref_array(["其他事项集:三行合一战技"]) == ["其他事项:三行合一战技"]
+    assert canonicalize_detail_ref_array('["角色集:甲"]') == ["角色:甲"]
+    assert canonicalize_detail_ref_array(["阵营集:甲"]) == ["阵营:甲"]
+    assert canonicalize_detail_ref_array(["未知集:甲"]) == ["未知集:甲"]
