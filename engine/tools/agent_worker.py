@@ -487,11 +487,17 @@ def run_provider(
                 "command": sys.executable,
                 "args": server_args,
             }}}, ensure_ascii=False), encoding="utf-8")
-            files = json.loads(manifest.read_text(encoding="utf-8"))["files"]
-            # Supply discovery metadata before the first paid turn. Reads remain
-            # available for additional frozen evidence; inline bodies are not resent.
-            catalog = [{"path": item["source"], "provided_in_prompt": bool(item.get("provided_in_prompt"))}
-                       for item in files]
+            context = json.loads(manifest.read_text(encoding="utf-8"))
+            files, context_root = context["files"], Path(context["project"])
+            # Shorten display only: the reader resolves full relative paths under
+            # this exact manifest root. Keep outside logical aliases unchanged;
+            # neither snapshot identities nor the allowlist are rewritten.
+            catalog = []
+            for item in files:
+                source = Path(item["source"])
+                display = str(source.relative_to(context_root)) if source.is_relative_to(context_root) else item["source"]
+                catalog.append({"path": display, "provided_in_prompt": bool(item.get("provided_in_prompt"))})
+            prompt += f"\n材料路径基准（冻结项目根目录）：{context_root}；目录中的相对path可直接用于read_context。\n"
             prompt += "\n## 宿主材料目录（已列出，无需list_context）\n" + json.dumps(catalog, ensure_ascii=False)
             prompt += "\n先直接处理已内嵌材料；只有缺少必要证据时才按确切路径查询。\n"
             # Account for the actual host catalog/status as well as the wrapper
