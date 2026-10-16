@@ -565,21 +565,13 @@ class Orchestrator:
         )
 
     def _stage_commit_final_draft(self) -> int:
-        # commit-final-draft 做 strict 校验；失败时生成 repair_final.md，让 worker
-        # 自动切换修复策略并独立验收，最多 max_repair_rounds 种策略。
-        draft = self.project_dir / "故事结构_草稿.json"
-        repair = self.project_dir / "质量治理" / "最终审计" / "repair_final.md"
-        # 无论允许几轮修复，都先做一次提交校验；随后每完成一轮修复都必须
-        # 再校验一次，避免“最后一轮已经修好却未验收就返回失败”的边界错误。
-        rc = cmd_commit_final_draft(self.project_dir)
-        if rc == 0:
-            return 0
-        if not repair.is_file():
-            return 1
-        return run_repair_worker(
-            self._worker_command(), self.project_dir, "repair_final", repair, draft,
+        """桌面与自动流程共用有限字段补齐，严格验收后才进入交付。"""
+        from story_delivery import commit_delivery
+        return commit_delivery(
+            self.project_dir, self._worker_command(),
             timeout=self.config.worker_timeout_seconds, retries=self.config.worker_retries,
             worker_window=self.config.worker_window, repair_limit=self.config.max_repair_rounds,
+            commit=cmd_commit_final_draft, repair_worker=run_repair_worker,
         )
 
     def _stage_finalize(self) -> int:

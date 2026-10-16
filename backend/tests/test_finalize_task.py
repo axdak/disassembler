@@ -177,7 +177,6 @@ def test_finalize_adapter_uses_program_before_bounded_model_repair(tmp_path, mon
         return 0
     monkeypatch.setattr(story_delivery, "prepare_delivery", prepare)
     monkeypatch.setattr(story_delivery, "finish_introduction", lambda *a, **kw: 0)
-    monkeypatch.setattr(task_adapters, "cmd_commit_final_draft", lambda *a: 1)
     monkeypatch.setattr(run_pipeline, "wait_before_worker_retry", lambda attempt: False)
 
     def worker(command, directory, env, timeout):
@@ -195,7 +194,35 @@ def test_finalize_adapter_uses_program_before_bounded_model_repair(tmp_path, mon
     if needs_model:
         with pytest.raises(RuntimeError, match="rc=65"):
             FinalizeAdapter().run(context)
-        assert calls == ["auto_repair_final", "auto_repair_final"]
+        assert calls == ["recovery_patch", "recovery_patch"]
     else:
         FinalizeAdapter().run(context)
         assert calls == []
+
+
+def test_finalize_adapter_completes_multiple_scoped_field_batches(tmp_path, monkeypatch):
+    """桌面入口与自动入口共用补齐闭环，不能一批通过后直接阻断下一批。"""
+    import copy
+    import local_json_patch as patcher
+    import task_adapters
+    from story_schema_rules import DEFAULTS
+    story = copy.deepcopy(EMPTY_STORY)
+    for name in ("甲", "乙"):
+        role = copy.deepcopy(DEFAULTS["角色集"])
+        role.update(名称=name, 详情={"首次章节":"0001", "最近章节":"0001"})
+        story["角色集"].append(role)
+    project = _seed_project(tmp_path, story)
+    monkeypatch.setattr(patcher, "FINAL_REPAIR_BATCH_FIELDS", 1)
+    monkeypatch.setattr(story_delivery, "finish_introduction", lambda *a, **kw: 0)
+    calls = []
+    def repair(command, root, task, pack, output, **options):
+        data = json.loads(output.read_text(encoding="utf-8"))
+        selected = next(role for role in data["角色集"] if not role["介绍"])
+        calls.append(selected["名称"])
+        selected["介绍"] = selected["名称"] + "是原文中参与救援的角色。"
+        _write_json(output, data)
+        return 0
+    monkeypatch.setattr(task_adapters, "run_repair_worker", repair)
+    FinalizeAdapter().run(_make_context(project, {"worker_command":"offline"}))
+    assert calls == ["甲", "乙"]
+    assert (project / "故事结构.json").is_file()

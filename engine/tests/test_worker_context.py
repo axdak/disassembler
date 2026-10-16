@@ -219,3 +219,40 @@ def test_story_domain_queries_use_only_frozen_authoritative_material(tmp_path):
     assert full["items"][0]["record"]["介绍"] == "交易地点"
     assert reader.story_query_chapters("search", query="薰儿")["matches"][0]["chapter"] == chapter.name
     assert "萧炎" in reader.story_query_chapters("read", chapter=chapter.name, limit=100)["text"]
+
+
+def test_story_cache_is_scoped_to_frozen_reader_revision(tmp_path, monkeypatch):
+    """Repeated domain queries parse once; a new reader retains its own revision."""
+    import worker_context
+    reader = story_reader(tmp_path, [{"名称": "旧名", "详情": {"状态": "旧事实"}}])
+    reads, indexes = [], []
+    original_read = Path.read_bytes
+    original_index = worker_context.build_lookup_index
+
+    def counted_read(path):
+        if path.name == "故事结构_增量.json":
+            reads.append(path)
+        return original_read(path)
+
+    def counted_index(records):
+        indexes.append(records)
+        return original_index(records)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read)
+    monkeypatch.setattr(worker_context, "build_lookup_index", counted_index)
+    first_revision = reader.story_snapshot()["revision"]
+    refs = [{"collection": "角色集", "name": "旧名"}] * 3
+    assert len(reader.story_get_units(refs)["items"]) == 3
+    assert reader.story_search("旧事实")["items"]
+    assert json.loads(reader.story_read_fields("角色集", "旧名", ["/详情/状态"])["text"])
+    assert len(reads) == 1
+    assert len(indexes) == 1
+    # Returned L2 data must not mutate cached facts in subsequent queries.
+    result = reader.story_get_units(refs[:1], "L2")
+    result["items"][0]["record"]["名称"] = "外部改写"
+    assert reader.story_get_units(refs[:1])["items"][0]["名称"] == "旧名"
+    newer = story_reader(tmp_path, [{"名称": "新名"}])
+    assert newer.story_snapshot()["revision"] != first_revision
+    assert newer.story_get_units([{"collection": "角色集", "name": "新名"}])["items"]
+    assert reader.story_snapshot()["revision"] == first_revision
+    assert reader.story_get_units(refs[:1])["items"][0]["名称"] == "旧名"

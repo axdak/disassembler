@@ -362,16 +362,19 @@ class CapacityTree:
             # intact. Completed leaves are never rerun when a parent overflows.
             limit = self.overview_budget // 2
             while limit >= 32:
-                compressed = []
-                for child in (left, right):
-                    value, _ = self.request(
-                        f"关联定位索引：{child[0]}\n完整子节点：{child[2][-1]}\n"
-                        "只重写紧凑的关联定位索引；原证据与正文仍在子节点，不重写正文。",
-                        f"收紧关联索引至 {limit} token", overview_only=True, overview_limit=limit)
-                    compressed.append(value["overview"])
-                smaller = material.replace(f"左区间索引：\n{left[0]}\n右区间索引：\n{right[0]}\n",
-                    f"左区间索引：\n{compressed[0]}\n右区间索引：\n{compressed[1]}\n", 1)
                 try:
+                    # Compression can itself exceed its routing budget. Keep it
+                    # inside the same capacity fallback as parent reconciliation;
+                    # request checkpoints retain accepted leaves and child indices.
+                    compressed = []
+                    for child in (left, right):
+                        value, _ = self.request(
+                            f"关联定位索引：{child[0]}\n完整子节点：{child[2][-1]}\n"
+                            "只重写紧凑的关联定位索引；原证据与正文仍在子节点，不重写正文。",
+                            f"收紧关联索引至 {limit} token", overview_only=True, overview_limit=limit)
+                        compressed.append(value["overview"])
+                    smaller = material.replace(f"左区间索引：\n{left[0]}\n右区间索引：\n{right[0]}\n",
+                        f"左区间索引：\n{compressed[0]}\n右区间索引：\n{compressed[1]}\n", 1)
                     value, artifact = self.request(smaller, f"跨区间归并复核（索引预算 {limit}）",
                                                     overview_only=overview_only, review=review,
                                                     overview_limit=limit)

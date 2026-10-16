@@ -18,7 +18,7 @@
 
 核心原则：
   1. 大模型不直接吃全书；先分包，后归约。
-  2. 优先使用章节分析MD + 故事结构_增量.json 摘要。
+  2. 优先使用章节分析MD + 当前权威故事结构摘要（交付后使用已验证终稿）。
   3. 原文只按需要抽样/摘录，避免上下文爆炸。
   4. 每个分析结论必须能回指：章节、原文片段、故事结构元素。
 """
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -38,6 +39,7 @@ from story_schema_rules import COLLECTION_KEYS, SUPPLEMENTARY_TAGS_DETAIL_KEY, p
 from prompt_loader import render_prompt
 from chapter_naming import title_slug_from_filename
 from synopsis_contract import SYNOPSIS_MAX_CHARS
+from story_source import declared_story_source, select_analysis_story_source
 
 TYPE_TO_COLLECTION = {
     "角色": "角色集",
@@ -273,12 +275,12 @@ def _build_summary_index(summary_text: str) -> str:
     return "\n".join(index_lines) if found else ""
 
 
-def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[str, Any]], max_pack_chars: int = 70000) -> str:
+def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[str, Any]], max_pack_chars: int = 70000, story_path: Optional[Path] = None) -> str:
     """结构类全书分析的上下文：全书级中间产物 + 指引，不逐章堆砌章节分析MD。
 
     结构类维度（STRUCTURE_TASKS）的结论靠故事结构元素和全书级中间产物回指，
     不需要每章 1.2 万字分析MD。本函数按 task 收集相关全书级产物，并指引 worker
-    按需读 故事结构_增量.json 取元素详情。上游产物缺失时显式标注，不静默吞掉。
+    按需读当前权威故事档案取元素详情。上游产物缺失时显式标注，不静默吞掉。
 
     章节梗概汇总段借鉴周期治理（write_audit_pack）的 fallback 链思想：单一字符预算
     （max_pack_chars）下逐档降载（全量梗概 → 分章梗概索引 → 仅故事索引），超限降载
@@ -286,6 +288,7 @@ def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[st
     """
     from context_budget import ContextBudget
     capacity = ContextBudget.from_env()
+    story_path = story_path or select_analysis_story_source(project_dir)[0]
     lines: List[str] = ["## 全书级分析材料", ""]
 
     if task == "narrative_structure":
@@ -313,7 +316,7 @@ def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[st
                 lines.append(summary_index)
                 lines.append("```")
             else:
-                lines.append("### 章节梗概汇总（已降载：全书过大，仅保留上方故事结构索引，按需读 `故事结构_增量.json`）")
+                lines.append(f"### 章节梗概汇总（已降载：全书过大，仅保留上方故事结构索引，按需读 `{story_path}`）")
         else:
             lines.append("### 章节梗概汇总")
             lines.append("【未生成 `章节梗概汇总.md`；建议先运行 `--task summary` 生成。本任务将主要依赖故事结构JSON摘要。】")
@@ -335,7 +338,7 @@ def build_structure_context(project_dir: Path, task: str, chapters: List[Dict[st
 
     lines.append("### 上下文指引")
     lines.append("- 当前故事结构摘要已在上方列出（角色集/事件集/地点集/线索集/阵营集/物品集/其他事项集的元素与分组）。")
-    lines.append("- 如需元素详情（关系/介绍/详情/时间/涉及章节等），可读取项目根目录的 `故事结构_增量.json`。")
+    lines.append(f"- 如需元素详情（关系/介绍/详情/时间/涉及章节等），读取当前权威故事档案 `{story_path}`。")
     lines.append("- 所有结论必须回指章节号、原文片段或 `类型:名称` 元素；不确定写“待确认”。")
     lines.append("")
     return "\n".join(lines)
@@ -655,8 +658,12 @@ def split_narrative_batches(project_dir: Path, chapters: List[Dict[str, Any]], m
 
 
 def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], targets: List[str], question: str, include_original: str, max_original_chars: int, max_analysis_chars: int, pack_no: int, total_packs: int, per_chapter_seq: Optional[int] = None, story_summary_max_items: int = 0, context_budget_chars: int = 160000, max_pack_chars: int = 70000) -> str:
-    story_path = project_dir / "故事结构_增量.json"
-    story = load_json(story_path) or {}
+    story_path, story_raw, source_reason = select_analysis_story_source(project_dir)
+    try:
+        story = json.loads(story_raw) if story_raw else {}
+    except (ValueError, UnicodeError):
+        # Retain the legacy empty-summary fallback without changing the source.
+        story = {}
     task_info = TASKS[task]
     lines: List[str] = []
     if per_chapter_seq is not None:
@@ -719,16 +726,20 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
             target_material.extend([f"### {type_name}:{name}", "```json",
                                     json.dumps(item, ensure_ascii=False, indent=2), "```", ""])
 
+    # Keep authority in the repeated contract header so every material fragment
+    # registers the same source for frozen tools and checkpoint fingerprints.
+    lines.extend([f"当前权威故事档案：`{story_path}`",
+                  f"当前故事版本：{hashlib.sha256(story_raw).hexdigest()}", source_reason, ""])
     lines.append(output_contract(task))
     lines.append("")
     # All facts are in the splittable material section, not an unbounded header.
     lines.extend(["## 章节材料", "### 历史故事全局索引",
                   summarize_story_structure(story, max_items=0),
-                  f"完整历史档案：{project_dir / '故事结构_增量.json'}；索引只定位，具体事实须核对完整档案。",
+                  f"完整历史档案：{story_path}；索引只定位，具体事实须核对完整档案。",
                   f"原文与章节分析保留在 {project_dir / '原文拆解'} 和 {project_dir / '章节处理'}，按证据章节核实。", ""])
     lines.extend(target_material)
     if task in STRUCTURE_TASKS and per_chapter_seq is None:
-        lines.append(build_structure_context(project_dir, task, chapters, max_pack_chars=max_pack_chars))
+        lines.append(build_structure_context(project_dir, task, chapters, max_pack_chars=max_pack_chars, story_path=story_path))
     else:
         for ch in chapters:
             lines.append(build_chapter_block(project_dir, ch, task, "full", max_original_chars, max_analysis_chars))
@@ -836,6 +847,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.max_analysis_chars,
         )
 
+    story_path, story_revision = None, ""
     pack_files = []
     for i, batch in enumerate(batches, 1):
         content = build_pack(
@@ -853,6 +865,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             context_budget_chars=args.context_budget_chars,
             max_pack_chars=args.max_pack_chars,
         )
+        # Manifest metadata must describe the bytes used by the actual packs,
+        # never a separate source read that could race a concurrent revision.
+        current_source = declared_story_source(project_dir, content)
+        current_revision = re.search(r"^当前故事版本：([0-9a-f]{64})$", content, re.MULTILINE)[1]
+        if story_path is not None and (story_path, story_revision) != (current_source, current_revision):
+            print("错误: 分包期间故事版本变化，请重新生成任务包；未发布混合版本清单。")
+            return 1
+        story_path, story_revision = current_source, current_revision
         try:
             pieces = split_rendered_pack(content, args.max_pack_chars)
         except ValueError as exc:
@@ -865,6 +885,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             path = out_dir / f"pack_{len(pack_files) + 1:03d}.md"
             path.write_text(piece, encoding="utf-8")
             hierarchy = {"sources": [str(path.resolve())],
+                         "references": [str(story_path)] if story_path.is_file() else [],
                          "contract": output_contract(args.task) + "\n" + TASKS[args.task]["goal"]
                                      + "\n用户指定问题：" + (args.question or "无")
                                      + "\n章节范围：" + args.chapters
@@ -879,6 +900,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "created_at": timestamp,
         "task": args.task,
         "task_name": TASKS[args.task]["name"],
+        "story_source": str(story_path),
+        "story_revision": story_revision,
         "chapters": [int(ch["seq"]) for ch in chapters],
         "chapter_range": args.chapters,
         "targets": args.targets,

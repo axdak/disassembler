@@ -111,6 +111,7 @@ def generation_contract_text() -> str:
         "事件分组和介绍必须有原文依据且非空；参与成员使用真实字符串数组，只有确无人物参与才可为空。",
         "每个新增事件的标签集必须包含主题+叙事功能+情绪+冲突四维复合主标签；禁止因精简或标签标准化迁入详情.补充标签。",
         "旧主标签或事件事实确有错误时，周期治理可通过治理操作.设置字段纠正：声明字段、原值、值、理由及证据数组[{章节,原文}]；原句必须可在已处理原文中找到。事件详情只用详情/字段逐项纠错，不整体覆盖详情。普通更新应保全已有事实，不将纠错与补充混用。",
+        "当前状态与累计事实分别处理：身份、所属阵营、存续关系等确有状态转变，使用有原文证据的治理操作.设置字段，声明原值和值，并将旧状态及发生章节保留为历史；不得把已退出阵营或已结束关系盲目并入当前值。新增事实和未证实的状态仍按普通追加处理，不能根据猜测删除旧事实。",
         "标准字段写在元素顶层，不放进详情。关联角色等明确关联字段使用真正的类型:名称数组，单个引用也使用数组；禁止将数组编码成字符串。",
         "补充标签、轨迹等既有JSON字符串数组约定保持不变。未知事实按既有未知值表达，不虚构人物、地点或关系。",
     ])
@@ -168,25 +169,31 @@ def generation_scope_errors(patch: dict, *, chapter_seq: int = 0, start: int = 0
     return errors
 
 
-def new_element_quality_errors(collection: str, item: dict, path: str) -> list[str]:
-    """只检查本次真实新增的档案，不追溯强制修复所有历史空值。"""
+def element_field_quality_errors(collection: str, item: dict, path: str) -> list[str]:
+    """新增与终稿共用字段要求；章节追溯要求由各阶段单独处理。"""
     errors = []
     for key in required_element_fields(collection):
         value = item.get(key)
         expected = field_type(DEFAULTS[collection][key])
         message = None
         if key not in item:
-            message = "新增档案缺少标准字段，不能用默认空值视为已完成"
+            message = "档案缺少标准字段，不能用默认空值视为已完成"
         elif field_type(value) != expected or value is None:
             message = f"字段必须为{expected}"
         elif key == "介绍" and not value.strip():
-            message = "新增档案介绍必须依据原文填写，不能留空"
+            message = "档案介绍必须依据原文填写，不能留空"
         elif key == "分组" and collection == "事件集" and not value.strip():
-            message = "新增事件必须填写有依据的分组"
+            message = "事件必须填写有依据的分组"
         elif key == "标签集" and collection == "事件集" and not any(is_event_compound_tag(tag) for tag in value):
-            message = "新增事件必须包含四维复合标签，不得放入详情或补充标签"
+            message = "事件必须包含四维复合标签，不得放入详情或补充标签"
         if message:
             errors.append(f"{quality_marker(path + '/' + key)} {message}")
+    return errors
+
+
+def new_element_quality_errors(collection: str, item: dict, path: str) -> list[str]:
+    """新增档案还需提供章节来源；终稿不重新引入已清理的过程字段。"""
+    errors = element_field_quality_errors(collection, item, path)
     detail = item.get("详情")
     if isinstance(detail, dict):
         required = (["涉及章节"] if collection == "事件集" else ["首次章节", "最近章节"]

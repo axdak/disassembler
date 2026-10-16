@@ -259,9 +259,21 @@ def test_final_repair_transport_and_outer_retries_share_one_budget(tmp_path, mon
         worker_provider="agy", worker_retries=3, max_repair_rounds=2))
     repair = tmp_path / "质量治理/最终审计/repair_final.md"
     repair.parent.mkdir(parents=True)
-    repair.write_text("repair", encoding="utf-8")
+    # Final repair now requires an actual field-scoped incident. A missing
+    # draft has no permissible repair target and must not dispatch a whole rewrite.
+    from test_final_field_repair import complete_story
+    draft = complete_story()
+    draft["角色集"][0]["介绍"] = ""
+    write_json(tmp_path / "故事结构_草稿.json", draft)
+    repair.write_text("[质量字段:/角色集/0/介绍] 档案介绍必须非空。", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(orchestrator, "cmd_commit_final_draft", lambda *a: 1)
+    def failed_final_validation(project):
+        # The real validator refreshes the report on every attempt; retaining
+        # appended batch bindings here would fabricate a new recovery incident.
+        repair.write_text("[质量字段:/角色集/0/介绍] 档案介绍必须非空。", encoding="utf-8")
+        return 1
+
+    monkeypatch.setattr(orchestrator, "cmd_commit_final_draft", failed_final_validation)
     monkeypatch.setattr(pipeline, "wait_before_worker_retry", lambda attempt: False)
     monkeypatch.setattr(pipeline, "stream_shell_command", lambda *a: (calls.append(a) or 9, "transport failure"))
     assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED

@@ -691,3 +691,96 @@ def test_export_adapter_force_wipes_existing_vault(project, tmp_path):
     # Stale file is gone after a forced (clean) export.
     assert not (out_dir / "stale.md").exists()
     assert (out_dir / "00-总览" / "故事总览.md").is_file()
+
+
+@pytest.mark.parametrize("source_kind", ["process", "final"])
+@pytest.mark.parametrize("multiple", [False, True])
+def test_analysis_snapshot_publication_rebases_authority_for_frozen_workers(
+        project, monkeypatch, source_kind, multiple):
+    """Published host packages use canonical in-project paths at every level."""
+    import hashlib
+    import sys
+    import task_adapters
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "engine/tools"))
+    from worker_context import ContextReader, snapshot_context
+
+    process, draft, final = [project / name for name in (
+        "故事结构_增量.json", "故事结构_草稿.json", "故事结构.json")]
+    expected = process
+    expected_name = "约翰娜"
+    if source_kind == "final":
+        delivered = json.loads(json.dumps(SAMPLE_STORY))
+        delivered["角色集"][0]["名称"] = "终稿更正名称"
+        _write_json(draft, delivered)
+        _write_json(final, delivered)
+        _write_json(project / "质量治理/最终审计/finalize_log.json", {
+            key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in (
+                ("process_sha256", process), ("draft_sha256", draft), ("final_sha256", final))})
+        expected, expected_name = final, "终稿更正名称"
+    if multiple:
+        for chapter in (project / "章节处理").glob("*.md"):
+            chapter.write_text(chapter.read_text(encoding="utf-8") + "完整分包证据" * 1000, encoding="utf-8")
+    seen = []
+
+    def verify_frozen_worker(command, project_dir, kind, task_pack, outputs, **options):
+        frozen = Path(task_pack).parent / f"worker_context_{len(seen)}"
+        frozen.mkdir()
+        reader = ContextReader(snapshot_context(project_dir, Path(task_pack), [], frozen))
+        assert reader.story_snapshot()["source"] == str(expected)
+        assert reader.story_get_units([{"collection": "角色集", "name": expected_name}])["items"]
+        seen.append(kind)
+        targets = outputs if isinstance(outputs, list) else [outputs]
+        for target in targets:
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            Path(target).write_text("完整分析结果", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(task_adapters, "run_worker", verify_frozen_worker)
+    monkeypatch.setattr(task_adapters, "run_multi_output_worker", verify_frozen_worker)
+    adapter = AnalysisAdapter()
+    context = _make_context(project, {"task": "summary", "chapters": "all",
+                                     "max_pack_chars": 8000 if multiple else 70000})
+    prepared = adapter.prepare(context)
+    snapshot = prepared["snapshot_dir"]
+    result = adapter.run(context, prepared)
+    assert seen
+    assert (result["manifest"]["pack_count"] > 1) is multiple
+    assert result["manifest"]["story_source"] == str(expected)
+    assert result["manifest"]["story_revision"] == hashlib.sha256(expected.read_bytes()).hexdigest()
+    # The temporary preparation directory has been removed; no published source,
+    # header or hierarchy pointer may still depend on that deleted workspace.
+    assert not snapshot.exists()
+    variants = (str(snapshot), snapshot.as_posix(), json.dumps(str(snapshot))[1:-1])
+    for artifact in Path(result["manifest_path"]).parent.rglob("*"):
+        if artifact.is_file() and artifact.suffix in {".json", ".md"}:
+            assert not any(value in artifact.read_text(encoding="utf-8") for value in variants)
+
+
+def test_analysis_publication_rebases_host_references_without_rewriting_evidence(project, tmp_path):
+    """A path mentioned as novel data or a user question is not a host pointer."""
+    from run_pipeline import copy_analysis_task_packages
+    source = tmp_path / "prepared"
+    package = source / "全书分析/_任务包/run_summary"
+    package.mkdir(parents=True)
+    source_story = source / "故事结构_增量.json"
+    opaque = f"小说原句中的文件名是 {source_story}。"
+    task = package / "pack_001.md"
+    task.write_text(f"当前权威故事档案：`{source_story}`\n"
+                    f"完整历史档案：{source_story}；请核对。\n"
+                    f"```markdown\n{opaque}\n```\n", encoding="utf-8")
+    _write_json(package / "manifest.json", {"story_source": str(source_story), "question": opaque})
+    _write_json(task.with_suffix(".hierarchy.json"), {"sources": [str(task)],
+               "references": [str(source_story)], "contract": "用户指定问题：" + opaque})
+    copy_analysis_task_packages(source, project)
+    published = project / task.relative_to(source)
+    text = published.read_text(encoding="utf-8")
+    assert f"当前权威故事档案：`{project / source_story.name}`" in text
+    assert f"完整历史档案：{project / source_story.name}；请核对。" in text
+    assert opaque in text
+    manifest = json.loads((published.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["story_source"] == str(project / source_story.name)
+    assert manifest["question"] == opaque
+    hierarchy = json.loads(published.with_suffix(".hierarchy.json").read_text(encoding="utf-8"))
+    assert hierarchy["sources"] == [str(published)]
+    assert hierarchy["references"] == [str(project / source_story.name)]
+    assert hierarchy["contract"] == "用户指定问题：" + opaque

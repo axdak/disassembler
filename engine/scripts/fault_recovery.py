@@ -6,7 +6,7 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 """
 from __future__ import annotations
 
-from local_json_patch import delta_repair_scope, apply_scoped_patch, archived_reference_preserved
+from local_json_patch import delta_repair_scope, final_repair_scope, apply_scoped_patch, archived_reference_preserved, archived_field_preserved
 from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED
 
 import hashlib
@@ -205,6 +205,9 @@ non-heading content line. Semantic correctness still needs evidence-based review
                 # is still traceable without preserving it as current truth.
                 old.pop("冲突声明")
 
+    # 终稿字段归档不得扩大旧 Delta 整份修复的保全豁免。
+    final_field_archive = isinstance(old, dict) and isinstance(new, dict) and "事件集" in old and "新增元素" not in old
+
     def visit(a, b, path):
         if isinstance(a, dict):
             if not isinstance(b, dict):
@@ -215,13 +218,18 @@ non-heading content line. Semantic correctness still needs evidence-based review
             raw_required = {tag for tag in _raw_tag_evidence(a) if tag != tag.strip()}
             if raw_required - _raw_tag_evidence(b, include_primary=True):
                 errors.append(f"{path} 原补充标签文本被裁剪且未在同一元素保全")
-            old_tags, new_tags = _tag_evidence_view(a), _tag_evidence_view(b)
+            # 失效主标签纠正后不能仍留在有效标签中；精确旧值由宿主字段档案保全。
+            # 补充标签仍参与原证据比较，不能借主标签纠错一并删除。
+            old_view = dict(a, 标签集=[]) if final_field_archive and archived_field_preserved(a, b, "标签集") else a
+            old_tags, new_tags = _tag_evidence_view(old_view), _tag_evidence_view(b)
             if old_tags is not None and new_tags is not None:
                 missing = old_tags[1] - new_tags[1]
                 if missing:
                     errors.append(f"{path} 原标签内容被删除：{', '.join(sorted(missing))}")
                 a, b = old_tags[0], new_tags[0]
             for key, value in a.items():
+                if final_field_archive and archived_field_preserved(a, b, key):
+                    continue
                 if key not in b:
                     errors.append(f"{path}.{key} 原字段被删除")
                 else:
@@ -324,7 +332,8 @@ def recover_artifact(
                      if key.startswith(("ND_RECOVERY_", "ND_AGY_", "ND_CODEBUDDY_", "ND_AGENT_"))}
     code_identity = [(path.relative_to(engine).as_posix(), code_digest(path)) for path in contracts]
     fingerprint = hashlib.sha256(json.dumps(
-        [command, configuration, ContextBudget.from_env().__dict__, code_identity], sort_keys=True, ensure_ascii=False
+        [command, configuration, ContextBudget.from_env().__dict__, code_identity,
+         digest(pack) if task == "repair_final" else ""], sort_keys=True, ensure_ascii=False
     ).encode()).hexdigest()
 
     def emit(event, **fields):
@@ -377,8 +386,12 @@ def recover_artifact(
         for source in inputs:
             target = workspace / source.relative_to(project)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            manifest.append({"path": str(source.relative_to(project)), "sha256": digest(source)})
+            # Bind the frozen evidence and its receipt to one read. Re-reading
+            # the source after copying could authenticate old bytes with a new hash.
+            content = source.read_bytes()
+            atomic_write_bytes(target, content)
+            manifest.append({"path": str(source.relative_to(project)),
+                             "sha256": hashlib.sha256(content).hexdigest()})
         candidate = workspace / relative
         candidate.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(baseline, candidate)
@@ -423,6 +436,23 @@ def recover_artifact(
             pending = directory / state["candidate"]
             if digest(pending) != state["candidate_sha256"]:
                 raise ValueError("自动恢复候选损坏，拒绝发布")
+            if task == "repair_final":
+                # Final batch revalidation consumes the durable raw preimage.
+                # Publishing resumes before ordinary checkpoint verification, so
+                # authenticate that existing snapshot here as well as the candidate.
+                original = pending.parent / f"original{output.suffix}"
+                checkpoint = state.get("checkpoint")
+                files = checkpoint.get("files", {}) if isinstance(checkpoint, dict) else {}
+                expected_original = state.get("input_sha256")
+                if "checkpoint" in state:
+                    expected_original = files.get(str(original.relative_to(directory))) if isinstance(files, dict) else None
+                try:
+                    original_matches = original.is_file() and digest(original) == expected_original
+                except OSError:
+                    original_matches = False
+                if not original_matches:
+                    emit("终稿恢复原稿摘要不一致，拒绝续接发布；保留证据与累计预算")
+                    return REPAIR_EXHAUSTED
             if stopped():
                 return 130
             rc = publish(pending)
@@ -751,8 +781,9 @@ def recover_artifact(
         if stage is None:
             # 字段可定位时，各策略均保持局部修改；重试不得扩大成整份重写。
             # 身份歧义等尚不能表达的旧错误仍遵循原有保全与独立复核流程。
-            scope = delta_repair_scope(reference, feedback, read_object(workspace / "故事结构_增量.json")) if (
-                task in {"repair_chapter", "audit_repair"}) else {}
+            scope = (final_repair_scope(reference, feedback) if task == "repair_final" else
+                     delta_repair_scope(reference, feedback, read_object(workspace / "故事结构_增量.json"))
+                     if task in {"repair_chapter", "audit_repair"} else {})
             if index > 0 and scope and not any(rule.get("kind") == "quality" for rule in scope.values()):
                 # 旧身份/理由补丁未覆盖的混合错误保留原升级策略；本次可定位的
                 # 质量字段始终走局部补丁，不因重试扩大到整份 JSON。
@@ -762,7 +793,7 @@ def recover_artifact(
                 patch_prompt = (common + "\n本次输出局部修复补丁，不重写候选，不修改其他文件。"
                                 "所有理由必须核对原文，不能用模板句占位。只处理以下范围：\n"
                                 + json.dumps(scope, ensure_ascii=False)
-                                + '\nkind=quality的value必须使用value_type声明的真实JSON类型，数组不能编码成字符串；依据原文只补齐指定字段，保留已有列表内容，不虚构事实。'
+                                + '\nkind=quality的value必须使用value_type声明的真实JSON类型，数组不能编码成字符串；依据原文只补齐指定字段，保留已有有效列表内容，不虚构事实。final=true仅允许有原文依据地纠正该报错字段，宿主自动逐值归档旧值；禁止填入占位套话。'
                                 + f"\nbase_sha256 必须为 {digest(reference)}。"
                                 + '\n普通字段放changes；kind=move放moves，只选allowed_collections与指定target_section，省略target_section仅表示修改元素内跨类别迁移。'
                                 + '\nkind=identity可依据原文改成allowed_values内的正式名；如有promotion选项且确属本章新事实，则按promotion.path输出moves、显式指定target_section=新增元素，名称与原字段原样保留，不能为了过校验随意改名。没有promotion选项禁止修改转新增。'
@@ -777,6 +808,10 @@ def recover_artifact(
                         rc = CONTRACT_INVALID
                         attempt["patch_error"] = str(exc)
                 attempt["repair_scope"] = list(scope)
+            elif task == "repair_final":
+                attempt.update(status="unscoped_final_error", validation_feedback=feedback)
+                persist()
+                return CONTRACT_INVALID
             else:
                 rc = invoke("auto_" + task, workspace, common + f"\n本次必须修复完整候选产物，只写：{candidate}\n", candidate, selected_command)
             if preparation_failed(attempt, index, rc):

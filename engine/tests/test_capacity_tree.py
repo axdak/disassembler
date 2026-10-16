@@ -280,3 +280,93 @@ def test_long_truncated_output_requests_split_once_and_remembers_decision(tmp_pa
             tree.request("相同材料", "输出截断测试")
         assert failure.value.code == CONTEXT_EXCEEDED
     assert len(calls) == 1
+
+
+def test_compression_overflow_keeps_shrinking_and_reuses_five_completed_leaves(tmp_path):
+    """An oversized compression response must not strand accepted evidence pages."""
+    from context_budget import capacity_scope
+    sources = []
+    for index in range(5):
+        source = tmp_path / f"source-{index}.md"
+        source.write_text(f"完整证据{index}", encoding="utf-8")
+        sources.append((source, "原文"))
+    leaves, compression_limits = [], []
+    cancel_once = [True]
+
+    def worker(command, root, kind, pack, output, **kwargs):
+        prompt = pack.read_text(encoding="utf-8")
+        stage = re.search(r"阶段：([^\n]+)", prompt)[1]
+        overview = "已核对跨片证据"
+        if stage == "完整证据分片":
+            name = re.search(r"原件：(.+?)；角色：", prompt)[1]
+            leaves.append(name)
+            overview = "LEAF:" + Path(name).stem
+        elif stage == "跨区间归并复核" and "LEAF:00000" in prompt and "LEAF:00001" in prompt:
+            overview = "索" * 2004 + "a"  # 4009 estimated tokens exceeds the 4000-token parent limit.
+        elif stage.startswith("收紧关联索引"):
+            limit = int(re.search(r"至 (\d+) token", stage)[1])
+            compression_limits.append(limit)
+            if limit == 2000:
+                overview = "索" * 1059  # Reproduce the real 2118 > 2000 compression response.
+            elif limit == 1000:
+                overview = "索" * 501
+            elif limit == 500 and cancel_once[0]:
+                cancel_once[0] = False
+                return 130  # Resume after a real interruption in the fallback path.
+        save_json(output, {"overview": overview, "content": None})
+        return 0
+
+    with capacity_scope({}):
+        tree = CapacityTree(tmp_path, "offline", worker, "完整证据索引", "index.json", sources,
+                            adaptive_overviews=True)
+        with pytest.raises(TreeFailure) as interrupted:
+            tree.run(overview_only=True)
+        assert interrupted.value.code == 130
+        assert len(leaves) == 5
+        # A fresh tree represents restarting the same repaired code and evidence.
+        tree = CapacityTree(tmp_path, "offline", worker, "完整证据索引", "index.json", sources,
+                            adaptive_overviews=True)
+        tree.run(overview_only=True)
+        assert len(leaves) == len(set(leaves)) == 5
+        assert set(compression_limits) == {2000, 1000, 500}
+        assert len(tree.coverage) == 5
+        attempts = len(leaves) + len(compression_limits)
+        tree.run(overview_only=True)
+        assert len(leaves) + len(compression_limits) == attempts
+        ledgers = [json.loads(path.read_text(encoding="utf-8")) for path in tree.root.rglob("state.json")]
+        assert any(row.get("failure_kind") == "overview_overflow" and row.get("split_required")
+                   and "2118" in row.get("feedback", "") for row in ledgers)
+
+
+@pytest.mark.parametrize("failure_code", [124, 130, OUTPUT_TRUNCATED, REPAIR_EXHAUSTED])
+def test_compression_noncapacity_failure_does_not_try_smaller_indices(tmp_path, failure_code):
+    """A tighter index is no remedy for transport, cancellation or schema failure."""
+    from context_budget import capacity_scope
+    sources = []
+    for index in range(2):
+        source = tmp_path / f"source-{index}.md"
+        source.write_text("完整证据", encoding="utf-8")
+        sources.append((source, "原文"))
+    compression_limits = []
+
+    def worker(command, root, kind, pack, output, **kwargs):
+        prompt = pack.read_text(encoding="utf-8")
+        stage = re.search(r"阶段：([^\n]+)", prompt)[1]
+        if stage == "跨区间归并复核":
+            save_json(output, {"overview": "索" * 2001, "content": None})
+        elif stage.startswith("收紧关联索引"):
+            compression_limits.append(int(re.search(r"至 (\d+) token", stage)[1]))
+            if failure_code != REPAIR_EXHAUSTED:
+                return failure_code
+            save_json(output, {"overview": "格式不符", "content": {"不允许": "正文"}})
+        else:
+            save_json(output, {"overview": "原件证据位置", "content": None})
+        return 0
+
+    with capacity_scope({}):
+        tree = CapacityTree(tmp_path, "offline", worker, "完整证据索引", "index.json", sources,
+                            adaptive_overviews=True)
+        with pytest.raises(TreeFailure) as failure:
+            tree.run(overview_only=True)
+    assert failure.value.code == failure_code
+    assert compression_limits and set(compression_limits) == {2000}

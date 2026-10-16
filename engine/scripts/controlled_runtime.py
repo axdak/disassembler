@@ -313,6 +313,22 @@ def candidate_definitions() -> list[dict]:
         for name, description, properties, required in specs]
 
 
+def generation_is_pending(output: Path, story: Path) -> bool:
+    """Recognize same-baseline interrupted work without authorizing its bytes.
+
+    Pending artifacts still require the ordinary validation/recovery gates. Only
+    the exact unfinished receipt created by the host can take this route; stale
+    baselines, malformed receipts and mismatched completed receipts remain fenced.
+    """
+    try:
+        receipt = json.loads(output.with_suffix(".generation.json").read_text(encoding="utf-8"))
+        return (isinstance(receipt, dict) and receipt.get("pending") is True
+                and receipt.get("artifact_sha256") == ""
+                and receipt.get("base_revision") == hashlib.sha256(story.read_bytes()).hexdigest())
+    except (OSError, ValueError):
+        return False
+
+
 def generation_is_current(output: Path, story: Path) -> bool:
     """Fence both evidence and exact artifact bytes, including torn publication."""
     path = output.with_suffix(".generation.json")

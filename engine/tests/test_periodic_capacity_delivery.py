@@ -189,6 +189,10 @@ def test_introduction_changes_only_intro_and_reuses_completed_work(tmp_path):
     assert finish_introduction(tmp_path, "fake", worker) == 0
     assert len(calls) == count
     assert pipeline.cmd_finalize(tmp_path) == 0
+    import hashlib
+    receipt = json.loads((tmp_path / "质量治理/最终审计/finalize_log.json").read_text(encoding="utf-8"))
+    for key, path in [("process_sha256", source), ("draft_sha256", draft), ("final_sha256", tmp_path / "故事结构.json")]:
+        assert receipt[key] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def test_wrong_intro_contract_uses_bounded_repair_and_keeps_draft(tmp_path):
@@ -228,3 +232,94 @@ def test_legacy_report_resume_delivers_json_first_without_losing_reports(tmp_pat
     orch.state.mark_completed("finalize")
     assert orch.state.current_stage == "fullbook_analysis"
     assert STAGES.index("finalize") < STAGES.index("fullbook_analysis")
+
+
+@pytest.mark.parametrize("changed_file", ["故事结构_增量.json", "故事结构_草稿.json"])
+@pytest.mark.parametrize("edit_phase", ["before_tree", "after_request"])
+def test_introduction_rejects_source_or_draft_changes_before_publication(tmp_path, monkeypatch, changed_file, edit_phase):
+    """A concurrent accepted edit must survive a stale introduction candidate."""
+    import story_delivery
+    from project_lock import project_write_lock
+    from repair_budget import REPAIR_EXHAUSTED
+    source = tmp_path / "故事结构_增量.json"
+    save_json(source, empty_story())
+    prepare_delivery(tmp_path)
+    draft = tmp_path / "故事结构_草稿.json"
+    before = draft.read_bytes()
+    changed = tmp_path / changed_file
+    updated = json.loads(changed.read_text(encoding="utf-8"))
+    updated["介绍"]["并发备注"] = "另一个写入者刚核验的补充"
+    original_tree = story_delivery.CapacityTree
+    original_request = original_tree.request
+
+    def edit():
+        with project_write_lock(tmp_path):
+            save_json(changed, updated)
+
+    class ConcurrentTree(original_tree):
+        def __init__(self, *args, **kwargs):
+            if edit_phase == "before_tree":
+                edit()
+            super().__init__(*args, **kwargs)
+
+        def request(self, *args, **kwargs):
+            result = original_request(self, *args, **kwargs)
+            if edit_phase == "after_request" and kwargs.get("validate_content"):
+                # Edit after worker protection ends, as an independent host writer.
+                edit()
+            return result
+
+    def worker(command, root, kind, pack, output, **kwargs):
+        prompt = pack.read_text(encoding="utf-8")
+        content = None if "content 必须为 null" in prompt else {"标题": "正式标题", "描述": "有依据的正式简介"}
+        save_json(output, {"overview": "完整来源索引", "content": content})
+        return 0
+
+    monkeypatch.setattr(story_delivery, "CapacityTree", ConcurrentTree)
+    assert finish_introduction(tmp_path, "offline", worker) == REPAIR_EXHAUSTED
+    assert json.loads(changed.read_text(encoding="utf-8")) == updated
+    if changed != draft:
+        assert draft.read_bytes() == before
+    assert not (tmp_path / "质量治理/最终审计/交付/introduction.json").exists()
+
+
+def test_introduction_publishes_under_project_lock_and_retains_metadata(tmp_path, monkeypatch):
+    """Publication must exclude another host writer for its complete merge."""
+    import threading
+    import story_delivery
+    from project_lock import project_write_lock
+    source = tmp_path / "故事结构_增量.json"
+    save_json(source, empty_story())
+    prepare_delivery(tmp_path)
+    draft = tmp_path / "故事结构_草稿.json"
+    value = json.loads(draft.read_text(encoding="utf-8"))
+    value["介绍"]["备注"] = "既有简介元数据"
+    save_json(draft, value)
+    observed = []
+    original_save = story_delivery.save_json
+
+    def inspect_publication(path, value):
+        if path == draft:
+            def competing_writer():
+                try:
+                    with project_write_lock(tmp_path, timeout=0.02):
+                        observed.append("unlocked")
+                except TimeoutError:
+                    observed.append("locked")
+            competitor = threading.Thread(target=competing_writer)
+            competitor.start()
+            competitor.join(timeout=1)
+            assert not competitor.is_alive()
+        return original_save(path, value)
+
+    def worker(command, root, kind, pack, output, **kwargs):
+        prompt = pack.read_text(encoding="utf-8")
+        content = None if "content 必须为 null" in prompt else {"标题": "正式标题", "描述": "有依据的正式简介"}
+        save_json(output, {"overview": "完整来源索引", "content": content})
+        return 0
+
+    monkeypatch.setattr(story_delivery, "save_json", inspect_publication)
+    assert finish_introduction(tmp_path, "offline", worker) == 0
+    assert observed == ["locked"]
+    assert json.loads(draft.read_text(encoding="utf-8"))["介绍"] == {
+        "标题": "正式标题", "描述": "有依据的正式简介", "备注": "既有简介元数据"}

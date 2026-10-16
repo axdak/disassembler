@@ -1359,18 +1359,15 @@ class FinalizeAdapter:
             raise RuntimeError(f"正式简介收尾未完成 rc={rc}；断点已保留")
 
         context.progress(60, "commit final draft")
-        rc = cmd_commit_final_draft(project_dir)
+        from story_delivery import commit_delivery
+        rc = commit_delivery(
+            project_dir, worker_command, timeout=worker_timeout, retries=worker_retries,
+            worker_window=worker_window, repair_limit=max_repair_rounds,
+            observe=lambda detail, data: context.progress(65, detail),
+            commit=cmd_commit_final_draft, repair_worker=run_repair_worker,
+        )
         if rc != 0:
-            if not repair.is_file() or not worker_command:
-                raise RuntimeError(f"commit_final_draft 失败 rc={rc} 且无 worker_command 或 repair 任务")
-            rc = run_repair_worker(
-                worker_command, project_dir, "repair_final", repair, draft,
-                timeout=worker_timeout, retries=worker_retries, worker_window=worker_window,
-                repair_limit=max_repair_rounds,
-                observe=lambda detail, data: context.progress(65, detail),
-            )
-            if rc != 0:
-                raise RuntimeError(f"repair_final 自动故障处理未完成 rc={rc}；诊断与断点已保留")
+            raise RuntimeError(f"repair_final 自动故障处理未完成 rc={rc}；诊断与断点已保留")
 
         context.progress(80, "validate final")
         rc = cmd_validate_final(project_dir)

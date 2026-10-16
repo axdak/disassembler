@@ -638,9 +638,9 @@ def validate_exact_story_schema(data: Any, *, mode: str = "process", enforce_cou
                 errors.append(f"介绍.{key} 必须是字符串")
         if mode == "final":
             if not isinstance(intro.get("标题"), str) or not intro.get("标题", "").strip():
-                errors.append("介绍.标题 为空；最终交付必须填写故事名称")
+                errors.append("[质量字段:/介绍/标题] 介绍.标题 为空；最终交付必须填写故事名称")
             if not isinstance(intro.get("描述"), str) or not intro.get("描述", "").strip():
-                errors.append("介绍.描述 为空；最终交付必须填写故事简介")
+                errors.append("[质量字段:/介绍/描述] 介绍.描述 为空；最终交付必须填写故事简介")
         else:
             if isinstance(intro.get("标题"), str) and not intro.get("标题", "").strip():
                 warnings.append("介绍.标题 为空；过程阶段允许，最终交付前必须补充")
@@ -669,7 +669,28 @@ def validate_exact_story_schema(data: Any, *, mode: str = "process", enforce_cou
                     if name.strip() in seen:
                         errors.append(f"{collection_key}中存在重复名称[{name.strip()}]")
                     seen.add(name.strip())
+            error_start = len(errors)
             validate_item_schema(collection_key, item, idx, name_sets, alias_maps, errors, warnings, mode=mode)
+            if mode == "final" and isinstance(item, dict):
+                # 直接标注原校验器识别出的具体字段，局部补齐不必猜测自然语言。
+                from generation_contract import element_field_quality_errors, misplaced_field_errors, quality_marker
+                path = f"/{collection_key}/{idx}"
+                label = f"{COLLECTION_TO_TYPE[collection_key]}[{item.get('名称', idx)}]."
+                detail = item.get("详情", {})
+                detail_fields = [key for key, value in detail.items() if key.startswith("关联") or isinstance(value, list)] if isinstance(detail, dict) else []
+                fields = [(display, "详情/" + key) for key in detail_fields for display in ("详情." + key, "详情[" + key + "]")]
+                fields.extend((key, key) for key in DEFAULTS[collection_key] if key not in {"名称", "详情", "时间"})
+                for error_index in range(error_start, len(errors)):
+                    for display, pointer in fields:
+                        prefix = label + display
+                        if errors[error_index].startswith(prefix) and (
+                            len(errors[error_index]) == len(prefix) or errors[error_index][len(prefix)] in " ["):
+                            errors[error_index] = quality_marker(path + "/" + pointer) + " " + errors[error_index]
+                            break
+                errors.extend(element_field_quality_errors(collection_key, item, path))
+                for message in misplaced_field_errors(collection_key, item):
+                    field = message.split(" ", 1)[0].removeprefix("详情.")
+                    errors.append(f"{quality_marker(path + '/' + field)} {message}")
 
     validate_parent_cycles(data, errors)
     events = data.get("事件集", [])

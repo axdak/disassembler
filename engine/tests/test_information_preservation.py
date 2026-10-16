@@ -289,3 +289,21 @@ def test_equal_corrections_on_different_sources_keep_their_ownership():
     archives = [json.loads(entry)["原档案"] for entry in json.loads(target["详情"]["治理档案记录"])]
     assert {item["名称"] for item in archives} == {"来源一", "来源二"}
     assert all(item["详情"]["治理纠错记录"] == correction for item in archives)
+
+
+def test_evidenced_faction_transition_replaces_current_value_and_retains_history():
+    """当前阵营不应累积已退出阵营；旧事实通过既有纠错记录保全。"""
+    before = story_fixture()
+    for name in ("旧派", "新派"):
+        faction = copy.deepcopy(DEFAULTS["阵营集"])
+        faction.update(名称=name, 介绍=name + "阵营档案", 详情={"首次章节":"0001", "最近章节":"0002"})
+        before["阵营集"].append(faction)
+    before["角色集"][0]["所属阵营"] = ["旧派"]
+    patch = {"治理操作":{"设置字段":[{"类型":"角色","名称":"主角","字段":"所属阵营",
+        "原值":["旧派"],"值":["新派"],"理由":"主角已经退出旧派加入新派",
+        "证据":[{"章节":"0002","原文":"主角退出旧派，加入新派。"}]}]}}
+    after, _, warnings = apply_ops(before, patch)
+    assert warnings == []
+    assert after["角色集"][0]["所属阵营"] == ["新派"]
+    assert "旧派" in after["角色集"][0]["详情"]["治理纠错记录"]
+    assert governance_quality_errors(before, after, patch) == []

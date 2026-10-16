@@ -836,55 +836,81 @@ def run_repair_worker(
     relative = expected_output.resolve().relative_to(project_dir)
     pack_relative = task_pack.resolve().relative_to(project_dir)
 
-    def validate(root: Path) -> Tuple[int, str]:
-        if task_type == "repair_chapter":
-            rc = commit_chapter(root, chapter_seq)
-        elif task_type == "audit_repair":
-            rc = commit_governance(root, str(root / relative))
-        elif task_type == "repair_final":
-            rc = cmd_commit_final_draft(root)
-        elif task_type == "analysis_regenerate":
-            ok, errors = validate_chapter_analysis_file(root / relative)
-            if not ok:
-                chapter = chapter_by_seq(root, chapter_seq)
-                if chapter:
-                    write_analysis_regenerate_task(root, chapter, errors)
-            return (0 if ok else 1), "\n".join(errors)
-        else:
-            raise ValueError(f"不支持的自动修复任务：{task_type}")
-        report = root / pack_relative
-        return rc, report.read_text(encoding="utf-8") if report.is_file() else f"原校验器返回 {rc}"
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        final_baseline = expected_output
+        if task_type == "repair_final":
+            # Publication replaces the live draft before its final revalidation.
+            # Keep one private preimage for both validation phases, and clean it
+            # on every return/exception; durable recovery snapshots stay intact.
+            baseline_dir = resources.enter_context(tempfile.TemporaryDirectory(
+                prefix=".final_repair_baseline_", dir=project_dir))
+            final_baseline = Path(baseline_dir) / expected_output.name
+            final_baseline.write_bytes(expected_output.read_bytes() if expected_output.is_file() else b"")
 
-    def publish(candidate: Path) -> int:
-        # recover_artifact holds the project lock from dependency comparison
-        # through this callback. The baseline cannot advance between revalidation
-        # and signing; chapter/governance receipts recover interrupted commits.
-        if expected_output.with_suffix(".generation.json").is_file():
-            from controlled_runtime import publish_generated_artifact
-            current_story = project_dir / "故事结构_增量.json"
-            publish_generated_artifact(project_dir, expected_output, candidate.read_bytes(),
-                hashlib.sha256(current_story.read_bytes()).hexdigest())
-        else:
-            atomic_write_bytes(expected_output, candidate.read_bytes())
-        rc, _ = validate(project_dir)
-        return rc
+        def validate(root: Path, *, final_reference: Optional[Path] = None) -> Tuple[int, str]:
+            if task_type == "repair_chapter":
+                rc = commit_chapter(root, chapter_seq)
+            elif task_type == "audit_repair":
+                rc = commit_governance(root, str(root / relative))
+            elif task_type == "repair_final":
+                rc = cmd_commit_final_draft(root)
+                if rc != 0:
+                    from local_json_patch import final_repair_progress
+                    # A completed bounded field batch still undergoes preservation
+                    # and independent review. The outer final gate validates the
+                    # whole draft again before any publication can occur.
+                    if final_repair_progress(final_reference or final_baseline, root / relative):
+                        rc = 0
+            elif task_type == "analysis_regenerate":
+                ok, errors = validate_chapter_analysis_file(root / relative)
+                if not ok:
+                    chapter = chapter_by_seq(root, chapter_seq)
+                    if chapter:
+                        write_analysis_regenerate_task(root, chapter, errors)
+                return (0 if ok else 1), "\n".join(errors)
+            else:
+                raise ValueError(f"不支持的自动修复任务：{task_type}")
+            report = root / pack_relative
+            return rc, report.read_text(encoding="utf-8") if report.is_file() else f"原校验器返回 {rc}"
 
-    if task_type in {"repair_chapter", "audit_repair"}:
-        from controlled_runtime import generation_is_current, regenerate_conflicted_artifact
-        if not generation_is_current(expected_output, project_dir / "故事结构_增量.json"):
-            return regenerate_conflicted_artifact(project_dir, task_type, task_pack,
-                expected_output, chapter_seq, command, run_worker, validate,
-                timeout=timeout, retries=retries, worker_window=worker_window)
+        def publish(candidate: Path) -> int:
+            # recover_artifact holds the project lock from dependency comparison
+            # through this callback. The baseline cannot advance between revalidation
+            # and signing; chapter/governance receipts recover interrupted commits.
+            if expected_output.with_suffix(".generation.json").is_file():
+                from controlled_runtime import publish_generated_artifact
+                current_story = project_dir / "故事结构_增量.json"
+                publish_generated_artifact(project_dir, expected_output, candidate.read_bytes(),
+                    hashlib.sha256(current_story.read_bytes()).hexdigest())
+            else:
+                atomic_write_bytes(expected_output, candidate.read_bytes())
+            # A resumed publication may already have replaced the live draft.
+            # Its reviewed workspace retains the durable original preimage; use
+            # that existing recovery snapshot for the same strict batch check.
+            reference = candidate.parent / f"original{expected_output.suffix}" if task_type == "repair_final" else None
+            rc, _ = validate(project_dir, final_reference=reference)
+            return rc
 
-    return recover_artifact(
-        project_dir, task_type, task_pack, expected_output, command=command,
-        worker=run_worker, validate=validate, publish=publish,
-        cancel=_get_cancel_event(), chapter_seq=chapter_seq, timeout=timeout,
-        retries=retries, worker_window=worker_window,
-        strategies=3 if repair_limit is None else repair_limit,
-        observe=observe or getattr(_cancel_local, "recovery_observer", None),
-    )
+        if task_type in {"repair_chapter", "audit_repair"}:
+            from controlled_runtime import generation_is_current, generation_is_pending, regenerate_conflicted_artifact
+            story = project_dir / "故事结构_增量.json"
+            # A same-baseline interrupted delivery has no success receipt yet. Its
+            # private recovery copy must pass the original validators before signing;
+            # an actual version/hash conflict still requires fresh-evidence generation.
+            if not generation_is_current(expected_output, story) and not generation_is_pending(expected_output, story):
+                return regenerate_conflicted_artifact(project_dir, task_type, task_pack,
+                    expected_output, chapter_seq, command, run_worker, validate,
+                    timeout=timeout, retries=retries, worker_window=worker_window)
 
+        return recover_artifact(
+            project_dir, task_type, task_pack, expected_output, command=command,
+            worker=run_worker, validate=validate, publish=publish,
+            cancel=_get_cancel_event(), chapter_seq=chapter_seq, timeout=timeout,
+            retries=retries, worker_window=worker_window,
+            strategies=3 if repair_limit is None else repair_limit,
+            observe=observe or getattr(_cancel_local, "recovery_observer", None),
+        )
 
 
 def run_generation_worker(
@@ -952,7 +978,7 @@ def run_generation_worker(
         mark_generation_pending(project_dir, expected_output, baseline_revision)
     rc = run_worker(command, project_dir, task_type, task_pack, expected_output,
                     chapter_seq, defer_artifact_repair=bool(repair_task), **worker_options)
-    if (baseline_revision is not None and rc in {0, 1} and expected_output.is_file()
+    if (baseline_revision is not None and rc == 0 and expected_output.is_file()
             and not unchanged_existing_outputs(before_outputs, [expected_output])):
         from controlled_runtime import publish_generated_artifact
         with project_write_lock(project_dir):
@@ -997,11 +1023,13 @@ def run_generation_worker(
             from bounded_generation import run_bounded_governance
             return bounded_delivery(lambda: run_bounded_governance(
                 command, project_dir, task_pack, expected_output, run_worker, **worker_options))
-    if rc != 1 or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
+    if rc not in {1, 124, OUTPUT_TRUNCATED} or not repair_task or not expected_output.is_file() or not expected_output.stat().st_size:
         return rc
-    if unchanged_existing_outputs(before_outputs, [expected_output]) and not invalid_output_artifacts([expected_output]):
-        # A pre-existing valid draft is not proof that a failed generation ran.
-        # Do not turn an unchanged artifact into successful task completion.
+    if unchanged_existing_outputs(before_outputs, [expected_output]) and (
+            rc != 1 or not invalid_output_artifacts([expected_output])):
+        # Timeout/truncation may only recover bytes delivered by this dispatch.
+        # Preserve the existing format-error route for an unfinished old artifact,
+        # while an unchanged valid artifact cannot prove failed generation ran.
         return rc
     if task_type in {"analysis", "delta"}:
         chapter = chapter_by_seq(project_dir, chapter_seq)
@@ -4019,6 +4047,10 @@ def cmd_finalize(project_dir: Path) -> int:
         "validate_report": str(report),
         "draft_size_bytes": draft.stat().st_size,
         "final_size_bytes": final.stat().st_size,
+        # 下游仅在三份当前内容仍匹配本次交付时使用终稿，不能读到过期终稿。
+        "process_sha256": hashlib.sha256((project_dir / "故事结构_增量.json").read_bytes()).hexdigest(),
+        "draft_sha256": hashlib.sha256(draft.read_bytes()).hexdigest(),
+        "final_sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
     }
     save_json(audit_dir / "finalize_log.json", finalize_log)
     print(f"交付日志: {audit_dir / 'finalize_log.json'}")
@@ -4217,13 +4249,19 @@ def write_fullbook_partial_worker_pack(
         f"## 原任务包内容\n\n"
     )
     content = pack_path.read_text(encoding="utf-8", errors="ignore")
-    out = manifest_path.parent / f"worker_pack_{index:03d}.md"
-    out.write_text(header + content, encoding="utf-8")
     manifest = load_json(manifest_path, {}) or {}
+    story = confined_project_path(project_dir, manifest["story_source"]) if manifest.get("story_source") else None
+    # Repeat the manifest authority at every execution level, including capacity
+    # contracts whose evidence body can be divided across multiple requests.
+    story_context = (f"当前权威故事档案：`{story}`\n当前故事版本：{manifest.get('story_revision', '')}\n"
+                     if story is not None else "")
+    out = manifest_path.parent / f"worker_pack_{index:03d}.md"
+    out.write_text(story_context + header + content, encoding="utf-8")
     from analysis_context_pack import output_contract
     save_json(out.with_suffix(".hierarchy.json"), {
         "sources": [str(pack_path.resolve())],
-        "contract": output_contract(manifest.get("task", "custom"))
+        "references": [str(story)] if story is not None else [],
+        "contract": story_context + output_contract(manifest.get("task", "custom"))
                     + fullbook_scope_contract(manifest)
                     + "\n仅产出本分包覆盖范围的完整分批分析结果，不写最终报告。",
     })
@@ -4243,9 +4281,12 @@ def write_fullbook_reduce_worker_pack(
     """
     manifest = load_json(manifest_path, {}) or {}
     reduce_rel = manifest.get("reduce_prompt")
+    story = confined_project_path(project_dir, manifest["story_source"]) if manifest.get("story_source") else None
+    story_context = (f"当前权威故事档案：`{story}`\n当前故事版本：{manifest.get('story_revision', '')}\n"
+                     if story is not None else "")
     target_list = "\n".join(f"- {p}" for p in target_outputs)
     parts: List[str] = [
-        "# Reduce 汇总任务\n\n",
+        "# Reduce 汇总任务\n\n" + story_context,
         "下面是 reduce_prompt 契约和各分包的分批结果。请合并为**最终报告**，"
         f"分别写入以下目标文件：\n\n{target_list}\n\n",
         "某项无内容时写“本书无对应内容”而非省略文件；不要凭空新增分批结果里"
@@ -4263,7 +4304,7 @@ def write_fullbook_reduce_worker_pack(
     task = manifest.get("task", "custom")
     # Store the contract separately from evidence: the tree repeats the complete
     # contract at every node without repeating every partial in one root request.
-    contract = output_contract(task) + "\n" + reduce_contract(task) + fullbook_scope_contract(manifest)
+    contract = story_context + output_contract(task) + "\n" + reduce_contract(task) + fullbook_scope_contract(manifest)
     if reduce_rel and (project_dir / reduce_rel).is_file():
         contract += "\n" + (project_dir / reduce_rel).read_text(encoding="utf-8")
     save_json(out.with_suffix(".hierarchy.json"), {
@@ -4271,6 +4312,7 @@ def write_fullbook_reduce_worker_pack(
         "require_review": True,
         "evidence": [str(confined_project_path(project_dir, path).resolve())
                      for path in manifest.get("packs", []) if isinstance(path, str)],
+        "references": [str(story)] if story is not None else [],
     })
     return out
 
@@ -4636,10 +4678,15 @@ def _copy_stable_inputs(src_project: Path, dst_project: Path) -> None:
                 if p.is_file() and p.suffix == ".json":
                     shutil.copy2(p, dst_delta / p.name)
 
-    for name in ("故事结构_增量.json", "故事结构.json"):
+    # The three receipt-bound files and publication proof form one stable input
+    # set. Omitting the draft/receipt would demote a verified final to process data.
+    for name in ("故事结构_增量.json", "故事结构_草稿.json", "故事结构.json",
+                 "质量治理/最终审计/finalize_log.json"):
         src = src_project / name
         if src.is_file():
-            shutil.copy2(src, dst_project / name)
+            target = dst_project / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
 
     # 全书分析下既有 .md 产物（narrative_structure 背景、visual aggregate 源），
     # 但排除 _任务包/ —— 那是输出，由 scoped 函数本次生成，不是输入。
@@ -4667,20 +4714,51 @@ def copy_analysis_task_packages(src_project: Path, dst_project: Path) -> None:
 
     adapter 在快照上跑完 analysis_context_pack 后，task pack（manifest + pack_*.md）
     只产生在快照目录里；此函数把该子树复制回真实项目目录，使 canonical 产物落到
-    正确位置。reader 任务只写 Markdown 任务包，不写 project-fact JSON，与并发 writer
-    不冲突。
+    正确位置，并把宿主来源指针映射回真实项目。仅修改生成的导航行和路径元数据，
+    不全局替换原文、分析正文或用户问题中的同形路径；故事事实 JSON 不在发布范围。
     """
-    src = Path(src_project) / "全书分析" / "_任务包"
+    from recovery_materials import rebase_material_paths
+    source_root, target_root = Path(src_project).resolve(), Path(dst_project).resolve()
+    host_prefixes = ("当前权威故事档案：", "完整历史档案：", "原文与章节分析保留在 ",
+                     "完整章节梗概原件：", "### 章节梗概汇总（已降载：", "- 如需元素详情（")
+
+    def rebase_host_lines(text: str) -> str:
+        """Translate declared navigation lines without replacing arbitrary text paths."""
+        return "".join(rebase_material_paths(line, source_root, target_root)
+                       if line.startswith(host_prefixes) else line
+                       for line in text.splitlines(keepends=True))
+
+    src = source_root / "全书分析" / "_任务包"
     if not src.is_dir():
         return
-    dst = Path(dst_project) / "全书分析" / "_任务包"
+    dst = target_root / "全书分析" / "_任务包"
     for root, _dirs, files in os.walk(src):
         rel_root = Path(root).relative_to(src)
         for name in files:
             src_file = Path(root) / name
             target = dst / rel_root / name
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_file, target)
+            if src_file.suffix.lower() == ".md":
+                content = rebase_host_lines(src_file.read_text(encoding="utf-8"))
+            elif src_file.suffix.lower() == ".json":
+                metadata = json.loads(src_file.read_text(encoding="utf-8"))
+                if isinstance(metadata, dict):
+                    for key in ("story_source", "sources", "references", "evidence"):
+                        value = metadata.get(key)
+                        if isinstance(value, str):
+                            metadata[key] = rebase_material_paths(value, source_root, target_root)
+                        elif isinstance(value, list):
+                            metadata[key] = [rebase_material_paths(item, source_root, target_root)
+                                             if isinstance(item, str) else item for item in value]
+                    if isinstance(metadata.get("contract"), str):
+                        metadata["contract"] = rebase_host_lines(metadata["contract"])
+                content = json.dumps(metadata, ensure_ascii=False, indent=2)
+            else:
+                shutil.copy2(src_file, target)
+                continue
+            atomic_write_bytes(target, content.encode("utf-8"))
+            # Preserve manifest ordering semantics used by latest_analysis_manifest.
+            shutil.copystat(src_file, target)
 
 
 def _analysis_pack_argv(project_dir, *, task, chapters, targets, question,

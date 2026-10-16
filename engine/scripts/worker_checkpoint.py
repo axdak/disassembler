@@ -14,6 +14,7 @@ from pathlib import Path
 from merge_delta import save_json
 from context_budget import ContextBudget
 from code_fingerprint import code_digest
+from story_source import declared_story_source
 
 
 def atomic_write_bytes(path: Path, content: bytes) -> None:
@@ -48,7 +49,7 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
                         *(engine / "scripts" / name for name in (
                             "capacity_tree.py", "bounded_generation.py", "context_budget.py",
                             "run_pipeline.py", "analysis_context_pack.py", "worker_checkpoint.py",
-                            "code_fingerprint.py", "prompt_loader.py", "synopsis_contract.py")),
+                            "code_fingerprint.py", "prompt_loader.py", "synopsis_contract.py", "story_source.py")),
                         engine / "tools" / "agent_worker.py",
                         engine / "tools" / "worker_context.py"]):
         code_hash.update(str(path.relative_to(engine)).encode())
@@ -56,8 +57,9 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
     settings = {key: value for key, value in os.environ.items()
                 if key.startswith(("ND_", "OPENAI_", "ANTHROPIC_", "GEMINI_"))}
     settings.update(ContextBudget.from_env().to_env())
-    # Packs may explicitly ask the worker to inspect element details in this file.
-    story = project / "故事结构_增量.json"
+    # Track exactly the archive declared in this task, including unembedded
+    # detail fields. Legacy packs keep their original process-library behavior.
+    story = declared_story_source(project, text) or project / "故事结构_增量.json"
     story_digest = hashlib.sha256(story.read_bytes() if story.is_file() else b"").hexdigest()
     hierarchy = pack.with_suffix(".hierarchy.json")
     hierarchy_identity = None
@@ -71,7 +73,7 @@ def run_checkpointed_partial(worker, command: str, project: Path, task: str,
         # Use content identities, not timestamped task-directory paths, so an
         # equivalent regenerated manifest can still reuse its checked partial.
         hierarchy_identity = [metadata.get("contract"), source_digests]
-    identity = json.dumps([1, command, task, header + separator + material, story_digest,
+    identity = json.dumps([1, command, task, header + separator + material, [str(story.resolve()), story_digest],
                            settings, code_hash.hexdigest(), hierarchy_identity], sort_keys=True, ensure_ascii=False)
     digest = hashlib.sha256(identity.encode()).hexdigest()
     directory = project / "质量治理" / "分包检查点"

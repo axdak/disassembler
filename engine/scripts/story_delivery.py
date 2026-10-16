@@ -6,6 +6,7 @@ validation and the program-first repair scheduler remain the publication gate.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from context_budget import CONTEXT_EXCEEDED
 from fault_recovery import digest
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
+from project_lock import project_write_lock
 from worker_checkpoint import atomic_write_bytes
 
 
@@ -73,13 +75,19 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
     draft = project / "故事结构_草稿.json"
     root = project / "质量治理/最终审计/交付"
     receipt = root / "introduction.json"
-    state = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
-    value = json.loads(draft.read_text(encoding="utf-8"))
-    if state.get("source") == digest(source) and state.get("introduction") == value.get("介绍"):
-        return 0
-    if not command:
-        return 2
     try:
+        # Capture the publication baseline under the same writer protocol used
+        # below. Model work runs outside the lock and cannot authorize stale writes.
+        with project_write_lock(project):
+            state = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
+            source_signature = digest(source)
+            draft_bytes = draft.read_bytes()
+            draft_signature = hashlib.sha256(draft_bytes).hexdigest()
+            value = json.loads(draft_bytes)
+            if state.get("source") == source_signature and state.get("introduction") == value.get("介绍"):
+                return 0
+        if not command:
+            return 2
         tree = CapacityTree(project, command, worker,
                             "为故事 JSON 收尾正式简介。完整阅读已治理故事的证据，建立主角、主线、核心冲突与发展结果的定位索引。"
                             "仅概括当前已完成范围，不虚构未处理章节，不写阶段性进度、审计笔记。"
@@ -105,17 +113,83 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
                     raise
         else:
             return CONTEXT_EXCEEDED
-        if not tree.unchanged():
-            return REPAIR_EXHAUSTED
-        # Preserve every other field, including extra introduction metadata.
-        old_intro = value.get("介绍", {})
-        save_json(root / f"introduction_before_{digest(draft)}.json", old_intro)
-        value["介绍"] = {**old_intro, **intro}
-        save_json(draft, value)
-        save_json(receipt, {"source": digest(source), "introduction": value["介绍"]})
-        return 0
+        with project_write_lock(project):
+            # Re-read the current draft once for both its fence and merge. Reject
+            # either changed input before preserving metadata and writing only intro.
+            draft_bytes = draft.read_bytes()
+            if (digest(source) != source_signature
+                    or hashlib.sha256(draft_bytes).hexdigest() != draft_signature
+                    or not tree.unchanged()):
+                return REPAIR_EXHAUSTED
+            value = json.loads(draft_bytes)
+            old_intro = value.get("介绍", {})
+            save_json(root / f"introduction_before_{draft_signature}.json", old_intro)
+            value["介绍"] = {**old_intro, **intro}
+            save_json(draft, value)
+            save_json(receipt, {"source": source_signature, "introduction": value["介绍"]})
+            return 0
     except TreeFailure as exc:
         return exc.code
     except (OSError, ValueError, TypeError) as exc:
         print(f"正式简介收尾未通过；原档案与断点保留：{exc}", flush=True)
         return REPAIR_EXHAUSTED
+
+
+def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
+                    worker_window="hidden", repair_limit=3, observe=None,
+                    commit=None, repair_worker=None) -> int:
+    """逐批修复历史缺项；每批复用原修复/复核，完成后再严格验收。"""
+    from local_json_patch import final_repair_scope, FINAL_REPAIR_BATCH_FIELDS
+    from story_schema_rules import validate_exact_story_schema
+    draft = project / "故事结构_草稿.json"
+    repair = project / "质量治理" / "最终审计" / "repair_final.md"
+    from run_pipeline import cmd_commit_final_draft, run_repair_worker
+    commit = commit or cmd_commit_final_draft
+    repair_worker = repair_worker or run_repair_worker
+    rc = commit(project)
+    if rc == 0:
+        return 0
+    if not repair.is_file():
+        return 1
+    if not command:
+        return 2
+
+    def all_scope():
+        try:
+            data = json.loads(draft.read_text(encoding="utf-8"))
+            feedback = "\n".join(validate_exact_story_schema(data, mode="final")[0])
+            return final_repair_scope(draft, feedback, all_fields=True)
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    fields = all_scope()
+    # 字段数给出有限上界；重试不扩成全书重写，也不能用部分修好替代最终通过。
+    batch_count = (len(fields) + FINAL_REPAIR_BATCH_FIELDS - 1) // FINAL_REPAIR_BATCH_FIELDS if fields else 1
+    for _ in range(batch_count):
+        before = draft.read_bytes() if draft.is_file() else b""
+        if fields:
+            binding = {"本批候选摘要": hashlib.sha256(before).hexdigest(),
+                       "字段": list(fields)[:FINAL_REPAIR_BATCH_FIELDS]}
+            # 与现有恢复指纹绑定；同一批失败预算不刷新，成功后的下一批有独立范围。
+            marker = "\n\n<!-- final-field-batch -->\n"
+            text = repair.read_text(encoding="utf-8").split(marker, 1)[0]
+            repair.write_text(text + marker + json.dumps(binding, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        rc = repair_worker(
+            command, project, "repair_final", repair, draft,
+            timeout=timeout, retries=retries,
+            worker_window=worker_window, repair_limit=repair_limit, observe=observe,
+        )
+        if rc != 0:
+            return rc
+        # 兼容不可读取的旧错误：修复入口自行报告失败，不能在这里编造补齐范围。
+        if not fields:
+            return commit(project) if draft.is_file() else 0
+        if not draft.is_file() or draft.read_bytes() == before:
+            return 1
+        rc = commit(project)
+        if rc == 0:
+            return 0
+        fields = all_scope()
+        if not fields:
+            return rc
+    return rc

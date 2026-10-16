@@ -6,6 +6,7 @@ It exposes no filesystem search, command execution, network, or write capability
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 from element_identity import build_lookup_index, find_index
+from story_source import declared_story_source
 
 TEXT_SUFFIXES = {".md", ".json", ".txt", ".csv", ".tsv"}
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
@@ -48,6 +50,7 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
     Follow material catalogs but not arbitrary paths in story JSON/novel prose.
     """
     project, pack = project.resolve(), pack.resolve()
+    pack_text = pack.read_text(encoding="utf-8")
     declared = pack.with_suffix(".context-inputs.json")
     aliases = {}
     if declared.is_file():
@@ -63,7 +66,11 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
                 raise ValueError("宿主材料清单条目格式错误")
             if snapshot.suffix.lower() in TEXT_SUFFIXES:
                 aliases[source] = snapshot
+    story_source = declared_story_source(project, pack_text, allowed_sources=aliases)
+    story_version = re.search(r"^当前故事版本：([0-9a-f]{64})$", pack_text, re.MULTILINE)
     pending = [pack, *(path.resolve() for path in outputs if path.is_file()), *aliases]
+    if story_source is not None:
+        pending.append(story_source)
     seen: set[Path] = set()
     files = []
     # Match complete supplied text across Windows newline conventions only.
@@ -78,6 +85,9 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
         # Hashes identify evidence bytes. Text-mode writes would translate LF
         # into CRLF on Windows and invalidate unchanged provider artifacts.
         raw = actual.read_bytes()
+        if source == story_source and story_version is not None and (
+                hashlib.sha256(raw).hexdigest() != story_version[1]):
+            raise ValueError("权威故事档案版本变化，请重新生成分析任务包；未混用新旧事实")
         content = raw.decode("utf-8")
         snapshot = directory / f"context_{len(files):04d}.txt"
         snapshot.write_bytes(raw)
@@ -107,7 +117,10 @@ def snapshot_context(project: Path, pack: Path, outputs: list[Path], directory: 
                 continue
             pending.append(candidate)
     manifest = directory / "context_manifest.json"
-    manifest.write_text(json.dumps({"project": str(project), "files": files}, ensure_ascii=False), encoding="utf-8")
+    metadata = {"project": str(project), "files": files}
+    if story_source is not None:
+        metadata["story_source"] = str(story_source)
+    manifest.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
@@ -121,6 +134,11 @@ class ContextReader:
         self.allowed = {self.key(Path(item["source"])): Path(item["snapshot"]) for item in self.files}
         self.inline = {self.key(Path(item["source"])): item for item in self.files
                        if item.get("provided_in_prompt") is True}
+        self.story_source = Path(data["story_source"]) if data.get("story_source") else None
+        # A reader owns one immutable session revision; caches never span tasks.
+        self._story_cache = None
+        self._story_revision = ""
+        self._story_indexes = {}
 
     @staticmethod
     def key(path: Path) -> str:
@@ -156,37 +174,56 @@ class ContextReader:
                 "next_offset": end if end < len(text) else None}
 
     def _story_snapshot(self) -> tuple[Path, Path, dict]:
-        """Load the frozen authoritative story, preferring a final-draft candidate."""
-        candidates = []
-        for item in self.files:
-            source = Path(item["source"])
-            if source.name in {"故事结构_草稿.json", "故事结构_增量.json"}:
-                priority = 0 if source.name == "故事结构_草稿.json" else 1
-                candidates.append((priority, source, Path(item["snapshot"])))
-        if not candidates:
-            raise ValueError("本任务没有登记可查询的故事结构快照")
-        _, source, snapshot = sorted(candidates, key=lambda value: value[0])[0]
-        data = json.loads(snapshot.read_text(encoding="utf-8"))
+        """Parse the host-selected frozen archive once for this reader session."""
+        if self._story_cache is not None:
+            return self._story_cache
+        if self.story_source is not None:
+            source = self.story_source
+            snapshot = self.allowed.get(self.key(source))
+            if snapshot is None:
+                raise ValueError("权威故事档案未登记到任务冻结材料")
+        else:
+            # Legacy final-refinement tasks prefer their draft. A final-only
+            # manifest is explicit registration, never a probe of live files.
+            candidates = []
+            for item in self.files:
+                source = Path(item["source"])
+                priority = {"故事结构_草稿.json": 0, "故事结构_增量.json": 1, "故事结构.json": 2}.get(source.name)
+                if priority is not None:
+                    candidates.append((priority, source, Path(item["snapshot"])))
+            if not candidates:
+                raise ValueError("本任务没有登记可查询的故事结构快照")
+            _, source, snapshot = min(candidates, key=lambda value: value[0])
+        raw = snapshot.read_bytes()
+        data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("故事结构快照不是 JSON 对象")
-        return source, snapshot, data
+        self._story_revision = hashlib.sha256(raw).hexdigest()
+        self._story_cache = (source, snapshot, data)
+        return self._story_cache
+
+    def _story_index(self, collection: str):
+        """Reuse one identity index per collection within the frozen revision."""
+        _, _, data = self._story_snapshot()
+        if collection not in self._story_indexes:
+            self._story_indexes[collection] = build_lookup_index(data.get(collection, []) or [])
+        return self._story_indexes[collection]
 
     @staticmethod
     def _unit_view(collection: str, item: dict, level: str) -> dict:
         if level == "L2":
-            return {"collection": collection, "record": item}
+            return {"collection": collection, "record": copy.deepcopy(item)}
         keys = ("名称", "别名") if level == "L0" else (
             "名称", "别名", "介绍", "分组", "标签集", "首次涉及章节", "最近涉及章节"
         )
-        return {"collection": collection, **{key: item[key] for key in keys if key in item}}
+        return {"collection": collection, **{key: copy.deepcopy(item[key]) for key in keys if key in item}}
 
     def story_snapshot(self) -> dict:
         source, snapshot, data = self._story_snapshot()
-        raw = snapshot.read_bytes()
         return {
             "source": str(source),
-            "revision": hashlib.sha256(raw).hexdigest(),
-            "introduction": data.get("介绍", {}),
+            "revision": self._story_revision,
+            "introduction": copy.deepcopy(data.get("介绍", {})),
             "counts": {key: len(data.get(key, []) or []) for key in COLLECTION_KEYS},
         }
 
@@ -228,7 +265,7 @@ class ContextReader:
             records = data.get(collection, []) or []
             # Canonical names outrank aliases; ambiguous matches are actionable
             # tool errors, never an arbitrary record selected by storage order.
-            names, aliases = build_lookup_index(records)
+            names, aliases = self._story_index(collection)
             index = find_index(names, aliases, name)
             if index < 0:
                 missing.append(ref)
@@ -255,7 +292,7 @@ class ContextReader:
             raise ValueError("需要有效集合/名称、最多50个字段路径；offset非负，limit为1..24000")
         _, snapshot, data = self._story_snapshot()
         records = data.get(collection, []) or []
-        names, aliases = build_lookup_index(records)
+        names, aliases = self._story_index(collection)
         index = find_index(names, aliases, name)
         if index < 0:
             raise ValueError("正式档案不存在；检索其他集合或核对原文，不能据此猜测新增")
@@ -283,7 +320,7 @@ class ContextReader:
             raise ValueError("offset 超过所选内容长度")
         end = min(len(text), offset + limit)
         return {"collection": collection, "name": record["名称"],
-                "revision": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                "revision": self._story_revision,
                 "text": text[offset:end], "total_chars": len(text),
                 "next_offset": end if end < len(text) else None}
 

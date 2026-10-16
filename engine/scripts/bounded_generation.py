@@ -224,12 +224,23 @@ def run_hierarchical_reports(command, project, pack, outputs, worker, **options)
     """Reduce per target through a bounded tree, then assemble complete content."""
     metadata = json.loads(pack.with_suffix(".hierarchy.json").read_text(encoding="utf-8"))
     sources = [(Path(path), "完整分批分析结果") for path in metadata["sources"]]
+    from story_source import declared_story_source
+    from worker_artifacts import confined_project_path
+    # Archives remain addressable in generation and review without becoming a
+    # mandatory full-library scan. Legacy wrappers carry the same host marker.
+    references = [(confined_project_path(project, path), "按需核对的权威故事档案")
+                  for path in metadata.get("references", [])]
+    story = declared_story_source(project, pack.read_text(encoding="utf-8")) if pack.is_file() else None
+    if story is not None and story.is_file():
+        references.append((story, "按需核对的权威故事档案"))
+    references = list(dict.fromkeys([*options.get("reference_sources", []), *references]))
     signatures = {output: digest(output) for output in outputs}
     staged = []
     try:
         for output in outputs:
             contract = metadata["contract"] + f"\n只组织目标文件：{output.name}。保持该文件原有结构。"
-            tree = CapacityTree(project, command, worker, contract, output.name, sources, **options)
+            tree = CapacityTree(project, command, worker, contract, output.name, sources,
+                                **{**options, "reference_sources": references})
             overview, contents, _ = tree.run()
             preliminary = assemble(contents, output.suffix == ".json", tree.resolve)
             evidence = [(Path(path), "完整原始分析材料") for path in metadata.get("evidence", [])]

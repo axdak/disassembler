@@ -9,7 +9,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
-from story_schema_rules import COLLECTION_KEYS, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION
+from story_schema_rules import COLLECTION_KEYS, DEFAULTS, DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE, TYPE_TO_COLLECTION
 from registered_types import is_unregistered_name
 from generation_contract import field_type, quality_marker
 
@@ -34,6 +34,108 @@ PATCH_SCHEMA = {
 }
 
 REFERENCE_REPAIR_ARCHIVE = "引用修复原文"
+
+# 复用现有字段补丁协议，限制单次交付体积；成功一批后外层仍须完整校验。
+FINAL_REPAIR_BATCH_FIELDS = 32
+FIELD_REPAIR_ARCHIVE = "字段修复原文"
+
+
+def _archive_field(detail: dict, field: str, value) -> None:
+    """宿主记录精确旧值；不能让模型以自由文字声称已经保全。"""
+    raw = detail.get(FIELD_REPAIR_ARCHIVE, "[]")
+    try:
+        entries = json.loads(raw)
+        if not isinstance(entries, list) or any(not isinstance(entry, str) for entry in entries):
+            entries = [raw]
+    except (ValueError, TypeError):
+        entries = [str(raw)]
+    entry = json.dumps({"字段": field, "原值": value}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if entry not in entries:
+        entries.append(entry)
+    detail[FIELD_REPAIR_ARCHIVE] = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+
+
+def archived_field_preserved(before: dict, after: dict, field: str) -> bool:
+    """只接受同一元素/详情内的精确字段档案，不允许异处同文抵消丢失。"""
+    detail = after.get("详情", after)
+    if not isinstance(detail, dict):
+        return False
+    try:
+        entries = json.loads(detail.get(FIELD_REPAIR_ARCHIVE, "[]"))
+        if not isinstance(entries, list) or any(not isinstance(entry, str) for entry in entries):
+            return False
+        if field == FIELD_REPAIR_ARCHIVE:
+            old_entries = json.loads(before[field])
+            return isinstance(old_entries, list) and all(entry in entries for entry in old_entries)
+        permitted = set().union(*(set(defaults) for defaults in DEFAULTS.values())) | DETAIL_REF_ARRAY_KEYS
+        if (field not in permitted - {"名称", "详情", "时间"} and not field.startswith("关联")
+                and not isinstance(before.get(field), list)):
+            return False
+        for entry in entries:
+            try:
+                if json.loads(entry) == {"字段": field, "原值": before[field]}:
+                    return True
+            except ValueError:
+                continue
+        return False
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def final_repair_scope(path: Path, feedback: str, *, all_fields: bool = False) -> dict:
+    """终稿只开放真实报错的标准字段，不允许整条或整份故事改写。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    scope = {}
+    intro = data.get("介绍")
+    if isinstance(intro, dict):
+        for field in ("标题", "描述"):
+            pointer = "/介绍/" + field
+            if quality_marker(pointer) in feedback:
+                scope[pointer] = {"kind": "quality", "value_type": "string", "collection": "",
+                                  "field": field, "metadata": True, "final": True}
+    for collection in COLLECTION_KEYS:
+        records = data.get(collection)
+        if not isinstance(records, list):
+            continue
+        for index, item in enumerate(records):
+            if not isinstance(item, dict):
+                continue
+            detail = item.get("详情", {})
+            fields = [(field, field_type(default)) for field, default in DEFAULTS[collection].items()
+                      if field not in {"名称", "详情", "时间"}]
+            if isinstance(detail, dict):
+                fields.extend(("详情/" + field, "array") for field in sorted(detail) if field.startswith("关联") or isinstance(detail[field], list))
+            for field, value_type in fields:
+                pointer = f"/{collection}/{index}/{field}"
+                if quality_marker(pointer) not in feedback:
+                    continue
+                scope[pointer] = {"kind": "quality", "value_type": value_type, "collection": collection,
+                                  "field": field.split("/")[-1], "name": item.get("名称"), "final": True}
+    return scope if all_fields else dict(list(scope.items())[:FINAL_REPAIR_BATCH_FIELDS])
+
+
+def final_repair_progress(before: Path, after: Path) -> bool:
+    """仅承认本批全部字段修好且没有新增错误，不能把部分进度当成最终通过。"""
+    from story_schema_rules import validate_exact_story_schema
+    try:
+        old = json.loads(before.read_text(encoding="utf-8"))
+        new = json.loads(after.read_text(encoding="utf-8"))
+        old_errors = validate_exact_story_schema(old, mode="final")[0]
+        new_errors = validate_exact_story_schema(new, mode="final")[0]
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    scope = final_repair_scope(before, "\n".join(old_errors))
+    if not scope:
+        return False
+    # 未选中的错误须逐字保持；新引用/跨字段错误也会被此集合比较拒绝。
+    remaining = {error for error in old_errors if not any(quality_marker(path) in error for path in scope)}
+    return (len(new_errors) < len(old_errors) and set(new_errors) <= remaining
+            and not any(quality_marker(path) in error for path in scope for error in new_errors))
 
 
 def _reference_values(value):
@@ -254,7 +356,17 @@ def apply_scoped_patch(reference: Path, candidate: Path, patch: dict, scope: dic
             else:
                 node = node.setdefault(part, {})
         previous = node.get(parts[-1]) if isinstance(node, dict) else node[int(parts[-1])]
-        if rule.get("reference"):
+        if rule.get("final") and not rule.get("metadata"):
+            # 只有宿主定位的终稿报错字段允许纠正旧值；其余普通补丁仍执行原保全规则。
+            record = result[parts[0]][int(parts[1])]
+            detail = record.setdefault("详情", {})
+            if not isinstance(detail, dict):
+                raise ValueError("原详情异常，禁止覆盖")
+            if previous not in (None, "", []):
+                _archive_field(detail, rule["field"], previous)
+            if len(parts) == 3 and rule["field"] in detail:
+                _archive_field(detail, rule["field"], detail.pop(rule["field"]))
+        elif rule.get("reference"):
             if (len(_correct_reference_values(rule["field"], value)) != len(value)
                     or any(entry not in value for entry in _correct_reference_values(rule["field"], previous))):
                 raise ValueError("关联修复必须匹配引用类型且保留已有正确类型引用")
