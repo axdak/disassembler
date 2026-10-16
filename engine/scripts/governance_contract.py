@@ -1,7 +1,8 @@
 """Lossless shape corrections for legacy governance output.
 
-Decode containers only where the existing contract requires containers. Do
-not parse narrative strings, invent evidence, resolve near names or drop data.
+Decode containers only where the existing contract requires them. A uniquely
+bound legacy detail-array setter may recover its exact existing string encoding;
+model text/order, evidence and identity are never invented or rewritten.
 """
 from __future__ import annotations
 
@@ -86,6 +87,7 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
         # Compare mirrors before trace formatting can make different raw values equal.
         from registered_types import align_registered_types
         changes.extend(align_registered_types(result, story))
+        changes.extend(normalize_detail_setter_encodings(result, story))
     for section in ("新增元素", "修改元素"):
         bucket = result.get(section)
         if not isinstance(bucket, dict):
@@ -113,6 +115,94 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
         changes.extend(_retain_event_compound_tags(result, story))
         changes.extend(_relocate_additive_tags(result, story))
     return result, changes
+
+
+
+def normalize_detail_setter_encodings(patch, story):
+    """Restore only a uniquely bound legacy detail array's storage encoding.
+
+    Current text is the exact preimage, including JSON whitespace/escapes. Model
+    strings and their order stay untouched; identity combinations and competing
+    writes remain with the original validators rather than being projected here.
+    The caller preserves raw artifacts and runs all original evidence/apply gates.
+    """
+    from collections import Counter
+    from element_identity import build_lookup_index, find_index
+    from information_preservation import set_field_operation_errors
+    from story_schema_rules import TYPE_TO_COLLECTION, DETAIL_REF_ARRAY_KEYS, SUPPLEMENTARY_TAGS_DETAIL_KEY
+
+    if not isinstance(patch, dict) or not isinstance(story, dict):
+        return []
+    operations = patch.get("治理操作", {})
+    setters = operations.get("设置字段", []) if isinstance(operations, dict) else None
+    if not isinstance(setters, list) or any(operations.get(key) for key in
+            ("合并元素", "重命名元素", "替换引用", "降级元素", "删除元素", "追加详情")):
+        return []  # Never infer a target/preimage across identity or concurrent append operations.
+    indexes = {key: build_lookup_index(records) for key in COLLECTION_KEYS
+               if isinstance(records := story.get(key), list)}
+
+    def target(op):
+        if not isinstance(op, dict) or any(not isinstance(op.get(key), str)
+                                          for key in ("类型", "名称", "字段")):
+            return None
+        collection = TYPE_TO_COLLECTION.get(op["类型"])
+        if collection not in indexes:
+            return None
+        try:
+            index = find_index(*indexes[collection], op["名称"])
+        except ValueError:
+            return None
+        return (collection, index, op["字段"]) if index >= 0 else None
+
+    targets = [target(op) for op in setters]
+    counts = Counter(entry for entry in targets if entry is not None)
+    changes = []
+    for number, (op, entry) in enumerate(zip(setters, targets)):
+        if entry is None or counts[entry] != 1:
+            continue
+        collection, index, field = entry
+        if not field.startswith("详情/") or set_field_operation_errors(op, patch):
+            continue
+        leaf = field.removeprefix("详情/")
+        if leaf in DETAIL_REF_ARRAY_KEYS or leaf.startswith("关联") or leaf == SUPPLEMENTARY_TAGS_DETAIL_KEY:
+            continue  # Formal references and dedicated tag governance retain their own contracts.
+        item = story[collection][index]
+        canonical, aliases = item.get("名称"), item.get("别名", [])
+        if (not isinstance(canonical, str) or not canonical.strip() or not isinstance(aliases, list)
+                or any(not isinstance(alias, str) for alias in aliases)):
+            continue  # Malformed registries must reach validation, not crash or gain identity.
+        names = {canonical, op["名称"], *aliases}
+        competing = False
+        for section in ("新增元素", "修改元素"):
+            bucket = patch.get(section, {})
+            records = bucket.get(collection, []) if isinstance(bucket, dict) else None
+            if not isinstance(records, list):
+                competing = True
+                break
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                declared = {name for name in [record.get("名称"), *(record.get("别名", [])
+                            if isinstance(record.get("别名"), list) else [])] if isinstance(name, str)}
+                if names & declared:
+                    competing = True
+                    break
+        detail = item.get("详情")
+        current = detail.get(leaf) if isinstance(detail, dict) else None
+        if competing or not isinstance(current, str) or any(
+                not isinstance(op.get(key), list) or any(not isinstance(value, str) for value in op[key])
+                for key in ("原值", "值")):
+            continue
+        try:
+            previous = json.loads(current)
+        except ValueError:
+            continue
+        if not isinstance(previous, list) or any(not isinstance(value, str) for value in previous) or previous != op["原值"]:
+            continue
+        op["原值"] = current
+        op["值"] = json.dumps(op["值"], ensure_ascii=False)
+        changes.append(f"治理操作.设置字段[{number}]：按当前详情/{leaf}精确旧值还原原值/值的JSON字符串数组编码")
+    return changes
 
 
 def _retain_event_compound_tags(patch, story):

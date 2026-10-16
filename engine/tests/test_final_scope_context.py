@@ -174,15 +174,18 @@ def test_final_scope_resume_reuses_generation_and_keeps_exact_batch_context(tmp_
     assert len(case.published) == 1
 
 
-@pytest.mark.parametrize("failure", ["review_rejected", "validator_damage", "out_of_scope"])
+@pytest.mark.parametrize("failure", ["review_rejected", "validator_damage", "incomplete_out_of_scope"])
 def test_inline_context_cannot_bypass_review_preservation_or_patch_scope(tmp_path, failure):
     case = final_case(tmp_path)
     worker, validate = case.options["worker"], case.options["validate"]
 
     def wrapped(command, root, kind, task, expected, *args, **kwargs):
         rc = worker(command, root, kind, task, expected, *args, **kwargs)
-        if kind == "recovery_patch" and failure == "out_of_scope":
-            patch = json.loads(expected.read_bytes());patch["changes"].append({"path": "/角色集/2/介绍", "value": "越界改写"});save_json(expected, patch)
+        if kind == "recovery_patch" and failure == "incomplete_out_of_scope":
+            patch = json.loads(expected.read_bytes())
+            patch["changes"].pop(0)  # Incomplete scopes cannot use the complete-superset projection.
+            patch["changes"].append({"path": "/角色集/2/介绍", "value": "越界改写"})
+            save_json(expected, patch)
         if kind == "recovery_review" and failure == "review_rejected":
             verdict = json.loads(expected.read_bytes());verdict.update(passed=False, issues=["原文不支持"]);save_json(expected, verdict)
         return rc

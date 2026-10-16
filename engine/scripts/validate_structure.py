@@ -21,7 +21,7 @@ import os
 import sys
 from typing import Any, Dict, List, Tuple
 
-from story_schema_rules import COLLECTION_KEYS, validate_exact_story_schema
+from story_schema_rules import COLLECTION_KEYS, CONTENT_REVIEW_PREFIX, validate_exact_story_schema
 
 
 def configure_stdio() -> None:
@@ -75,7 +75,12 @@ def print_report(title: str, path: str, mode: str, errors: List[str], warnings: 
         print(f"\n发现 {len(warnings)} 个警告：")
         for i, w in enumerate(warnings, 1):
             print(f"  {i}. {w}")
-    if not errors and not warnings:
+    content_pending = sum(w.startswith(CONTENT_REVIEW_PREFIX) for w in warnings)
+    if content_pending:
+        print(f"\n内容待核对 {content_pending} 项（非阻断）；空数组可合法，结构格式通过不代表内容完整，仍须依据原文核实。")
+    if not errors and content_pending:
+        print(f"\n结构校验通过，但有 {len(warnings)} 个警告。")
+    elif not errors and not warnings:
         print("\n校验完全通过。")
     elif not errors:
         print(f"\n校验通过，但有 {len(warnings)} 个警告。")
@@ -84,7 +89,7 @@ def print_report(title: str, path: str, mode: str, errors: List[str], warnings: 
 
 
 def write_json_report(path: str, passed: bool, mode: str, errors: List[str], warnings: List[str]) -> None:
-    """Persist validator state for recovery and completion checks."""
+    """保留现有 JSON API；passed 只表示无结构错误，内容待核对仍在 warnings。"""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(

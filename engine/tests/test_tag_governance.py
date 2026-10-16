@@ -214,7 +214,9 @@ def test_event_archive_detail_keys_can_preserve_rich_scene_labels_without_punctu
     errors, warnings = validate_exact_story_schema(story, mode="process")
 
     assert errors == []
-    assert warnings == []
+    # 富场景详情键仍无误报；本例的真实空成员只新增一条非阻断内容提醒。
+    assert len(warnings) == 1
+    assert warnings[0].startswith("[内容待核对:/事件集/0/参与成员]")
 
 
 def test_plain_archive_detail_keys_with_punctuation_warn_but_do_not_block():

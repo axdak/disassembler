@@ -40,7 +40,7 @@ from engine_contract import contract_version
 from governance_contract import normalize_governance_patch, periodic_introduction_errors, governance_quality_errors
 from generation_contract import chapter_quality_errors, generation_scope_errors
 from merge_delta import save_json as save_atomic_json
-from story_schema_rules import COLLECTION_KEYS
+from story_schema_rules import COLLECTION_KEYS, event_participant_review_warnings
 from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
@@ -1721,9 +1721,9 @@ def recover_story_from_snapshot(project_dir: Path, snapshot_seq: Optional[int] =
     return 0
 
 
-def build_lightweight_index(story_path: Path, max_names: int = 0) -> str:
-    """全部元素名称索引。max_names=0 表示不限制（给全部名称）。"""
-    data = load_json(story_path, {}) or {}
+def build_lightweight_index(story_path: Path, max_names: int = 0, *, story_data: Optional[dict] = None) -> str:
+    """全部名称索引；审计可复用已读快照，max_names=0 表示不限制。"""
+    data = (load_json(story_path, {}) if story_data is None else story_data) or {}
     lines = []
     intro = data.get("介绍", {}) if isinstance(data, dict) else {}
     if isinstance(intro, dict):
@@ -1979,27 +1979,38 @@ def render_audit_prompt(**context) -> str:
                          synopsis_sections=synopsis_contract.synopsis_section_spec())
 
 
-def write_governance_route(project_dir, start, end, pack, extra_sources=()):
-    """Prepare complete bounded evidence without inventing subchapter identities."""
+def write_governance_route(project_dir, start, end, pack, extra_sources=(), *, story_data=None):
+    """Prepare bounded evidence, keeping the complete review list in existing required material."""
     paths = audit_paths(project_dir, start, end)
+    story = ensure_story(project_dir)
+    # Reuse the caller's current snapshot; tiering must not silently reread another story version.
+    if story_data is None:
+        story_data = load_json(story, {})
+    history = pack.with_suffix(".history.md")
+    details = extract_relevant_elements_for_audit(story_data, project_dir, start, end)
+    current_intro = json.dumps(story_data.get("介绍", {}), ensure_ascii=False)
+    review_warnings = event_participant_review_warnings(story_data, chapter_range=(start, end))
+    chapter_sources = []
+    for seq in range(start, end + 1):
+        chapter = chapter_by_seq(project_dir, seq)
+        if chapter is not None:
+            chapter_sources.append((chapter, f"第{seq:03d}章完整原文；本周期事实依据"))
+    review_context = ""
+    if review_warnings:
+        # A long list belongs to the existing paged source, not every tree node's fixed contract.
+        review_context = ("## 空参与成员待核对（非阻断；旧关联仅候选）\n" + "\n".join(review_warnings)
+                          + "\n所涉原文：\n" + "\n".join(f"{role}：{path}" for path, role in chapter_sources) + "\n")
+    # Synopsis and pending checks remain whole even in the lightest historical tier.
+    atomic_write_bytes(history, (review_context + "## 当前故事简介（需核对的旧版，不是原文证据）\n" + current_intro + "\n"
+                                + build_lightweight_index(story, story_data=story_data) + "\n## 本周期相关完整档案\n" + details).encode())
     contract = render_audit_prompt(start=start, end=end,
                              correction_path=paths["correction"], project_dir=project_dir,
                              run_pipeline_path=script_path("run_pipeline.py"), full_story_json="",
                              story_index="", relevant_details="", previous_correction=None,
-                             chapters=[], taxonomy_json="")
+                             chapters=[], taxonomy_json="", participant_review_path=str(history) if review_warnings else "")
     contract = re.sub(r"```bash.*?```", "程序在全部分片与独立复核通过后统一校验提交。", contract, flags=re.S)
-    story = ensure_story(project_dir)
-    history = pack.with_suffix(".history.md")
-    details = extract_relevant_elements_for_audit(load_json(story, {}), project_dir, start, end)
-    # Synopsis is needed even in the lightest historical tier; never truncate it.
-    current_intro = json.dumps(load_json(story, {}).get("介绍", {}), ensure_ascii=False)
-    atomic_write_bytes(history, ("## 当前故事简介（需核对的旧版，不是原文证据）\n" + current_intro + "\n"
-                                + build_lightweight_index(story) + "\n## 本周期相关完整档案\n" + details).encode())
-    sources = [(history, "全局索引及本周期相关完整档案")]
-    for seq in range(start, end + 1):
-        chapter = chapter_by_seq(project_dir, seq)
-        if chapter is not None:
-            sources.append((chapter, f"第{seq:03d}章完整原文；本周期事实依据"))
+    sources = [(history, "全局索引、本周期相关完整档案及空参与成员待核对清单")]
+    sources += chapter_sources
     taxonomy = Path(__file__).resolve().parent.parent / "schemas/narrative_taxonomy.json"
     sources += [(taxonomy, "完整标签规则；作为约束，不是故事事实")]
     sources += list(extra_sources)
@@ -2039,8 +2050,9 @@ def write_audit_pack(
 
     story_data = load_json(story, {})
     full_story_json = json.dumps(story_data, ensure_ascii=False, indent=2)
-    story_index = build_lightweight_index(story)
+    story_index = build_lightweight_index(story, story_data=story_data)
     relevant_details = extract_relevant_elements_for_audit(story_data, project_dir, start, end)
+    participant_reviews = event_participant_review_warnings(story_data, chapter_range=(start, end))
 
     chapters: List[Dict[str, Any]] = []
     for seq in range(start, end + 1):
@@ -2093,6 +2105,7 @@ def write_audit_pack(
             previous_correction=None,
             chapters=chapters,
             taxonomy_json=taxonomy_json,
+            participant_review_warnings=participant_reviews,
         )
         candidate += f"\n完整历史档案：{story}；索引只定位，身份、合并和冲突须读取对应完整档案核实。\n"
         attempts.append({"render_mode": mode, "rendered_chars": len(candidate),
@@ -2114,7 +2127,7 @@ def write_audit_pack(
         "excluded_from_model_facts": ["chapter_analysis", "raw_delta", "previous_correction"],
     }
     if not selected_content and start == end:
-        selected_content = write_governance_route(project_dir, start, end, paths["pack"])
+        selected_content = write_governance_route(project_dir, start, end, paths["pack"], story_data=story_data)
         selected_mode = "tiered_evidence_tree"
     elif selected_content:
         paths["pack"].with_suffix(".governance.json").unlink(missing_ok=True)
@@ -4011,7 +4024,7 @@ def cmd_commit_final_draft(project_dir: Path) -> int:
         print(f"已生成修复任务包: {repair}")
         return 1
 
-    print("最终校验通过！")
+    print("最终结构校验通过！")
     print(f"校验报告: {report}")
     print(f"\n可以运行以下命令完成最终交付:")
     print(f"  python {script_path('run_pipeline.py')} finalize {project_dir}")
@@ -4033,7 +4046,7 @@ def cmd_validate_final(project_dir: Path, file: str = "") -> int:
                   "--strict", str(target)], report)
     print(f"校验报告: {report}")
     if rc == 0:
-        print("最终校验通过。")
+        print("最终结构校验通过。")
     else:
         print("最终校验失败。")
     return rc

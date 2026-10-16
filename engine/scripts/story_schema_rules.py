@@ -27,6 +27,7 @@ from chronology import (
     is_iso_time,
     normalize_chapter_value,
     normalize_involved_chapters,
+    parse_involved_chapters,
     split_event_group,
 )
 
@@ -598,6 +599,36 @@ def validate_parent_cycles(data: Dict[str, Any], errors: List[str]) -> None:
                 cur = mapping.get(cur, "")
 
 
+# 内容待核对不属于可机械补齐的质量错误；不能使用局部修复的质量字段标记。
+CONTENT_REVIEW_PREFIX = "[内容待核对:"
+
+
+def event_participant_review_warnings(data: Any, *, chapter_range: Optional[Tuple[int, int]] = None) -> List[str]:
+    """从同一故事快照定位空成员，仅读取候选，不推断人物或判定空值错误。
+
+    周期仅接收明确涉及本区间的事件；未知章节留在全库报告，不凭名称猜测。
+    原有关联角色只是旧档案线索，不能替代原文或直接归位为参与成员。
+    """
+    events = data.get("事件集") if isinstance(data, dict) else None
+    warnings: List[str] = []
+    if not isinstance(events, list):
+        return warnings
+    for index, item in enumerate(events):
+        if not isinstance(item, dict) or item.get("参与成员") != []:
+            continue
+        detail = item.get("详情")
+        detail = detail if isinstance(detail, dict) else {}
+        chapters = parse_involved_chapters(detail.get("涉及章节"))
+        if chapter_range is not None and not any(chapter_range[0] <= seq <= chapter_range[1] for seq in chapters):
+            continue
+        chapter_text = "，".join(str(seq).zfill(4) for seq in chapters) or "未知（不猜测）"
+        candidates = json.dumps(detail.get("关联角色", []), ensure_ascii=False)
+        warnings.append(f"{CONTENT_REVIEW_PREFIX}/事件集/{index}/参与成员] 事件[{item.get('名称', index)}] "
+                        f"参与成员=[]；涉及原文章节={chapter_text}；现有关联角色候选={candidates}；"
+                        "仅定位待核对，不代表缺人或要求填充。")
+    return warnings
+
+
 def validate_exact_story_schema(data: Any, *, mode: str = "process", enforce_counts: Optional[bool] = None) -> Tuple[List[str], List[str]]:
     """返回 (errors, warnings)。
 
@@ -605,6 +636,7 @@ def validate_exact_story_schema(data: Any, *, mode: str = "process", enforce_cou
       - process: 逐章过程库。硬卡格式/字段/类型；前向引用、数量不足、内容深度不足为 warning。
       - governance: 治理后阶段。引用错误升级为 error；事件发生地点的未注册细粒度子空间保留为 warning；数量不足仍为 warning。
       - final: 最终交付。引用、数量、介绍等核心质量要求均为 error。
+    空参与成员仅提示原文核对，三种阶段均不据此判错或补人。
     """
     if mode not in {"process", "governance", "final", "delta"}:
         raise ValueError(f"未知校验模式: {mode}")
@@ -692,6 +724,8 @@ def validate_exact_story_schema(data: Any, *, mode: str = "process", enforce_cou
                     field = message.split(" ", 1)[0].removeprefix("详情.")
                     errors.append(f"{quality_marker(path + '/' + field)} {message}")
 
+    # 非阻断内容提醒单独留在原 warnings 通道，不扩大 final_repair 的错误 scope。
+    warnings.extend(event_participant_review_warnings(data))
     validate_parent_cycles(data, errors)
     events = data.get("事件集", [])
     if isinstance(events, list):

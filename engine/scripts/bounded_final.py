@@ -460,7 +460,10 @@ def run_bounded_final(command, project: Path, pack: Path, draft: Path, worker, *
         # received patch and change log; never invent absent evidence or names.
         raw_proposal = proposal.read_bytes()
         try:
-            patch, corrections = normalize_governance_patch(json.loads(raw_proposal), "全书")
+            # original is this unit's protected, last accepted snapshot (not the
+            # book's initial draft); prior accepted setters must bind the next one.
+            patch, corrections = normalize_governance_patch(json.loads(raw_proposal), "全书",
+                story=json.loads(original.read_text(encoding="utf-8")))
             if isinstance(patch, dict):
                 corrections.extend(relocate_element_fields(patch))
             if corrections:

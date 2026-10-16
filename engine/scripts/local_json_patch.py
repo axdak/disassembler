@@ -323,6 +323,27 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
     return scope
 
 
+def project_complete_final_patch(reference: Path, patch: dict, scope: dict) -> dict | None:
+    """Derive only a complete final-quality allowlist; never repair values or moves.
+
+    This projection does not authorize application. The unchanged strict applier
+    must still validate every retained value, archive and preservation constraint.
+    Missing/duplicate paths, stale bases and non-final rules remain unrecoverable.
+    """
+    if (not scope or any(not isinstance(rule, dict) or rule.get("kind") != "quality"
+                         or rule.get("final") is not True or "promotion" in rule
+                         for rule in scope.values()) or patch_shape_errors(patch)
+            or patch.get("moves") not in (None, [])
+            or patch.get("base_sha256") != hashlib.sha256(reference.read_bytes()).hexdigest()):
+        return None
+    changes = {item["path"]: item for item in patch["changes"]}
+    if len(changes) != len(patch["changes"]) or not set(scope) < set(changes):
+        return None
+    # Scope order is authoritative; retain exact worker values without coercion.
+    return {"base_sha256": patch["base_sha256"],
+            "changes": [copy.deepcopy(changes[path]) for path in scope], "moves": []}
+
+
 def apply_scoped_patch(reference: Path, candidate: Path, patch: dict, scope: dict) -> None:
     """Apply a complete allowlisted patch atomically, rejecting stale/extra edits."""
     errors = patch_shape_errors(patch)

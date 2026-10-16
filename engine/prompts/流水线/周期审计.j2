@@ -46,6 +46,22 @@ inputs: [start, end, correction_path, run_pipeline_path, project_dir, chapters, 
 - 新增/修改按正式档案身份区分：修改须引用对应集合已有正式名称，或本补丁唯一无冲突重命名声明的新名称。所属家族、角色或主题已有，不代表新概括的独立设定已有；确属原文支持且不重复的新档案放新增区。输出前核对修改目标和理由，不能把理由中判断“新增”的独立条目留在修改区，也不能强改为无关已有名称。
 - 本周期原文是事实依据。章节分析、历史 Delta 和治理补丁只作程序侧定位与审计追溯，不作为本任务事实上下文；无法从原文和当前正式档案确认时保守保留。
 
+{% if (participant_review_warnings is defined and participant_review_warnings) or (participant_review_path is defined and participant_review_path) -%}
+## 本周期空参与成员待核对（非阻断）
+
+下列项只是程序定位的空字段，不是已证错误。按其全局路径、正式名称和涉及原文章节，核对完整档案范围内实际行动、受事、发言、心理及明确回忆等子场景人物；现有关联角色仅作候选，不能直接搬为参与成员，仅提及但未参与者不计入。确无人参与时保留[]，禁止为填空虚构人物或猜测别名。只核本周期明确涉及的事件，不扩展为全库历史扫描。
+
+有据需改时沿用现有有原文证据的设置字段；无须改或证据不足时保留原值，在现有质量说明中说明保留理由或待确认项。结构通过不代表内容完整，不用统一“均已核对”代替这些具体空字段的结论。
+
+{% if participant_review_warnings is defined and participant_review_warnings -%}
+{% for warning in participant_review_warnings %}
+- {{ warning }}
+{% endfor %}
+{%- else -%}
+本周期完整逐项清单及所涉原文路径在必读材料 `{{ participant_review_path }}` 的“空参与成员待核对”节。完整读取并逐项核对，不仅依据索引或旧关联候选判断；清单随既有完整材料分片，不截断。
+{%- endif %}
+{%- endif %}
+
 {% if taxonomy_json -%}
 ## 受控叙事标签字典（用于周期标签标准化）
 

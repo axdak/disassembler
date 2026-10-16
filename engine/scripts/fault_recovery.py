@@ -7,6 +7,7 @@ The ledger survives redispatch/restart and never receives a fresh budget implici
 from __future__ import annotations
 
 from local_json_patch import (delta_repair_scope, final_repair_scope, apply_scoped_patch,
+                              project_complete_final_patch,
                               archived_reference_preserved, archived_field_preserved,
                               FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE)
 from context_budget import ContextBudget, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, estimate_tokens
@@ -42,6 +43,8 @@ STRATEGIES = (
 # 同时覆盖有符号/无符号的 STATUS_CONTROL_C_EXIT，保留原返回码供追溯。
 HOST_INTERRUPTED = {1073807364, 3221225786, -1073741510}
 RETRYABLE_REVIEW = {130, 124, 408, 429, 502, 503, 504, CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, REPAIR_EXHAUSTED}
+# Fence each derivation path even when the reading catalog deduplicates identical text.
+FINAL_PATCH_EVIDENCE = ("candidate_patch.json", "candidate_patch.projected.json", "candidate_patch.projection.json")
 
 
 def digest(path: Path) -> str:
@@ -340,6 +343,55 @@ non-heading content line. Semantic correctness still needs evidence-based review
 
     if isinstance(old, dict) and isinstance(new, dict):
         if current is not None:
+            # Align only the same unique setter with an exact current preimage
+            # and identical new array text/order. Keep arrays in the comparison
+            # view: converting short lists to prose would lose list preservation.
+            # Raw/checkpoint bytes and the global visitor remain unchanged.
+            import copy
+            from governance_contract import normalize_detail_setter_encodings
+
+            def setters(document):
+                operations = document.get("治理操作", {})
+                entries = operations.get("设置字段", []) if isinstance(operations, dict) else []
+                return entries if isinstance(entries, list) else []
+
+            views = [copy.deepcopy(document) if setters(document) else {} for document in (old, new)]
+            for view in views:
+                normalize_detail_setter_encodings(view, current)
+            for source, normalized, other in ((old, views[0], new), (new, views[1], old)):
+                for op, encoded in zip(setters(source), setters(normalized)):
+                    if (not isinstance(op, dict) or not isinstance(op.get("原值"), list)
+                            or not isinstance(op.get("值"), list) or not isinstance(encoded.get("原值"), str)):
+                        continue  # The shared normalizer alone determines eligibility.
+                    matches = [(index, entry) for index, entry in enumerate(setters(other))
+                               if isinstance(entry, dict) and all(entry.get(key) == op.get(key)
+                                  for key in ("类型", "名称", "字段"))]
+                    if len(matches) != 1:
+                        continue
+                    index, counterpart = matches[0]
+                    previous = json.loads(encoded["原值"])
+                    if counterpart.get("原值") not in (previous, encoded["原值"]):
+                        continue
+                    value = counterpart.get("值")
+                    try:
+                        decoded = json.loads(value) if isinstance(value, str) else value
+                    except ValueError:
+                        decoded = None
+                    if (not isinstance(decoded, list) or any(not isinstance(entry, str) for entry in decoded)
+                            or decoded != op["值"]):
+                        if isinstance(value, str):
+                            errors.append("治理设置字段的跨编码新值内容或顺序不一致，拒绝以编码归正改变内容")
+                        continue
+                    # Re-probe the counterpart through the same duplicate/conflict
+                    # guards, including already encoded setters and alias collisions.
+                    probe = copy.deepcopy(other)
+                    peer = setters(probe)[index]
+                    peer["原值"], peer["值"] = previous, copy.deepcopy(decoded)
+                    normalize_detail_setter_encodings(probe, current)
+                    if peer.get("原值") != encoded["原值"]:
+                        continue
+                    op["原值"] = counterpart["原值"] = encoded["原值"]
+                    op["值"], counterpart["值"] = copy.deepcopy(decoded), copy.deepcopy(decoded)
             align_registered_types(old, current)
             align_registered_types(new, current)
             align_preserved_moves(old, new, current)
@@ -749,6 +801,8 @@ def recover_artifact(
                       workspace / f"reference{output.suffix}", workspace / "failure.md", workspace / "contract.md",
                       workspace / "materials.json", workspace / "changes.json", workspace / "history.json"]
         protected += materials.protected_paths()
+        if task == "repair_final":
+            protected += [workspace / name for name in FINAL_PATCH_EVIDENCE]
         context_inputs = task_pack.with_suffix(".context-inputs.json")
         save_json(context_inputs, [str(path.resolve()) for path in protected
                                   if path != expected and path.is_file()])
@@ -848,6 +902,8 @@ def recover_artifact(
         protected = [workspace / source.relative_to(project) for source in inputs]
         protected += materials.protected_paths() + [snapshot, candidate, original, reference,
                     workspace / "materials.json", workspace / "history.json"]
+        if task == "repair_final":
+            protected += [workspace / name for name in FINAL_PATCH_EVIDENCE]
         if stage == "reviewed":
             protected.append(workspace / "review.json")
         state["checkpoint"] = {"stage": stage, "index": index,
@@ -974,7 +1030,7 @@ def recover_artifact(
                 continue
         if stage is None:
             if scope:
-                patch_path = workspace / "candidate_patch.json"
+                patch_path = workspace / FINAL_PATCH_EVIDENCE[0]
                 patch_prompt = (common + "\n本次输出局部修复补丁，不重写候选，不修改其他文件。"
                                 "所有理由必须核对原文，不能用模板句占位。只处理以下范围：\n"
                                 + json.dumps(scope, ensure_ascii=False)
@@ -990,11 +1046,40 @@ def recover_artifact(
                         source_paths=[workspace / item["path"] for item in manifest])
                 rc = invoke("recovery_patch", workspace, patch_prompt, patch_path, selected_command)
                 if rc == 0:
+                    patch = {}
                     try:
-                        apply_scoped_patch(reference, candidate, read_object(patch_path), scope)
-                    except (ValueError, KeyError, TypeError) as exc:
+                        raw_patch = patch_path.read_bytes()
+                        patch = json.loads(raw_patch)
+                        apply_scoped_patch(reference, candidate, patch, scope)
+                    except (OSError, ValueError, KeyError, TypeError) as exc:
                         rc = CONTRACT_INVALID
                         attempt["patch_error"] = str(exc)
+                        projected = (project_complete_final_patch(reference, patch, scope)
+                                     if task == "repair_final" else None)
+                        if projected is not None:
+                            try:
+                                # The original applier still owns all value/type/archive checks.
+                                apply_scoped_patch(reference, candidate, projected, scope)
+                            except (ValueError, KeyError, TypeError) as projected_exc:
+                                attempt["patch_error"] += "；授权字段仍未通过原严格校验：" + str(projected_exc)
+                            else:
+                                projected_path = workspace / FINAL_PATCH_EVIDENCE[1]
+                                projection_audit = workspace / FINAL_PATCH_EVIDENCE[2]
+                                save_json(projected_path, projected)
+                                save_json(projection_audit, {
+                                    "raw_patch_sha256": hashlib.sha256(raw_patch).hexdigest(),
+                                    "projected_patch_sha256": digest(projected_path),
+                                    "base_sha256": patch["base_sha256"], "scope_paths": list(scope),
+                                    "original_rejection": str(exc),
+                                    "discarded_changes": [item for item in patch["changes"] if item["path"] not in scope]})
+                                # Retain the rejected bytes and derivation as protected materials.
+                                # Existing checkpoints/review/resume fence all three, without a new stage.
+                                for path, role in ((patch_path, "原始越界补丁（拒绝应用）"),
+                                                   (projected_path, "宿主授权字段投影（仍须严格校验和独立复核）"),
+                                                   (projection_audit, "宿主投影审计（非原文事实证据）")):
+                                    materials.add_source(path, role)
+                                materials.save()
+                                rc = 0
                 attempt["repair_scope"] = list(scope)
                 # 随生成断点保存宿主授权范围，续接也不能扩大保全豁免。
                 attempt["editable_metadata_paths"] = [pointer for pointer, rule in scope.items()
