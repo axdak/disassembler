@@ -13,6 +13,11 @@
 配置 worker 命令时，脚本只调用外部 worker 写当前任务包指定产物，再由本脚本验收、校验、合并和回滚。
 """
 
+# 渐进重构维护约定：新增独立职责优先放入对应模块；修改既有功能时，按当前
+# 任务范围评估迁出相关逻辑，逐步收敛本文件为命令入口与兼容转发。
+# 保持调用接口、返回码、产物及恢复状态兼容；简单修复可就地处理。
+# 具体约定见仓库根目录 AGENTS.md，避免为缩短文件而扩大重构范围。
+
 from __future__ import annotations
 
 from context_budget import CONTEXT_EXCEEDED, OUTPUT_TRUNCATED, ContextBudget, admit_pack, estimate_tokens, inspect_pack
