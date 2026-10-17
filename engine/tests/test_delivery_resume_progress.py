@@ -58,14 +58,14 @@ def test_delivery_continues_after_native_publication_resume(tmp_path, monkeypatc
 
     monkeypatch.setattr(pipeline, "atomic_write_bytes", interrupted_publication)
     with pytest.raises(RuntimeError, match="host stopped after replacing"):
-        commit_delivery(tmp_path, "offline", repair_limit=1)
+        commit_delivery(tmp_path, "offline", repair_limit=1, repair_history=True)
     assert state(tmp_path)["status"] == "publishing"
     assert calls == ["recovery_patch", "recovery_review"]
     assert json.loads(draft.read_text(encoding="utf-8"))["角色集"][0]["介绍"]
     assert not json.loads(draft.read_text(encoding="utf-8"))["事件集"][0]["介绍"]
 
     monkeypatch.setattr(pipeline, "atomic_write_bytes", original_write)
-    assert commit_delivery(tmp_path, "offline", repair_limit=1) == 0
+    assert commit_delivery(tmp_path, "offline", repair_limit=1, repair_history=True) == 0
     assert validate_exact_story_schema(json.loads(draft.read_text(encoding="utf-8")), mode="final")[0] == []
     assert repaired_paths == ["/角色集/0/介绍", "/事件集/0/介绍"]
     assert calls == ["recovery_patch", "recovery_review"] * 2
@@ -90,7 +90,7 @@ def test_delivery_rejects_zero_progress_after_bounded_confirmation(tmp_path):
         calls.append(args[2])
         return 0
 
-    assert commit_delivery(tmp_path, "offline", repair_worker=no_progress) == 1
+    assert commit_delivery(tmp_path, "offline", repair_worker=no_progress, repair_history=True) == 1
     assert 1 <= len(calls) <= 2
     assert draft.read_bytes() == original
     assert validate_exact_story_schema(json.loads(draft.read_text(encoding="utf-8")), mode="final")[0]
@@ -115,7 +115,7 @@ def test_delivery_keeps_original_failure_code_without_retry(tmp_path, failure):
         calls.append(args[2])
         return failure
 
-    assert commit_delivery(tmp_path, "offline", repair_worker=fail) == failure
+    assert commit_delivery(tmp_path, "offline", repair_worker=fail, repair_history=True) == failure
     assert calls == ["repair_final"]
     assert draft.read_bytes() == before
 
@@ -143,10 +143,10 @@ def test_delivery_resume_does_not_refund_failed_native_batch(tmp_path, monkeypat
         return 0
 
     monkeypatch.setattr(pipeline, "run_worker", invalid_patch)
-    assert commit_delivery(tmp_path, "offline", repair_limit=1) == 65
+    assert commit_delivery(tmp_path, "offline", repair_limit=1, repair_history=True) == 65
     original_ledger = state(tmp_path)
     assert len(original_ledger["calls"]) == 1
-    assert commit_delivery(tmp_path, "offline", repair_limit=1) == 65
+    assert commit_delivery(tmp_path, "offline", repair_limit=1, repair_history=True) == 65
     resumed_ledger = state(tmp_path)
     assert resumed_ledger["generation"] == original_ledger["generation"]
     assert len(resumed_ledger["calls"]) == 1

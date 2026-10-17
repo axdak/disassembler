@@ -436,13 +436,14 @@ describe('workbench seven-tab UI', () => {
     expect(screen.getByText('worker 日志内容')).toBeInTheDocument()
   })
 
-  it('maintenance tab: recover apply + 5 direct-submit actions', async () => {
+  it('maintenance separates local finalization from explicit model repair', async () => {
     await selectProject()
     goTab('维护')
     // Snapshot recovery and independent local maintenance actions stay available.
     expect(screen.getByText('快照恢复')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '时间线迁移' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新收尾' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '补齐历史缺项并收尾' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '归一化故事结构' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '修复 Delta' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '简介排版' })).toBeInTheDocument()
@@ -464,5 +465,8 @@ describe('workbench seven-tab UI', () => {
     expect(fake.calls.tasksCreate[3]).toEqual({ type: 'normalize', params: {} })
     expect(fake.calls.tasksCreate[4]).toEqual({ type: 'repair', params: { chapters: 'all' } })
     expect(fake.calls.tasksCreate[5]).toEqual({ type: 'format_synopsis', params: {} })
+    fireEvent.click(screen.getByRole('button', { name: '补齐历史缺项并收尾' }))
+    await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(7))
+    expect(fake.calls.tasksCreate[6]).toEqual({ type: 'finalize', params: { repair_history: true } })
   })
 })

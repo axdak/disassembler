@@ -3880,7 +3880,7 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
         # 全书重算，合法身份合并、重命名和引用重定向由门禁显式对齐。
         previous, proposed, proposal = load_json(before), load_json(candidate), load_json(patch)
         quality_errors = governance_quality_errors(previous, proposed, proposal)
-        quality_errors.extend(chapter_quality_errors(previous, proposed, proposal))
+        quality_errors.extend(chapter_quality_errors(previous, proposed, proposal, governance=True))
         if quality_errors:
             report_schema.write_text("\n".join(quality_errors), encoding="utf-8")
             return failed("治理候选质量退化，原结构未修改", report_schema)

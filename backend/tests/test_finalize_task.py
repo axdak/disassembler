@@ -1,10 +1,4 @@
-"""Finalize task adapter tests (gap-fill plan Task 3).
-
-Asserts the worker-backed composite finalize adapter mirrors the
-orchestrator's program preparation -> formal introduction -> commit_final_draft
-(repair loop) -> validate_final -> finalize sequence, producing a valid
-故事结构.json under the project dir.
-"""
+"""工作台本地收尾与显式历史维护的边界及严格发布回归。"""
 from __future__ import annotations
 
 import json
@@ -22,7 +16,8 @@ import story_delivery
 @pytest.fixture(autouse=True)
 def completed_cycles(monkeypatch):
     """This adapter suite isolates delivery; cycle gating has engine coverage."""
-    monkeypatch.setattr(story_delivery, "ensure_delivery_governance", lambda *a, **kw: 0)
+    import delivery_gate
+    monkeypatch.setattr(delivery_gate, "check_delivery_prerequisites", lambda *a, **kw: 0)
 
 # Make engine/scripts importable so the adapter and its helpers run.
 _ENGINE_SCRIPTS = Path(__file__).resolve().parent.parent.parent / "engine" / "scripts"
@@ -139,23 +134,15 @@ def test_finalize_adapter_produces_valid_final_json(tmp_path):
 
 
 def test_finalize_adapter_raises_when_draft_needs_repair_and_no_worker(tmp_path):
-    """Regression guard for the no-worker failure path (FinalizeAdapter fix).
-
-    Seed a draft that FAILS ``cmd_commit_final_draft``'s strict validation
-    (empty 介绍.标题/描述) so the repair loop is required. With
-    ``worker_provider="manual"`` and no explicit ``worker_command``, the
-    adapter's auto-resolve is suppressed (no worker available), so the run
-    must raise RuntimeError citing "commit_final_draft 失败 ... 且无
-    worker_command" - the exact path MaintenanceTab would hit in production
-    without the auto-resolve fix.
-    """
+    """缺项保留失败报告，既不发布也不隐式寻找模型补齐。"""
     project = _seed_project(tmp_path, story=INVALID_FOR_STRICT_STORY)
     adapter = FinalizeAdapter()
     ctx = _make_context(project, {"worker_command": "", "worker_provider": "manual"})
     with pytest.raises(RuntimeError) as excinfo:
         adapter.run(ctx)
     msg = str(excinfo.value)
-    assert "正式简介收尾未完成 rc=2" in msg
+    assert "收尾未发布 rc=69" in msg
+    assert excinfo.value.result["report"].endswith("delivery_gate.json")
 
 
 @pytest.mark.parametrize("needs_model", [False, True])
@@ -190,7 +177,7 @@ def test_finalize_adapter_uses_program_before_bounded_model_repair(tmp_path, mon
 
     monkeypatch.setattr(run_pipeline, "stream_shell_command", worker)
     context = _make_context(project, {"worker_command": "local-fake", "worker_retries": 5,
-                                      "max_repair_rounds": 2})
+                                      "max_repair_rounds": 2, "repair_history": True})
     if needs_model:
         with pytest.raises(RuntimeError, match="rc=65"):
             FinalizeAdapter().run(context)
@@ -223,6 +210,21 @@ def test_finalize_adapter_completes_multiple_scoped_field_batches(tmp_path, monk
         _write_json(output, data)
         return 0
     monkeypatch.setattr(task_adapters, "run_repair_worker", repair)
-    FinalizeAdapter().run(_make_context(project, {"worker_command":"offline"}))
+    FinalizeAdapter().run(_make_context(project, {"worker_command":"offline", "repair_history": True}))
     assert calls == ["甲", "乙"]
     assert (project / "故事结构.json").is_file()
+
+
+def test_default_finalization_never_calls_model_even_with_configured_provider(tmp_path, monkeypatch):
+    """缺项是责任诊断，默认入口不会进入旧简介生成/历史补齐闭环。"""
+    import task_adapters
+    project = _seed_project(tmp_path, INVALID_FOR_STRICT_STORY)
+    def forbidden(*args, **kwargs):
+        pytest.fail("本地收尾不允许调用模型")
+    monkeypatch.setattr(story_delivery, "finish_introduction", forbidden)
+    monkeypatch.setattr(task_adapters, "run_repair_worker", forbidden)
+    monkeypatch.setattr(task_adapters, "builtin_agent_worker_command", forbidden)
+    with pytest.raises(RuntimeError, match="rc=69") as failure:
+        FinalizeAdapter().run(_make_context(project, {}))
+    assert Path(failure.value.result["report"]).is_file()
+    assert not (project / "故事结构.json").exists()

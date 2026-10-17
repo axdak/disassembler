@@ -1,8 +1,8 @@
 // MaintenanceTab — 维护
 //
 // Snapshot recovery (preview list + apply) and direct-submit maintenance
-// actions: chronology migration, on-demand finalization, normalize, and delta
-// repair, plus a local synopsis-formatting preview. Actions use onCreateTask; the
+// actions: local finalization, explicit historical repair, chronology migration,
+// normalize, delta repair and synopsis preview. Actions use onCreateTask; the
 // backend enforces the writer mutex and the rollback path on failure.
 import { useState } from 'react'
 import type { WorkbenchTask, RecoverSnapshot, TaskType } from '../types'
@@ -13,7 +13,9 @@ const MAINTENANCE_TYPES: TaskType[] = [
 ]
 
 // Show the new action's user-facing label in queue feedback and task history.
-const taskLabel = (type: TaskType) => type === 'format_synopsis' ? '简介排版' : type
+const taskLabel = (type: TaskType, params: Record<string, unknown> = {}) =>
+  type === 'format_synopsis' ? '简介排版' : type === 'finalize'
+    ? params.repair_history === true ? '补齐历史缺项并收尾' : '本地收尾' : type
 
 export function MaintenanceTab({
   tasks,
@@ -39,7 +41,7 @@ export function MaintenanceTab({
   async function submit(type: TaskType, params: Record<string, unknown> = {}) {
     try {
       await onCreateTask(type, params)
-      setMsg(`已排队：${taskLabel(type)}`)
+      setMsg(`已排队：${taskLabel(type, params)}`)
       if (type === 'recover_story') onRefreshSnapshots()
     } catch (e: any) {
       setMsg(String(e))
@@ -84,10 +86,14 @@ export function MaintenanceTab({
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', maxWidth: 640 }}>
         <button onClick={() => submit('migrate_chronology')}>时间线迁移</button>
         <button onClick={() => submit('finalize')}>重新收尾</button>
+        <button onClick={() => submit('finalize', { repair_history: true })}>补齐历史缺项并收尾</button>
         <button onClick={() => submit('normalize')}>归一化故事结构</button>
         <button onClick={() => submit('repair', { chapters: 'all' })}>修复 Delta</button>
         <button onClick={() => submit('format_synopsis')}>简介排版</button>
       </div>
+      <p style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+        重新收尾只做本地验收、排版和发布；内容问题会保留责任诊断。补齐历史缺项并收尾会调用模型，按有限批次修复并保留断点。
+      </p>
       <p style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
         迁移/收尾/归一化/修复均为写者任务，按项目写者互斥串行执行。
       </p>
@@ -113,12 +119,12 @@ export function MaintenanceTab({
           </thead>
           <tbody>
             {history.map((t) => {
-              const result = (t.result ?? {}) as { artifacts?: string[]; report?: string }
+              const result = (t.result ?? {}) as { artifacts?: string[]; report?: string; repair_history_available?: boolean }
               const artifacts = result.artifacts ?? []
               return (
                 <tr key={t.id}>
                   <td>{t.id}</td>
-                  <td>{taskLabel(t.task_type)}</td>
+                  <td>{taskLabel(t.task_type, t.params)}</td>
                   <td style={{ textAlign: 'center' }}><TaskStatus status={t.status} error={t.error} /></td>
                   <td style={{ fontSize: 12, color: t.error ? 'crimson' : '#666' }}>
                     {t.error ?? (Object.keys(t.params ?? {}).length ? JSON.stringify(t.params) : '-')}
@@ -128,6 +134,9 @@ export function MaintenanceTab({
                       <button key={p} onClick={() => onOpenArtifact(p)} style={{ fontSize: 12, marginRight: 4 }}>产物</button>
                     ))}
                     {result.report && <button onClick={() => onOpenArtifact(result.report as string)} style={{ fontSize: 12 }}>报告</button>}
+                    {result.repair_history_available && (
+                      <button onClick={() => submit('finalize', { repair_history: true })} style={{ fontSize: 12 }}>历史缺项维护</button>
+                    )}
                   </td>
                 </tr>
               )

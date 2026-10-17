@@ -105,6 +105,7 @@ def build_generation_schema(kind: str = "delta") -> dict:
 def generation_contract_text() -> str:
     """嵌入章节与周期任务包的同一说明，防止治理反向破坏生成要求。"""
     lines = ["新增元素必须交付完整标准字段；修改元素只提交发生变化的字段并保留详情.提取理由。"]
+    lines.append("候选入库复验与终稿共用字段规则：章节修改不得引入新的字段缺陷；周期治理中本次直接操作的档案须有非空介绍，事件还须有非空分组及四维复合主标签。发现旧缺口在本周期按原文补齐，不扩展为全库重写；有据纠错不豁免这些字段要求。")
     for collection in COLLECTION_KEYS:
         lines.append(f"新增{collection}必填：{'、'.join(required_element_fields(collection))}。")
     lines.extend([
@@ -255,8 +256,8 @@ def reference_quality_errors(item: dict, path: str) -> list[str]:
     return errors
 
 
-def chapter_quality_errors(before: dict, after: dict, patch: dict) -> list[str]:
-    """在合并及规范化之后复验真正的新档案，保护正式发布边界。"""
+def chapter_quality_errors(before: dict, after: dict, patch: dict, *, governance=False) -> list[str]:
+    """复验候选：新增完整、章节禁止退化、周期直接操作的档案满足终稿字段规则。"""
     from element_identity import build_lookup_index, find_index
     from governance_contract import governance_identity_baseline
     # 合法重命名会改写任意详情里的显式引用；先对齐，不能误报为事实丢失。
@@ -309,4 +310,67 @@ def chapter_quality_errors(before: dict, after: dict, patch: dict) -> list[str]:
                 errors.extend(misplaced_field_errors(collection, records[target]))
             except ValueError as exc:
                 errors.append(f"{quality_marker(path)} 候选身份歧义：{exc}")
+    errors.extend(touched_field_quality_errors(before, after, patch, governance=governance))
+    return list(dict.fromkeys(errors))
+
+
+def touched_field_quality_errors(before: dict, after: dict, patch: dict, *, governance: bool) -> list[str]:
+    """只检查本次直接操作的身份，不把稀疏章节更新扩大为历史全库补齐。
+
+    before 已由调用方按显式身份操作对齐；字段检查复用终稿的唯一契约。
+    有据纠错可以改变事实，但不能授权空介绍或缺失四维标签等无效结果。
+    """
+    from element_identity import build_lookup_index, find_index
+    import re
+
+    errors = []
+    operations = patch.get("治理操作", {})
+    operations = operations if isinstance(operations, dict) else {}
+    indices = {key: build_lookup_index(after.get(key) or []) for key in COLLECTION_KEYS}
+    old_indices = {key: build_lookup_index(before.get(key) or []) for key in COLLECTION_KEYS}
+
+    def check(collection, name, path, setter_field=None):
+        if collection not in indices or not isinstance(name, str):
+            return
+        # 支持同批先修改旧名再重命名；仍由身份校验负责拒绝冲突/歧义操作。
+        for op in operations.get("重命名元素", []) or []:
+            if (isinstance(op, dict) and TYPE_TO_COLLECTION.get(op.get("类型")) == collection
+                    and op.get("原名称") == name):
+                name = op.get("新名称")
+                break
+        try:
+            target = find_index(*indices[collection], name)
+            old = find_index(*old_indices[collection], name)
+        except ValueError as exc:
+            errors.append(f"{quality_marker(path)} 候选身份歧义：{exc}")
+            return
+        if target < 0:
+            return  # 删除/降级后的身份不存在合法，由原身份协议验收，不重新创建。
+        current = element_field_quality_errors(collection, after[collection][target], path)
+        previous = set(element_field_quality_errors(collection, before[collection][old], path)) if old >= 0 else set()
+        for error in current:
+            if not governance and error in previous:
+                continue
+            if setter_field:
+                field = re.search(r"\[质量字段:[^\]]*/([^/]+)\]", error)[1]
+                if field == setter_field:
+                    error = error.replace(quality_marker(path + "/" + field), quality_marker(path + "/值"))
+                else:
+                    # 其余旧缺口不能借设置字段.值修改另一字段；要求原治理阶段补充普通修改。
+                    error += "；请在修改元素中补齐该档案字段，不能修改本条设置字段的原值或证据"
+            errors.append(error)
+
+    for section in ("新增元素", "修改元素"):
+        bucket = patch.get(section, {})
+        for collection, items in bucket.items() if isinstance(bucket, dict) else []:
+            for index, item in enumerate(items if isinstance(items, list) else []):
+                if isinstance(item, dict):
+                    check(collection, item.get("名称"), f"/{section}/{collection}/{index}")
+    for action in ("设置字段", "追加详情", "治理标签", "重命名元素", "合并元素"):
+        for index, op in enumerate(operations.get(action, []) or []):
+            if isinstance(op, dict):
+                name = (op.get("新名称") if action == "重命名元素" else
+                        op.get("主") or op.get("保留") if action == "合并元素" else op.get("名称"))
+                check(TYPE_TO_COLLECTION.get(op.get("类型")), name,
+                      f"/治理操作/{action}/{index}", op.get("字段") if action == "设置字段" else None)
     return errors

@@ -255,6 +255,8 @@ def test_version_conflict_requires_new_evidence_generation(tmp_path, monkeypatch
 
 
 def test_final_repair_transport_and_outer_retries_share_one_budget(tmp_path, monkeypatch):
+    # 全字段补齐属于显式维护，默认编排器不再执行此模型路径。
+    from story_delivery import commit_delivery
     orch = orchestrator.Orchestrator(tmp_path, config=orchestrator.Config(
         worker_provider="agy", worker_retries=3, max_repair_rounds=2))
     repair = tmp_path / "质量治理/最终审计/repair_final.md"
@@ -276,11 +278,14 @@ def test_final_repair_transport_and_outer_retries_share_one_budget(tmp_path, mon
     monkeypatch.setattr(orchestrator, "cmd_commit_final_draft", failed_final_validation)
     monkeypatch.setattr(pipeline, "wait_before_worker_retry", lambda attempt: False)
     monkeypatch.setattr(pipeline, "stream_shell_command", lambda *a: (calls.append(a) or 9, "transport failure"))
-    assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED
-    assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED
+    def maintain():
+        return commit_delivery(tmp_path, "offline", retries=3, repair_limit=2,
+                               commit=failed_final_validation, repair_history=True)
+    assert maintain() == REPAIR_EXHAUSTED
+    assert maintain() == REPAIR_EXHAUSTED
     assert len(calls) == 2
     begin_retry_session(tmp_path)  # Legacy session reset cannot reset automatic recovery.
-    assert orch._stage_commit_final_draft() == REPAIR_EXHAUSTED
+    assert maintain() == REPAIR_EXHAUSTED
     assert len(calls) == 2
 
 

@@ -37,9 +37,13 @@ def test_semantic_dependencies_invalidate_submission_contract(tmp_path, filename
     assert engine_contract.contract_version(tmp_path) != before
 
 
-def test_governance_relocates_fields_without_losing_raw_patch(tmp_path):
+@pytest.mark.parametrize("complete_tags", [False, True])
+def test_governance_relocates_fields_without_losing_raw_patch(tmp_path, complete_tags):
     story = empty_story()
     story["事件集"] = [event("约定", "0001", "开篇")]
+    if complete_tags:
+        # 字段归位仍须满足本次触及档案的内容契约；不能靠规范化跳过四维主标签。
+        story["事件集"][0]["标签集"] = ["约定+转折+期待+人际冲突"]
     save_json(tmp_path / "故事结构_增量.json", story)
     patch = {"章节范围": "第001章-第001章", "新增元素": {},
              "修改元素": {"事件集": [{"名称": "约定", "详情": {
@@ -47,6 +51,13 @@ def test_governance_relocates_fields_without_losing_raw_patch(tmp_path):
     target = tmp_path / "patch.json"
     save_json(target, patch)
     original = target.read_bytes()
+    if not complete_tags:
+        pipeline.ensure_story(tmp_path)
+        before = (tmp_path / "故事结构_增量.json").read_bytes()
+        assert pipeline.commit_governance(tmp_path, str(target)) == 1
+        assert (tmp_path / "故事结构_增量.json").read_bytes() == before
+        assert "/修改元素/事件集/0/标签集" in target.with_suffix(".repair.md").read_text(encoding="utf-8")
+        return
     assert pipeline.commit_governance(tmp_path, str(target)) == 0
     result = json.loads((tmp_path / "故事结构_增量.json").read_text(encoding="utf-8"))
     assert result["事件集"][0]["重量级"] == 9

@@ -227,6 +227,15 @@ def delta_repair_scope(path: Path, feedback: str, story: dict) -> dict:
     operations = data.get("治理操作", {})
     setters = operations.get("设置字段", []) if isinstance(operations, dict) else []
     for index, op in enumerate(setters if isinstance(setters, list) else []):
+        # 候选字段契约可定位有据纠错的无效新值；只开放值，不授权改原值/证据。
+        pointer = f"/治理操作/设置字段/{index}/值"
+        if isinstance(op, dict) and quality_marker(pointer) in feedback:
+            from story_schema_rules import DEFAULTS
+            collection = TYPE_TO_COLLECTION.get(op.get("类型"))
+            field = op.get("字段")
+            if collection in DEFAULTS and field in DEFAULTS[collection] and field not in {"名称", "详情", "时间"}:
+                scope[pointer] = {"kind": "quality", "value_type": field_type(DEFAULTS[collection][field]),
+                                  "collection": collection, "field": field, "metadata": True}
         evidence = op.get("证据", []) if isinstance(op, dict) else []
         for number, entry in enumerate(evidence if isinstance(evidence, list) else []):
             if not isinstance(entry, dict):

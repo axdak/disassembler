@@ -173,6 +173,19 @@ class Orchestrator:
                     return 2
                 stage = self.state.current_stage
                 rc = self._run_stage_with_retries(stage)
+                from delivery_gate import CONTENT_PENDING, delivery_report_path
+                if rc == CONTENT_PENDING:
+                    report = delivery_report_path(self.project_dir)
+                    route = json.loads(report.read_text(encoding="utf-8"))
+                    target = route.get("resume_stage")
+                    fingerprint = hashlib.sha256(report.read_bytes()).hexdigest()
+                    prior = self.state.stages.get("_delivery_handoff", {})
+                    if (target in {"chapter_analysis", "chapter_delta"}
+                            and prior.get("fingerprint") != fingerprint):
+                        # 同一份未解决诊断只交接一次；不重放旧补丁、不刷新模型修复预算。
+                        self.state.stages["_delivery_handoff"] = {"fingerprint": fingerprint}
+                        self._rewind_to(target, "交付前置内容未完成，已交回所属阶段续跑")
+                        continue
                 if rc != 0:
                     if rc == 2:
                         self.emit("pipeline_cancelled")
@@ -283,6 +296,15 @@ class Orchestrator:
             if self._cancel.is_set():
                 self.emit("pipeline_cancelled")
                 return 2
+            from delivery_gate import CONTENT_PENDING, QUALITY_PENDING, delivery_report_path
+            if rc in {CONTENT_PENDING, QUALITY_PENDING}:
+                # 内容交接与字段质量失败都不能靠重派收尾解决；报告保留具体身份/字段。
+                self.state.last_error = f"交付未发布；请按责任诊断处理：{delivery_report_path(self.project_dir)}"
+                self.state.save()
+                self.emit("stage_handoff" if rc == CONTENT_PENDING else "hard_block",
+                          stage=stage, detail=self.state.last_error,
+                          data={"report": str(delivery_report_path(self.project_dir))})
+                return rc
             if rc == 64:
                 # An unchanged context budget cannot be fixed by redispatching it.
                 self.state.last_error = (
@@ -432,8 +454,16 @@ class Orchestrator:
                         end_chapter_seq=self.config.end_chapter_seq, **self._run_worker_kwargs())
 
     def _stage_chapter_delta(self) -> int:
-        return cmd_run(self.project_dir, phase="delta", end_chapter_seq=self.config.end_chapter_seq,
-                       emit=self.emit, **self._run_worker_kwargs())
+        rc = cmd_run(self.project_dir, phase="delta", end_chapter_seq=self.config.end_chapter_seq,
+                     emit=self.emit, **self._run_worker_kwargs())
+        if rc:
+            return rc
+        # 周期治理与不足五章的尾周期均属于内容阶段；已提交周期按凭据幂等跳过。
+        from story_delivery import ensure_delivery_governance
+        return ensure_delivery_governance(
+            self.project_dir, self._worker_command(), end_chapter_seq=self.config.end_chapter_seq,
+            timeout=self.config.worker_timeout_seconds, retries=self.config.worker_retries,
+            worker_window=self.config.worker_window)
 
     def _stage_chapter_structure(self) -> int:
         return cmd_chapter_structure_auto(self._auto_namespace())
@@ -545,36 +575,34 @@ class Orchestrator:
         )
 
     def _stage_final_pack(self) -> int:
-        # Formal delivery no longer asks a model to rewrite/re-audit the book.
-        # Only the introduction is synthesized; strict validation still follows.
-        from story_delivery import prepare_delivery, finish_introduction, ensure_delivery_governance
-        rc = ensure_delivery_governance(
-            self.project_dir, self._worker_command(), end_chapter_seq=self.config.end_chapter_seq,
-            timeout=self.config.worker_timeout_seconds, retries=self.config.worker_retries,
-            worker_window=self.config.worker_window)
+        # 收尾只验前置凭据并准备草稿，不补跑周期、不生成简介。
+        from delivery_gate import check_delivery_prerequisites
+        from story_delivery import prepare_delivery
+        rc = check_delivery_prerequisites(self.project_dir, end_chapter_seq=self.config.end_chapter_seq)
         if rc != 0:
             return rc
-        rc = prepare_delivery(self.project_dir)
-        if rc != 0:
-            return rc
-        return finish_introduction(
-            self.project_dir, self._worker_command(), run_worker,
-            timeout=self.config.worker_timeout_seconds,
-            retries=self.config.worker_retries,
-            worker_window=self.config.worker_window,
-        )
+        return prepare_delivery(self.project_dir)
 
     def _stage_commit_final_draft(self) -> int:
-        """桌面与自动流程共用有限字段补齐，严格验收后才进入交付。"""
+        """自动收尾只做本地严格验收与排版，内容错误不在这里补写。"""
+        from delivery_gate import check_delivery_prerequisites
+        rc = check_delivery_prerequisites(self.project_dir, end_chapter_seq=self.config.end_chapter_seq)
+        if rc:
+            return rc
         from story_delivery import commit_delivery
         return commit_delivery(
-            self.project_dir, self._worker_command(),
-            timeout=self.config.worker_timeout_seconds, retries=self.config.worker_retries,
-            worker_window=self.config.worker_window, repair_limit=self.config.max_repair_rounds,
-            commit=cmd_commit_final_draft, repair_worker=run_repair_worker,
+            self.project_dir, "", commit=cmd_commit_final_draft,
         )
 
     def _stage_finalize(self) -> int:
+        # 旧版本/崩溃后可能直接续接到发布阶段，仍须执行相同前置门禁。
+        from delivery_gate import check_delivery_prerequisites, report_delivery_quality
+        rc = check_delivery_prerequisites(self.project_dir, end_chapter_seq=self.config.end_chapter_seq)
+        if rc:
+            return rc
+        rc = report_delivery_quality(self.project_dir)
+        if rc:
+            return rc
         return cmd_finalize(self.project_dir)
 
     def _stage_export(self) -> int:

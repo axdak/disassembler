@@ -2,12 +2,22 @@ import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
+import pytest
+import delivery_gate
 
 import orchestrator
 import story_delivery
 from events import EventBus
 from orchestrator import Config, Orchestrator
 from pipeline_state import PipelineState
+
+
+@pytest.fixture(autouse=True)
+def isolated_content_boundaries(monkeypatch):
+    """编排重试测试隔离内容执行；真实凭据与内容交接由 quality_ownership 覆盖。"""
+    monkeypatch.setattr(story_delivery, "ensure_delivery_governance", lambda *a, **kw: 0)
+    monkeypatch.setattr(delivery_gate, "check_delivery_prerequisites", lambda *a, **kw: 0)
+    monkeypatch.setattr(story_delivery, "prepare_delivery", lambda *a, **kw: 1)
 
 def collect(bus):
     out = []
@@ -188,43 +198,44 @@ def test_structure_and_visual_stages_dispatch(tmp_path):
 
 def test_final_pack_stage(tmp_path):
     orch = Orchestrator(tmp_path, config=Config(worker_provider="agy"))
-    with patch.object(story_delivery, "ensure_delivery_governance", return_value=0) as gates, \
+    with patch.object(delivery_gate, "check_delivery_prerequisites", return_value=0) as gates, \
          patch.object(story_delivery, "prepare_delivery", return_value=0) as prepare, \
          patch.object(story_delivery, "finish_introduction", return_value=0) as intro, \
          patch.object(orchestrator, "run_worker") as worker:
         assert orch._stage_final_pack() == 0
     gates.assert_called_once()
     prepare.assert_called_once()
-    intro.assert_called_once()
+    intro.assert_not_called()
     worker.assert_not_called()  # No implicit final_draft/global governance call.
 
 
-def test_commit_final_draft_delegates_to_recovery_scheduler(tmp_path):
+def test_commit_final_draft_leaves_content_repair_to_its_owner(tmp_path):
     orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=3))
     repair = tmp_path / "质量治理/最终审计/repair_final.md"
     repair.parent.mkdir(parents=True)
     repair.write_text("repair instructions", encoding="utf-8")
     with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1) as cfd, \
          patch.object(orchestrator, "run_repair_worker", return_value=0) as rw:
-        assert orch._stage_commit_final_draft() == 0
+        assert orch._stage_commit_final_draft() == delivery_gate.QUALITY_PENDING
     assert cfd.call_count == 1
-    assert rw.call_count == 1  # Scheduler owns validation and strategy changes.
-    assert rw.call_args.kwargs["repair_limit"] == 3
+    rw.assert_not_called()
 
 
-def test_commit_final_draft_propagates_durable_exhaustion(tmp_path):
+def test_commit_final_draft_never_spends_historical_repair_budget(tmp_path):
     orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=2))
     repair = tmp_path / "质量治理/最终审计/repair_final.md"
     repair.parent.mkdir(parents=True)
     repair.write_text("repair instructions", encoding="utf-8")
     with patch.object(orchestrator, "cmd_commit_final_draft", return_value=1), \
          patch.object(orchestrator, "run_repair_worker", return_value=orchestrator.REPAIR_EXHAUSTED) as rw:
-        assert orch._stage_commit_final_draft() == orchestrator.REPAIR_EXHAUSTED
-    assert rw.call_count == 1
-    assert rw.call_args.kwargs["repair_limit"] == 2
+        assert orch._stage_commit_final_draft() == delivery_gate.QUALITY_PENDING
+    rw.assert_not_called()
 
 
 def test_commit_final_draft_still_validates_when_repairs_disabled(tmp_path):
+    from merge_delta import save_json
+    from test_final_field_repair import complete_story
+    save_json(tmp_path / "故事结构_草稿.json", complete_story())
     orch = Orchestrator(tmp_path, config=Config(worker_provider="agy", max_repair_rounds=0))
     with patch.object(orchestrator, "cmd_commit_final_draft", return_value=0) as cfd, \
          patch.object(orchestrator, "run_worker", return_value=0) as rw:
@@ -393,6 +404,9 @@ def test_fullbook_stage_reruns_checkpoint_with_invalid_json(tmp_path):
 
 
 def test_full_pipeline_completes(tmp_path):
+    from merge_delta import save_json
+    from test_final_field_repair import complete_story
+    save_json(tmp_path / "故事结构_草稿.json", complete_story())
     bus = EventBus()
     done = []
     bus.subscribe(lambda e: done.append(e.type))

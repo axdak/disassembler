@@ -2,8 +2,8 @@
 
 A source-bound synopsis is preserved, including accepted draft-only repairs.
 Missing descriptions or untrusted drafts retain read-only evidence generation.
-Strict final validation and scoped repair remain the publication gate, including
-missing titles; reusing a synopsis does not assert its semantic correctness.
+Default delivery only validates and formats locally. Historical scoped repair
+requires an explicit maintenance request; publication always uses strict checks.
 """
 from __future__ import annotations
 
@@ -65,6 +65,7 @@ def prepare_delivery(project: Path) -> int:
         intro = original.get("介绍") if isinstance(original, dict) else None
         description = intro.get("描述") if isinstance(intro, dict) else None
         description_valid = isinstance(description, str) and bool(description.strip())
+        title_type_valid = isinstance(intro.get("标题"), str) if isinstance(intro, dict) else False
         source = ensure_story(project)
         draft = project / "故事结构_草稿.json"
         root = project / "质量治理/最终审计/交付"
@@ -76,7 +77,8 @@ def prepare_delivery(project: Path) -> int:
             if draft.is_file():
                 atomic_write_bytes(root / f"previous_draft_{digest(draft)}.json", draft.read_bytes())
             atomic_write_bytes(draft, source.read_bytes())
-            save_json(receipt, {"source": signature, "source_description_valid": description_valid})
+            save_json(receipt, {"source": signature, "source_description_valid": description_valid,
+                                "source_title_type_valid": title_type_valid})
         # Run deterministic normalization first. A failed validation is retained
         # for subsequent scoped repair; it never authorizes skipping final checks.
         cmd_commit_final_draft(project)
@@ -98,7 +100,9 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
             draft_bytes = draft.read_bytes()
             draft_signature = hashlib.sha256(draft_bytes).hexdigest()
             value = json.loads(draft_bytes)
-            if state.get("source") == source_signature and state.get("introduction") == value.get("介绍"):
+            from delivery_gate import completed_introduction_matches
+            if (state.get("source") == source_signature
+                    and completed_introduction_matches(state.get("introduction"), value.get("介绍"))):
                 return 0
             # The source receipt also covers accepted repairs made only to the
             # draft. Preserve that current value instead of restoring the older
@@ -119,7 +123,8 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
                     source_intro = source_value.get("介绍") if isinstance(source_value, dict) else None
                     source_description = source_intro.get("描述") if isinstance(source_intro, dict) else None
                     source_description_valid = isinstance(source_description, str) and bool(source_description.strip())
-                if source_description_valid and (draft_signature == source_signature or prepared_source):
+                title_valid = prepared.get("source_title_type_valid", True) is True
+                if source_description_valid and title_valid and (draft_signature == source_signature or prepared_source):
                     # Publish the resume receipt under the writer lock, without
                     # rewriting any draft field or changing final schema checks.
                     save_json(receipt, {"source": source_signature, "introduction": intro})
@@ -177,8 +182,9 @@ def finish_introduction(project: Path, command: str, worker, **options) -> int:
 
 def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
                     worker_window="hidden", repair_limit=3, observe=None,
-                    commit=None, repair_worker=None) -> int:
-    """逐批修复历史缺项；每批复用原修复/复核，完成后再严格验收。"""
+                    commit=None, repair_worker=None, repair_history=False) -> int:
+    """默认仅本地验收/排版；历史补齐必须由独立维护动作显式开启。"""
+    from delivery_gate import report_delivery_quality, QUALITY_PENDING
     from local_json_patch import final_repair_scope, FINAL_REPAIR_BATCH_FIELDS
     from story_schema_rules import validate_exact_story_schema
     draft = project / "故事结构_草稿.json"
@@ -189,11 +195,18 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
 
     def finish_layout():
         """内容验收成功后只做本地排版，并再次通过原严格校验再交付。"""
-        return commit(project) if format_delivery_synopsis(project) else 0
+        rc = commit(project) if format_delivery_synopsis(project) else 0
+        return rc if rc else report_delivery_quality(project)
 
     rc = commit(project)
     if rc == 0:
-        return finish_layout()
+        rc = finish_layout()
+        if not rc:
+            return 0
+        # 排版后的严格验收失败也不允许隐式调用模型。
+    if not repair_history:
+        report_delivery_quality(project, failed_step_code=rc)
+        return QUALITY_PENDING
     if not repair.is_file():
         return 1
     if not command:

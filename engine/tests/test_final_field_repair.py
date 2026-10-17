@@ -81,7 +81,7 @@ def test_final_scope_marks_reference_errors_and_limits_large_backlogs(tmp_path, 
     assert len(patcher.final_repair_scope(source,"\n".join(errors))) == 2
 
 
-def test_final_driver_completes_more_than_one_field_batch(tmp_path, monkeypatch):
+def test_explicit_history_maintenance_completes_more_than_one_field_batch(tmp_path, monkeypatch):
     import local_json_patch as patcher
     import orchestrator
     from orchestrator import Orchestrator, Config
@@ -108,7 +108,8 @@ def test_final_driver_completes_more_than_one_field_batch(tmp_path, monkeypatch)
         return 0
     monkeypatch.setattr(orchestrator, "cmd_commit_final_draft", strict)
     monkeypatch.setattr(orchestrator, "run_repair_worker", worker)
-    assert Orchestrator(tmp_path, config=Config())._stage_commit_final_draft() == 0
+    from story_delivery import commit_delivery
+    assert commit_delivery(tmp_path, "offline", commit=strict, repair_worker=worker, repair_history=True) == 0
     assert len(calls) == 2
     assert calls[0][1] != calls[1][1]
     assert "本批候选摘要" in calls[0][1]

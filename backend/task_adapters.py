@@ -1328,17 +1328,16 @@ class FormatSynopsisAdapter:
 # === FinalizeAdapter (writer, worker-backed) ===============================
 
 class FinalizeAdapter:
-    """Writer, worker-backed adapter: rerun finalization on demand.
+    """本地收尾：凭据检查、草稿准备、严格验收、排版、发布。
 
-    Mirrors orchestrator ``_stage_final_pack`` / ``_stage_commit_final_draft``
-    / ``_stage_finalize``: completed cycles → program preparation → formal introduction →
-    ``cmd_commit_final_draft`` (repair loop on failure) → ``cmd_validate_final``
-    → ``cmd_finalize``. Holds the project writer lock for the whole run.
+    repair_history 是用户显式选择的历史维护动作；只有该动作能调用原有模型
+    补齐闭环。项目写者锁由工作台持有，默认收尾与自动编排遵守相同边界。
     """
 
     def run(self, context: TaskContext, prepared_input: object = None) -> dict:
         params = context.params or {}
         project_dir = Path(context.project_path)
+        repair_history = _bool_param(params, "repair_history", default=False)
         worker_command = _str_param(params, "worker_command", default="")
         worker_timeout = _int_param(
             params, "worker_timeout_seconds",
@@ -1354,34 +1353,29 @@ class FinalizeAdapter:
         max_repair_rounds = _int_param(
             params, "max_repair_rounds", int(_setting(context, "max_repair_rounds", 3))
         )
-        # 任务参数未显式指定 worker_command 时，按全局 worker_provider 自动解析内置
-        # agent_worker 命令（默认 agy），对齐 orchestrator 的 _worker_command() 与
-        # GovernanceTaskAdapter/AnalysisAdapter，使 MaintenanceTab 一键 finalize
-        # 无需手动配 worker 命令（spec §3.2：worker 步是 finalize 链的一环）。
-        if not worker_command:
+        # 默认收尾不需要模型命令；仅显式历史维护解析配置的 provider。
+        if repair_history and not worker_command:
             provider = _str_param(params, "worker_provider", default="") or context.worker_provider
             if provider and provider != "manual":
                 worker_command = builtin_agent_worker_command(provider)
 
-        draft = project_dir / "故事结构_草稿.json"
-        repair = project_dir / "质量治理" / "最终审计" / "repair_final.md"
-
-        from story_delivery import prepare_delivery, finish_introduction, ensure_delivery_governance
-        rc = ensure_delivery_governance(project_dir, worker_command,
-                                        timeout=worker_timeout, retries=worker_retries,
-                                        worker_window=worker_window)
+        from delivery_gate import check_delivery_prerequisites, DeliveryBlocked
+        from story_delivery import prepare_delivery, finish_introduction
+        # 内容前置未完成时返回具体责任报告；手动收尾不会偷偷补跑周期。
+        rc = check_delivery_prerequisites(project_dir)
         if rc != 0:
-            raise RuntimeError(f"正式交付前章节或周期治理未完成 rc={rc}")
+            raise DeliveryBlocked(project_dir, rc)
         context.progress(10, "准备正式故事交付")
         rc = prepare_delivery(project_dir)
         if rc != 0:
             raise RuntimeError(f"final_pack 失败 rc={rc}")
-        context.progress(30, "正式简介收尾")
-        rc = finish_introduction(project_dir, worker_command, run_worker,
-                                 timeout=worker_timeout, retries=worker_retries,
-                                 worker_window=worker_window)
-        if rc != 0:
-            raise RuntimeError(f"正式简介收尾未完成 rc={rc}；断点已保留")
+        if repair_history:
+            context.progress(30, "显式维护：补齐历史简介与缺项")
+            rc = finish_introduction(project_dir, worker_command, run_worker,
+                                     timeout=worker_timeout, retries=worker_retries,
+                                     worker_window=worker_window)
+            if rc != 0:
+                raise RuntimeError(f"历史简介补齐未完成 rc={rc}；断点已保留")
 
         context.progress(60, "commit final draft")
         from story_delivery import commit_delivery
@@ -1390,8 +1384,11 @@ class FinalizeAdapter:
             worker_window=worker_window, repair_limit=max_repair_rounds,
             observe=lambda detail, data: context.progress(65, detail),
             commit=cmd_commit_final_draft, repair_worker=run_repair_worker,
+            repair_history=repair_history,
         )
         if rc != 0:
+            if not repair_history:
+                raise DeliveryBlocked(project_dir, rc)
             raise RuntimeError(f"repair_final 自动故障处理未完成 rc={rc}；诊断与断点已保留")
 
         context.progress(80, "validate final")
