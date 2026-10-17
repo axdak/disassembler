@@ -169,3 +169,103 @@ def test_reference_lookup_does_not_create_leaf_and_remains_guarded(tmp_path):
     with pytest.raises(TreeFailure) as failure:
         tree.request('另一次核查', '查证保护')
     assert failure.value.code == REPAIR_EXHAUSTED and copy.read_bytes() == original
+
+
+def _cycle_event_project(project, *, oversized_event=False):
+    """Build host-scoped events plus a large related role, without a model."""
+    story = empty_story()
+    story["角色集"] = [{"名称": "当期角色", "介绍": "角色历史档案" * 24000}]
+    story["事件集"] = [
+        {"名称": "旧章事件", "参与成员": ["当期角色"],
+         "详情": {"涉及章节": "0001", "动作证据": "旧章唯一动作"}},
+        {"名称": "当期事件", "参与成员": ["当期角色"],
+         "详情": {"涉及章节": "0006", "动作证据": "完整动作开头" + "行动细节" * (20000 if oversized_event else 8) + "完整动作末尾"}},
+        {"名称": "跨章事件", "参与成员": ["当期角色"],
+         "详情": {"涉及章节": "0001，0007", "动作证据": "跨章历史与当期动作均须完整保留"}},
+        {"名称": "当期未被Delta点名事件", "参与成员": ["当期角色"],
+         "详情": {"涉及章节": "0007", "动作证据": "正式档案章节决定范围"}},
+        {"名称": "未知章事件", "参与成员": ["当期角色"],
+         "详情": {"动作证据": "不能猜测未知章归属"}},
+    ]
+    sources = {}
+    for seq in (1, 6, 7):
+        chapter = write_completed_chapter(project, seq)
+        chapter.write_text(f"原文{seq}开头\n完整原文证据：行动、结果及未解线索。\n原文{seq}末尾", encoding="utf-8")
+        sources[seq] = chapter
+        if seq in (6, 7):
+            # Delta names are routing hints and may mention an old event.
+            save_json(pipeline.artifact_paths(project, chapter)["delta"], {
+                "新增元素": {},
+                "修改元素": {"角色集": [{"名称": "当期角色"}],
+                             "事件集": [{"名称": name} for name in
+                                     ("旧章事件", "当期事件", "跨章事件", "未知章事件")]},
+            })
+    save_json(project / "故事结构_增量.json", story)
+    pipeline.ensure_story(project)
+    return sources, json.loads((project / "故事结构_增量.json").read_text(encoding="utf-8"))
+
+
+def _embedded_audit_records(pack, heading):
+    """Decode the actual JSON supplied to generation, rather than match markers."""
+    import re
+    text = pack.read_text(encoding="utf-8")
+    match = re.search(re.escape(heading) + r"\s*\x60{3}json\s*\n(.*?)\n\x60{3}", text, re.S)
+    return json.loads(match[1]) if match else None
+
+
+def test_audit_fallback_embeds_complete_host_scoped_events_before_bare_index(tmp_path):
+    """A large related role must not discard affordable current event records."""
+    sources, current = _cycle_event_project(tmp_path)
+    source_bytes = {seq: path.read_bytes() for seq, path in sources.items()}
+    story_before = (tmp_path / "故事结构_增量.json").read_bytes()
+
+    pack = pipeline.write_audit_pack(tmp_path, 6, 7)
+    assert pack is not None
+    supplied = _embedded_audit_records(pack, "## 本周期相关老元素详情")
+    assert supplied == {"事件集": [current["事件集"][index] for index in (1, 2, 3)]}
+    assert pipeline.audit_status(tmp_path, 6, 7)["context"]["render_mode"] == "story_index_events"
+    assert inspect_pack(pack)["passed"] is True
+    assert (tmp_path / "故事结构_增量.json").read_bytes() == story_before
+    text = pack.read_text(encoding="utf-8")
+    for seq in (6, 7):
+        assert text.count(sources[seq].read_text(encoding="utf-8")) == 1
+    assert sources[1].read_text(encoding="utf-8") not in text
+    assert {seq: path.read_bytes() for seq, path in sources.items()} == source_bytes
+
+
+def test_audit_event_fallback_keeps_bare_index_when_complete_events_exceed_budget(tmp_path):
+    """The new tier must never truncate an oversized event to force admission."""
+    sources, current = _cycle_event_project(tmp_path, oversized_event=True)
+    with capacity_scope(dict(model_input_tokens=30000, model_output_tokens=1000,
+                             model_context_tokens=35000, model_reserve_tokens=1000)):
+        pack = pipeline.write_audit_pack(tmp_path, 6, 7)
+        assert pack is not None and inspect_pack(pack)["passed"] is True
+    assert pipeline.audit_status(tmp_path, 6, 7)["context"]["render_mode"] == "story_index"
+    assert _embedded_audit_records(pack, "## 本周期相关老元素详情") is None
+    assert json.loads((tmp_path / "故事结构_增量.json").read_text(encoding="utf-8")) == current
+    text = pack.read_text(encoding="utf-8")
+    assert all(sources[seq].read_text(encoding="utf-8") in text for seq in (6, 7))
+
+
+@pytest.mark.parametrize("mode", ["full_story", "story_index_relevant"])
+def test_audit_event_fallback_preserves_existing_richer_material_routes(tmp_path, mode):
+    """Affordable full story or complete related records retain their priority."""
+    sources, story = _cycle_event_project(tmp_path)
+    story["角色集"][0]["介绍"] = "相关角色完整介绍"
+    if mode == "story_index_relevant":
+        story["其他事项集"] = [{"名称": "范围外大型档案", "介绍": "历史背景" * 50000}]
+    save_json(tmp_path / "故事结构_增量.json", story)
+    pipeline.ensure_story(tmp_path)
+    canonical = json.loads((tmp_path / "故事结构_增量.json").read_text(encoding="utf-8"))
+
+    pack = pipeline.write_audit_pack(tmp_path, 6, 7)
+    assert pack is not None
+    assert pipeline.audit_status(tmp_path, 6, 7)["context"]["render_mode"] == mode
+    if mode == "full_story":
+        assert _embedded_audit_records(pack, "## 完整故事结构") == canonical
+    else:
+        supplied = _embedded_audit_records(pack, "## 本周期相关老元素详情")
+        assert supplied["角色集"] == canonical["角色集"]
+        # The unchanged rich tier includes all explicitly related history.
+        assert supplied["事件集"] == [canonical["事件集"][index] for index in (0, 1, 2, 4)]
+    assert all(sources[seq].read_text(encoding="utf-8") in pack.read_text(encoding="utf-8") for seq in (6, 7))

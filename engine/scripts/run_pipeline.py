@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from chronology import chapter_time
+from chronology import chapter_time, parse_involved_chapters
 from engine_contract import contract_version
 from governance_contract import normalize_governance_patch, periodic_introduction_errors, governance_quality_errors
 from generation_contract import chapter_quality_errors, generation_scope_errors
@@ -134,7 +134,7 @@ if DEFAULT_WORKER_LOOP not in WORKER_LOOPS:
 # 字符预算而不伪造精确 token 计数。默认 524288 = 512×1024，对应 512K 字符预算，
 # 适配长上下文模型；调用方可按实际模型覆盖。
 DEFAULT_AUDIT_MAX_CONTEXT_CHARS = 524_288
-AUDIT_CONTEXT_FORMAT_VERSION = 5
+AUDIT_CONTEXT_FORMAT_VERSION = 6
 AUDIT_RESOLVED_STATUSES = {"committed", "covered_by_children"}
 
 
@@ -2075,19 +2075,35 @@ def write_audit_pack(
         for ch in chapters
     )
 
+    # Delta routing may mention old events. The intermediate tier therefore
+    # uses host-owned chapter provenance; spanning events remain whole and
+    # unknown/out-of-range events stay addressable through the frozen archive.
+    cycle_events = [
+        event for event in story_data.get("事件集", []) or []
+        if isinstance(event, dict) and isinstance(event.get("详情"), dict)
+        and any(start <= seq <= end
+                for seq in parse_involved_chapters(event["详情"].get("涉及章节")))
+    ]
     mode_contexts = {
         "full_story": (full_story_json, "", ""),
         "story_index": ("", story_index, ""),
         "story_index_relevant": ("", story_index, relevant_details),
+        "story_index_events": ("", story_index, json.dumps(
+            {"事件集": cycle_events}, ensure_ascii=False, indent=2)),
     }
     # Index tiers otherwise carry only the title, making synopsis updates blind
     # to the existing description. Include it in the normal capacity accounting.
     intro_context = "\n## 当前故事简介（需核对的旧版，不是原文证据）\n" + json.dumps(
         story_data.get("介绍", {}), ensure_ascii=False)
-    for mode in ("story_index", "story_index_relevant"):
+    for mode in ("story_index", "story_index_relevant", "story_index_events"):
         full, index, details = mode_contexts[mode]
         mode_contexts[mode] = (full, index + intro_context, details)
-    fallback_modes = ["full_story", "story_index_relevant", "story_index"]
+    # Reuse otherwise idle capacity for complete current events before asking
+    # the model to retrieve them. The same whole-pack budget gate still applies.
+    fallback_modes = ["full_story", "story_index_relevant"]
+    if cycle_events:
+        fallback_modes.append("story_index_events")
+    fallback_modes.append("story_index")
     attempts: List[Dict[str, Any]] = []
     selected_content = ""
     selected_mode = ""
