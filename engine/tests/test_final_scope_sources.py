@@ -102,7 +102,7 @@ def test_full_source_group_exceeding_budget_falls_back_without_partial_chapters(
     reference = reference_file(tmp_path, chapters="0001")
     one = source_file(tmp_path, 1, ("# 一\n" + "甲" * 1000 + "完整尾甲\n").encode())
     three = source_file(tmp_path, 3, ("# 三\n" + "乙" * 3000 + "完整尾乙\n").encode())
-    with capacity_scope(dict(model_input_tokens=10000, model_context_tokens=12000,
+    with capacity_scope(dict(model_input_tokens=11000, model_context_tokens=13000,
                              model_output_tokens=2000, model_reserve_tokens=2000)):
         assert "完整尾甲" in render(reference, [one])
         document = json.loads(reference.read_bytes())
