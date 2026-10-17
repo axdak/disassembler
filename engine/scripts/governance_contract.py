@@ -1,7 +1,7 @@
 """Lossless shape corrections for legacy governance output.
 
-Decode containers only where the existing contract requires them. A uniquely
-bound legacy detail-array setter may recover its exact existing string encoding;
+Decode containers and encode known narrative arrays only as the contract requires.
+A uniquely bound legacy detail-array setter may recover its exact string encoding;
 model text/order, evidence and identity are never invented or rewritten.
 """
 from __future__ import annotations
@@ -10,7 +10,8 @@ import copy
 import json
 import re
 
-from story_schema_rules import COLLECTION_KEYS
+from story_schema_rules import (COLLECTION_KEYS, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
+                                DETAIL_REF_ARRAY_KEYS, DETAIL_REF_RE)
 
 
 def periodic_introduction_errors(story, patch):
@@ -49,6 +50,10 @@ def periodic_introduction_errors(story, patch):
 
 def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
     """Return a corrected copy plus an auditable list of mechanical changes."""
+    # These are host-owned evidence records, never narrative wire corrections.
+    from information_preservation import ARCHIVE_FIELD, CORRECTION_FIELD
+    from local_json_patch import FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE
+    protected_detail_fields = {ARCHIVE_FIELD, CORRECTION_FIELD, FIELD_REPAIR_ARCHIVE, REFERENCE_REPAIR_ARCHIVE}
     result = copy.deepcopy(patch)
     changes = []
     if not isinstance(result, dict):
@@ -102,6 +107,16 @@ def normalize_governance_patch(patch, chapter_range: str = "", *, story=None):
                 detail = item.get("详情")
                 if not isinstance(detail, dict):
                     continue
+                for field, value in detail.items():
+                    if (field not in DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS or field in protected_detail_fields
+                            or field in DETAIL_REF_ARRAY_KEYS or field.startswith("关联") or not isinstance(value, list)):
+                        continue
+                    # Only recognize references through the validator's trimmed view;
+                    # json.dumps still receives the exact strings, order and duplicates.
+                    if any(not isinstance(entry, str) or DETAIL_REF_RE.fullmatch(entry.strip()) for entry in value):
+                        continue
+                    detail[field] = json.dumps(value, ensure_ascii=False)
+                    changes.append(f"{section}.{collection}[{item.get('名称')}].详情.{field}：还原JSON字符串数组编码")
                 for field in ("首次章节", "最近章节"):
                     value = detail.get(field)
                     # Only a single explicit sequence is losslessly normalizable.
