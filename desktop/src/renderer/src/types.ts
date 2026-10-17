@@ -75,6 +75,7 @@ export type TaskType =
   | 'finalize'
   | 'normalize'
   | 'repair'
+  | 'format_synopsis'
 
 export type TaskStatus =
   | 'queued'

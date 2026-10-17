@@ -127,7 +127,8 @@ def test_audit_prompt_uses_runtime_synopsis_contract(monkeypatch):
     assert "只修正结构质量问题" not in text
     assert "同时核对事实与结构质量" in text
     assert "不能仅完成标签、分组和引用整理就认为内容已审计" in text
-    assert "`【甲】`、`【乙】`、`【丙】`、`【丁】`" in text
+    assert "`【甲】`、`【乙】`、`【丙】`、`【丁】`" not in text
+    assert "不因缺少分节、标题样式、换行或空行而重写" in text
 
 
 def test_synopsis_change_invalidates_audit_prompt_cache(tmp_path, monkeypatch):

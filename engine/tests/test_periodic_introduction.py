@@ -239,28 +239,19 @@ def test_periodic_prompt_states_the_char_budget():
     assert "每次周期治理都检查" in text and "不足五章的尾段" in text
 
 
-def test_periodic_prompt_requires_structured_sections():
-    """1500 字的简介必须是分节的，而不是一整坨连续长文。
-
-    分节写在提示词里而不是做程序侧硬门禁：篇幅与结构都是软契约
-    （见 test_overlong_synopsis_is_never_a_periodic_failure 的既有模式策略）。
-    """
+def test_periodic_prompt_preserves_accurate_synopsis_regardless_of_layout():
+    """周期模型只处理内容，不因排版触发无意义的全文重写。"""
     text = rendered_periodic_prompt()
-    for heading in synopsis_section_headings():
-        assert heading in text, f"提示词缺少分节标题 {heading}"
-    assert "四个分节必须齐全且顺序固定" in text
-    assert "不得新增、改名、合并或省略" in text
-    assert "节与节之间空一行" in text
-    # 分节标题只做纯文本装饰，不带 Markdown 标记。
-    # 注意不能断言整个提示词里没有 `*`——别的段落仍在用 `**加粗**` 强调。
-    assert not any("*" in heading for heading in synopsis_section_headings())
-    assert "不得写成条目清单" in text
-    # 旧简介未结构化时必须重写——否则模型会以"内容准确"为由永远保留一整段旧简介
-    assert "一律视为需要更新" in text
+    assert "内容准确且无需更新时保留原文" in text
+    assert "排版由最终收尾或独立简介排版功能处理" in text
+    assert "不因缺少分节、标题样式、换行或空行而重写" in text
+    assert "发现事实错误仍须及时纠正" in text
+    assert "四个分节必须齐全且顺序固定" not in text
+    assert "一律视为需要更新" not in text
 
 
-def test_sections_are_single_sourced_into_the_merge_instruction():
-    """归并端必须与生成端共用同一套分节定义，否则冲突归并会把结构弄丢。"""
+def test_merge_instruction_reconciles_content_without_layout_requirements():
+    """分片简介归并也只处理内容，避免隐性恢复强制四节重写。"""
     import governance_introduction
 
     assert SYNOPSIS_SECTIONS == ("主线", "主角处境", "核心冲突", "当前进展")
@@ -268,8 +259,9 @@ def test_sections_are_single_sourced_into_the_merge_instruction():
     spec = synopsis_section_spec()
     for heading in synopsis_section_headings():
         assert heading in spec
-    assert spec in governance_introduction._SECTION_RULE
-    assert "四个分节必须齐全且顺序固定" in governance_introduction._SECTION_RULE
+    assert "排版" in governance_introduction._CONTENT_RULE
+    assert "四个分节必须齐全" not in governance_introduction._CONTENT_RULE
+    assert "不得为排版重写内容" in governance_introduction._CONTENT_RULE
 
 
 def test_chapter_prompt_no_longer_invites_unbounded_synopsis():

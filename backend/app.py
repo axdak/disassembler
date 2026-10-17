@@ -32,7 +32,7 @@ from run_pipeline import run_cmd, script_path
 from task_adapters import (
     AnalysisAdapter, AppendChaptersTaskAdapter, ChapterAnalysisRerunAdapter,
     ChapterDeltaRerunAdapter, ChapterStructureAdapter, ChapterVisualAdapter,
-    ExportAdapter, FinalizeAdapter, GovernanceTaskAdapter,
+    ExportAdapter, FinalizeAdapter, FormatSynopsisAdapter, GovernanceTaskAdapter,
     MigrateChronologyAdapter, NormalizeAdapter, RecoverStoryAdapter,
     RepairAdapter, list_recover_snapshots,
 )
@@ -153,6 +153,7 @@ def create_app(
             "finalize": FinalizeAdapter(),
             "normalize": NormalizeAdapter(),
             "repair": RepairAdapter(),
+            "format_synopsis": FormatSynopsisAdapter(),
         }
     else:
         default_adapters = dict(task_adapters)

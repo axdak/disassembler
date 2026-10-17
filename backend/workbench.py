@@ -33,6 +33,7 @@ WRITER_TASK_TYPES = frozenset({
     "finalize",
     "normalize",
     "repair",
+    "format_synopsis",
 })
 TERMINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled", "interrupted"})
 

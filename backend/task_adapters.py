@@ -1300,6 +1300,31 @@ class AppendChaptersTaskAdapter:
         )
 
 
+class FormatSynopsisAdapter:
+    """生成当前权威简介的排版文本副本；不修改故事、回执或调用模型。"""
+
+    @_serialized_maintenance
+    def run(self, context: TaskContext, prepared_input: object = None) -> dict:
+        from story_source import select_analysis_story_source
+        from synopsis_formatting import format_synopsis_text
+
+        project = Path(context.project_path)
+        source, raw, reason = select_analysis_story_source(project)
+        story = json.loads(raw) if raw else {}
+        intro = story.get("介绍") if isinstance(story, dict) else None
+        description = intro.get("描述") if isinstance(intro, dict) else None
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError("尚无可排版的有效简介，请先完成简介内容。")
+        context.progress(30, "整理简介标题、段落和空行")
+        output = project / "质量治理" / "简介排版" / "简介.txt"
+        atomic_write_bytes(output, (format_synopsis_text(description) + "\n").encode("utf-8"))
+        context.progress(100, "简介排版完成，可打开文本")
+        return _result_json(
+            artifacts=[str(output)], manifest={"source": str(source), "source_reason": reason},
+            manifest_path="", logs=[], revision=project_revisions(project), task="format_synopsis",
+        )
+
+
 # === FinalizeAdapter (writer, worker-backed) ===============================
 
 class FinalizeAdapter:

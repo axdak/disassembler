@@ -436,31 +436,33 @@ describe('workbench seven-tab UI', () => {
     expect(screen.getByText('worker 日志内容')).toBeInTheDocument()
   })
 
-  it('maintenance tab: recover apply + 4 direct-submit actions', async () => {
+  it('maintenance tab: recover apply + 5 direct-submit actions', async () => {
     await selectProject()
     goTab('维护')
-    // Five action labels render (快照恢复 is the section heading; the other
-    // four are direct-submit buttons).
+    // Snapshot recovery and independent local maintenance actions stay available.
     expect(screen.getByText('快照恢复')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '时间线迁移' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '重新收尾' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '归一化故事结构' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '修复 Delta' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '简介排版' })).toBeInTheDocument()
     // Snapshot preview list loaded via recoverSnapshots.
     await waitFor(() => expect(fake.calls.recoverSnapshots).toBe(1))
     // Select a snapshot + apply → recover_story task with snapshot_seq.
     fireEvent.change(screen.getByLabelText('快照选择'), { target: { value: '120' } })
     fireEvent.click(screen.getByRole('button', { name: '应用恢复' }))
-    // Four direct-submit actions.
+    // Formatting enqueues a separate task and never starts finalization.
     fireEvent.click(screen.getByRole('button', { name: '时间线迁移' }))
     fireEvent.click(screen.getByRole('button', { name: '重新收尾' }))
     fireEvent.click(screen.getByRole('button', { name: '归一化故事结构' }))
     fireEvent.click(screen.getByRole('button', { name: '修复 Delta' }))
-    await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(5))
+    fireEvent.click(screen.getByRole('button', { name: '简介排版' }))
+    await waitFor(() => expect(fake.calls.tasksCreate).toHaveLength(6))
     expect(fake.calls.tasksCreate[0]).toEqual({ type: 'recover_story', params: { snapshot_seq: 120 } })
     expect(fake.calls.tasksCreate[1]).toEqual({ type: 'migrate_chronology', params: {} })
     expect(fake.calls.tasksCreate[2]).toEqual({ type: 'finalize', params: {} })
     expect(fake.calls.tasksCreate[3]).toEqual({ type: 'normalize', params: {} })
     expect(fake.calls.tasksCreate[4]).toEqual({ type: 'repair', params: { chapters: 'all' } })
+    expect(fake.calls.tasksCreate[5]).toEqual({ type: 'format_synopsis', params: {} })
   })
 })

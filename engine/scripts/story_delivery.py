@@ -17,6 +17,7 @@ from fault_recovery import digest
 from merge_delta import save_json
 from repair_budget import REPAIR_EXHAUSTED
 from project_lock import project_write_lock
+from synopsis_formatting import format_delivery_synopsis
 from worker_checkpoint import atomic_write_bytes
 
 
@@ -185,9 +186,14 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
     from run_pipeline import cmd_commit_final_draft, run_repair_worker
     commit = commit or cmd_commit_final_draft
     repair_worker = repair_worker or run_repair_worker
+
+    def finish_layout():
+        """内容验收成功后只做本地排版，并再次通过原严格校验再交付。"""
+        return commit(project) if format_delivery_synopsis(project) else 0
+
     rc = commit(project)
     if rc == 0:
-        return 0
+        return finish_layout()
     if not repair.is_file():
         return 1
     if not command:
@@ -224,7 +230,8 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
             return rc
         # 兼容不可读取的旧错误：修复入口自行报告失败，不能在这里编造补齐范围。
         if not fields:
-            return commit(project) if draft.is_file() else 0
+            rc = commit(project) if draft.is_file() else 0
+            return finish_layout() if rc == 0 and draft.is_file() else rc
         if not draft.is_file():
             return 1
         if draft.read_bytes() == before:
@@ -236,7 +243,7 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
             publication_confirmed = True
             rc = commit(project)
             if rc == 0:
-                return 0
+                return finish_layout()
             fields = all_scope()
             if not fields:
                 return rc
@@ -244,7 +251,7 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
         completed_batches += 1
         rc = commit(project)
         if rc == 0:
-            return 0
+            return finish_layout()
         fields = all_scope()
         if not fields:
             return rc

@@ -1,16 +1,19 @@
 // MaintenanceTab — 维护
 //
-// Snapshot recovery (preview list + apply) and four direct-submit writer
+// Snapshot recovery (preview list + apply) and direct-submit maintenance
 // actions: chronology migration, on-demand finalization, normalize, and delta
-// repair. All actions enqueue workbench writer tasks via onCreateTask; the
+// repair, plus a local synopsis-formatting preview. Actions use onCreateTask; the
 // backend enforces the writer mutex and the rollback path on failure.
 import { useState } from 'react'
 import type { WorkbenchTask, RecoverSnapshot, TaskType } from '../types'
 import { TaskStatus } from './TaskStatus'
 
 const MAINTENANCE_TYPES: TaskType[] = [
-  'recover_story', 'migrate_chronology', 'finalize', 'normalize', 'repair',
+  'recover_story', 'migrate_chronology', 'finalize', 'normalize', 'repair', 'format_synopsis',
 ]
+
+// Show the new action's user-facing label in queue feedback and task history.
+const taskLabel = (type: TaskType) => type === 'format_synopsis' ? '简介排版' : type
 
 export function MaintenanceTab({
   tasks,
@@ -36,7 +39,7 @@ export function MaintenanceTab({
   async function submit(type: TaskType, params: Record<string, unknown> = {}) {
     try {
       await onCreateTask(type, params)
-      setMsg(`已排队：${type}`)
+      setMsg(`已排队：${taskLabel(type)}`)
       if (type === 'recover_story') onRefreshSnapshots()
     } catch (e: any) {
       setMsg(String(e))
@@ -83,9 +86,13 @@ export function MaintenanceTab({
         <button onClick={() => submit('finalize')}>重新收尾</button>
         <button onClick={() => submit('normalize')}>归一化故事结构</button>
         <button onClick={() => submit('repair', { chapters: 'all' })}>修复 Delta</button>
+        <button onClick={() => submit('format_synopsis')}>简介排版</button>
       </div>
       <p style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
         迁移/收尾/归一化/修复均为写者任务，按项目写者互斥串行执行。
+      </p>
+      <p style={{ fontSize: 12, color: '#888', marginTop: 6 }}>
+        简介排版只整理已有标题、段落和空行，生成文本供查看，不改写故事内容；最终收尾会自动整理交付简介。
       </p>
 
       {msg && <div style={{ marginTop: 12, color: '#444', fontSize: 13 }}>{msg}</div>}
@@ -111,7 +118,7 @@ export function MaintenanceTab({
               return (
                 <tr key={t.id}>
                   <td>{t.id}</td>
-                  <td>{t.task_type}</td>
+                  <td>{taskLabel(t.task_type)}</td>
                   <td style={{ textAlign: 'center' }}><TaskStatus status={t.status} error={t.error} /></td>
                   <td style={{ fontSize: 12, color: t.error ? 'crimson' : '#666' }}>
                     {t.error ?? (Object.keys(t.params ?? {}).length ? JSON.stringify(t.params) : '-')}

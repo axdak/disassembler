@@ -29,6 +29,7 @@ TaskType = Literal[
     "finalize",
     "normalize",
     "repair",
+    "format_synopsis",
 ]
 
 
