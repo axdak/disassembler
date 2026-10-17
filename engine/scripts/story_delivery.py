@@ -204,7 +204,9 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
     fields = all_scope()
     # 字段数给出有限上界；重试不扩成全书重写，也不能用部分修好替代最终通过。
     batch_count = (len(fields) + FINAL_REPAIR_BATCH_FIELDS - 1) // FINAL_REPAIR_BATCH_FIELDS if fields else 1
-    for _ in range(batch_count):
+    completed_batches = 0
+    publication_confirmed = False
+    while completed_batches < batch_count:
         before = draft.read_bytes() if draft.is_file() else b""
         if fields:
             binding = {"本批候选摘要": hashlib.sha256(before).hexdigest(),
@@ -223,8 +225,23 @@ def commit_delivery(project: Path, command: str, *, timeout=1200, retries=0,
         # 兼容不可读取的旧错误：修复入口自行报告失败，不能在这里编造补齐范围。
         if not fields:
             return commit(project) if draft.is_file() else 0
-        if not draft.is_file() or draft.read_bytes() == before:
+        if not draft.is_file():
             return 1
+        if draft.read_bytes() == before:
+            # 原生 publishing 续接可只确认上一批已替换的草稿，不再次生成字段。
+            # 仅容许一次零字节变化的发布确认；它不占成功批数，也不刷新失败预算。
+            # 下一轮按严格验收后的真实剩余范围继续，再次无进展仍立即拒绝。
+            if publication_confirmed:
+                return 1
+            publication_confirmed = True
+            rc = commit(project)
+            if rc == 0:
+                return 0
+            fields = all_scope()
+            if not fields:
+                return rc
+            continue
+        completed_batches += 1
         rc = commit(project)
         if rc == 0:
             return 0
