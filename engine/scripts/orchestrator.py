@@ -574,36 +574,22 @@ class Orchestrator:
             reduce_pack, target_outputs, **wk,
         )
 
-    def _stage_final_pack(self) -> int:
-        # 收尾只验前置凭据并准备草稿，不补跑周期、不生成简介。
-        from delivery_gate import check_delivery_prerequisites
-        from story_delivery import prepare_delivery
-        rc = check_delivery_prerequisites(self.project_dir, end_chapter_seq=self.config.end_chapter_seq)
-        if rc != 0:
-            return rc
-        return prepare_delivery(self.project_dir)
-
-    def _stage_commit_final_draft(self) -> int:
-        """自动收尾只做本地严格验收与排版，内容错误不在这里补写。"""
-        from delivery_gate import check_delivery_prerequisites
-        rc = check_delivery_prerequisites(self.project_dir, end_chapter_seq=self.config.end_chapter_seq)
-        if rc:
-            return rc
-        from story_delivery import commit_delivery
-        return commit_delivery(
-            self.project_dir, "", commit=cmd_commit_final_draft,
+    def _run_delivery_step(self, stage: str) -> int:
+        """只转交统一交付步骤；断点保存、阶段重试和内容交接仍由编排器负责。"""
+        from delivery_workflow import run_delivery_stage
+        return run_delivery_stage(
+            self.project_dir, stage, end_chapter_seq=self.config.end_chapter_seq,
+            commit=cmd_commit_final_draft, publish=cmd_finalize,
         )
 
+    def _stage_final_pack(self) -> int:
+        return self._run_delivery_step("final_pack")
+
+    def _stage_commit_final_draft(self) -> int:
+        return self._run_delivery_step("commit_final_draft")
+
     def _stage_finalize(self) -> int:
-        # 旧版本/崩溃后可能直接续接到发布阶段，仍须执行相同前置门禁。
-        from delivery_gate import check_delivery_prerequisites, report_delivery_quality
-        rc = check_delivery_prerequisites(self.project_dir, end_chapter_seq=self.config.end_chapter_seq)
-        if rc:
-            return rc
-        rc = report_delivery_quality(self.project_dir)
-        if rc:
-            return rc
-        return cmd_finalize(self.project_dir)
+        return self._run_delivery_step("finalize")
 
     def _stage_export(self) -> int:
         out = self.project_dir / "导出" / "obsidian-vault"

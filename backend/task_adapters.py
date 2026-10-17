@@ -45,7 +45,6 @@ from run_pipeline import (  # noqa: E402
     builtin_agent_worker_command,
     cmd_commit_final_draft,
     cmd_finalize,
-    cmd_validate_final,
     commit_governance,
     copy_analysis_task_packages,
     latest_analysis_manifest,
@@ -1325,10 +1324,10 @@ class FormatSynopsisAdapter:
         )
 
 
-# === FinalizeAdapter (writer, worker-backed) ===============================
+# === FinalizeAdapter (writer, shared delivery workflow) ====================
 
 class FinalizeAdapter:
-    """本地收尾：凭据检查、草稿准备、严格验收、排版、发布。
+    """工作台交付适配器：解析参数、调用统一流程、转换任务结果。
 
     repair_history 是用户显式选择的历史维护动作；只有该动作能调用原有模型
     补齐闭环。项目写者锁由工作台持有，默认收尾与自动编排遵守相同边界。
@@ -1359,48 +1358,20 @@ class FinalizeAdapter:
             if provider and provider != "manual":
                 worker_command = builtin_agent_worker_command(provider)
 
-        from delivery_gate import check_delivery_prerequisites, DeliveryBlocked
-        from story_delivery import prepare_delivery, finish_introduction
-        # 内容前置未完成时返回具体责任报告；手动收尾不会偷偷补跑周期。
-        rc = check_delivery_prerequisites(project_dir)
-        if rc != 0:
-            raise DeliveryBlocked(project_dir, rc)
-        context.progress(10, "准备正式故事交付")
-        rc = prepare_delivery(project_dir)
-        if rc != 0:
-            raise RuntimeError(f"final_pack 失败 rc={rc}")
-        if repair_history:
-            context.progress(30, "显式维护：补齐历史简介与缺项")
-            rc = finish_introduction(project_dir, worker_command, run_worker,
-                                     timeout=worker_timeout, retries=worker_retries,
-                                     worker_window=worker_window)
-            if rc != 0:
-                raise RuntimeError(f"历史简介补齐未完成 rc={rc}；断点已保留")
-
-        context.progress(60, "commit final draft")
-        from story_delivery import commit_delivery
-        rc = commit_delivery(
-            project_dir, worker_command, timeout=worker_timeout, retries=worker_retries,
+        from delivery_gate import CONTENT_PENDING, QUALITY_PENDING, DeliveryBlocked
+        from delivery_workflow import run_delivery
+        rc = run_delivery(
+            project_dir, command=worker_command, timeout=worker_timeout, retries=worker_retries,
             worker_window=worker_window, repair_limit=max_repair_rounds,
-            observe=lambda detail, data: context.progress(65, detail),
-            commit=cmd_commit_final_draft, repair_worker=run_repair_worker,
+            commit=cmd_commit_final_draft, publish=cmd_finalize,
+            worker=run_worker, repair_worker=run_repair_worker, progress=context.progress,
             repair_history=repair_history,
         )
         if rc != 0:
-            if not repair_history:
+            if rc in {CONTENT_PENDING, QUALITY_PENDING}:
                 raise DeliveryBlocked(project_dir, rc)
-            raise RuntimeError(f"repair_final 自动故障处理未完成 rc={rc}；诊断与断点已保留")
-
-        context.progress(80, "validate final")
-        rc = cmd_validate_final(project_dir)
-        if rc != 0:
-            raise RuntimeError(f"validate_final 失败 rc={rc}")
-        context.progress(95, "finalize")
-        rc = cmd_finalize(project_dir)
-        if rc != 0:
-            raise RuntimeError(f"finalize 失败 rc={rc}")
+            raise RuntimeError(f"正式交付未完成 rc={rc}；诊断与断点已保留")
         final = project_dir / "故事结构.json"
-        context.progress(100, "finalize complete")
         return _result_json(
             artifacts=[str(final)],
             manifest={"final": str(final)},

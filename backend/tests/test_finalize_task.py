@@ -228,3 +228,65 @@ def test_default_finalization_never_calls_model_even_with_configured_provider(tm
         FinalizeAdapter().run(_make_context(project, {}))
     assert Path(failure.value.result["report"]).is_file()
     assert not (project / "故事结构.json").exists()
+
+
+@pytest.mark.parametrize("failure_at", [2, 3])
+def test_manual_finalization_rechecks_content_before_later_steps(tmp_path, monkeypatch, failure_at):
+    """手动入口同样可在验收/发布前发现前置内容失效，不能只检查开头一次。"""
+    import delivery_gate
+    project = _seed_project(tmp_path)
+    checks = []
+    def gate(*args, **kwargs):
+        checks.append(True)
+        return 68 if len(checks) == failure_at else 0
+    monkeypatch.setattr(delivery_gate, "check_delivery_prerequisites", gate)
+    with pytest.raises(RuntimeError, match="rc=68"):
+        FinalizeAdapter().run(_make_context(project, {}))
+    assert len(checks) == failure_at
+    assert not (project / "故事结构.json").exists()
+
+
+def test_manual_and_automatic_delivery_have_same_actions_and_output(tmp_path, monkeypatch):
+    """走真实草稿、校验与发布函数，对比两个入口的调用路线及最终 JSON。"""
+    import delivery_gate
+    import orchestrator
+    import task_adapters
+    from pipeline_state import STAGES
+    operations = []
+    def wrap(name, function):
+        def observe(*args, **kwargs):
+            operations.append(name)
+            return function(*args, **kwargs)
+        return observe
+    monkeypatch.setattr(delivery_gate, "check_delivery_prerequisites", lambda *a, **k: operations.append("gate") or 0)
+    monkeypatch.setattr(story_delivery, "prepare_delivery", wrap("prepare", story_delivery.prepare_delivery))
+    monkeypatch.setattr(story_delivery, "commit_delivery", wrap("commit", story_delivery.commit_delivery))
+    monkeypatch.setattr(delivery_gate, "report_delivery_quality", wrap("quality", delivery_gate.report_delivery_quality))
+    publish = wrap("publish", task_adapters.cmd_finalize)
+    monkeypatch.setattr(task_adapters, "cmd_finalize", publish)
+    monkeypatch.setattr(orchestrator, "cmd_finalize", publish)
+    manual = _seed_project(tmp_path / "manual")
+    automatic = _seed_project(tmp_path / "automatic")
+    FinalizeAdapter().run(_make_context(manual, {}))
+    manual_operations = list(operations)
+    operations.clear()
+    runner = orchestrator.Orchestrator(automatic)
+    for stage in STAGES[2:5]:
+        assert runner._dispatch(stage) == 0
+    assert operations == manual_operations
+    assert json.loads((manual / "故事结构.json").read_bytes()) == json.loads((automatic / "故事结构.json").read_bytes())
+
+
+def test_explicit_history_maintenance_generates_missing_intro_and_publishes(tmp_path):
+    """真实共享流程驱动本地假 worker，保留简介生成、凭据与严格发布的接线。"""
+    project = _seed_project(tmp_path, INVALID_FOR_STRICT_STORY)
+    worker = tmp_path / "history_worker.py"
+    _write_finalize_worker(worker)
+    result = FinalizeAdapter().run(_make_context(project, {
+        "worker_command": f'"{sys.executable}" "{worker}"', "repair_history": True,
+    }))
+    final = json.loads((project / "故事结构.json").read_bytes())
+    assert final["介绍"] == {"标题": "测试故事", "描述": "正式简介"}
+    assert result["task"] == "finalize"
+    receipt = project / "质量治理/最终审计/交付/introduction.json"
+    assert json.loads(receipt.read_bytes())["introduction"] == final["介绍"]

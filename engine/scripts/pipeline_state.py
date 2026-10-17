@@ -15,14 +15,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from delivery_workflow import DELIVERY_STAGES
+
 # 全流程阶段顺序。项目初始化与拆章（init-dirs/split）由桌面端“接管/新建”负责，
 # 编排器从 chapter_analysis 起跑。
 STAGES = [
     "chapter_analysis",
     "chapter_delta",
-    "final_pack",
-    "commit_final_draft",
-    "finalize",
+    *DELIVERY_STAGES,
     "chapter_structure",
     "visual_assets",
     "fullbook_analysis",
