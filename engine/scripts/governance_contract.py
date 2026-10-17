@@ -373,6 +373,10 @@ def governance_quality_errors(before, after, patch):
                 old_value, new_value = old.get(field), new.get(field)
                 if kind == "scalar":
                     old_identity = reference_identity(target, old_value)
+                    # 显式合并可能将旧父级折叠成自身；它已是无效自环，不是需保留的上级。
+                    if (field in {"父级地点", "父级阵营"}
+                            and old_identity == reference_identity(collection, name)):
+                        old_identity = None
                     missing = old_identity is not None and old_identity != reference_identity(target, new_value)
                 else:
                     old_refs = old_value if isinstance(old_value, list) else []

@@ -25,7 +25,7 @@ from typing import Callable, Iterable
 
 from coerce_delta import relocate_element_fields
 from registered_types import align_registered_types, align_preserved_moves, align_preserved_additions
-from merge_delta import save_json
+from merge_delta import DELTA_ONLY_DETAIL_FIELDS, save_json
 from repair_budget import REPAIR_EXHAUSTED
 from recovery_contract import CONTRACT_INVALID, RECOVERY_SCHEMAS, REVIEW_CHECKS, recovery_output_errors
 from recovery_materials import RecoveryMaterials, read_material_document, rebase_material_paths, write_change_index
@@ -413,6 +413,15 @@ non-heading content line. Semantic correctness still needs evidence-based review
     metadata = editable_metadata_paths or set()
 
     def visit(a, b, path, pointer=""):
+        # Delta 的提取理由是本次提交说明；旧稿由冻结原件保留，不强迫修正说明包含旧误。
+        # 仅放行正式集合记录的非空说明，叙事字段、正式故事和其他路径仍按原规则保全。
+        if pointer.endswith("/提取理由"):
+            parts = pointer.split("/")
+            if (len(parts) == 6 and parts[1] in {"新增元素", "修改元素"}
+                    and parts[2] in COLLECTION_KEYS and parts[3].isdigit()
+                    and parts[4] == "详情" and parts[5] in DELTA_ONLY_DETAIL_FIELDS
+                    and isinstance(b, str) and b.strip()):
+                return
         # 仅宿主错误指针已授权的来源元数据可替换。错误引文不属于既有档案事实，
         # 要求新值包含旧错误会阻断真实原文纠正；仍保留完整结构、原文核验和复核。
         # Only the final owner may replace the exact root introduction field
